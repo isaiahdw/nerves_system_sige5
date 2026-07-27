@@ -1,0 +1,18 @@
+# Licensing map
+
+This repository combines content under several licenses. The full license
+texts are in LICENSES/.
+
+| Content | License |
+| --- | --- |
+| Build configuration, fwup configs, scripts, docs (this project's own files) | GPL-2.0-or-later |
+| `linux/0001-*.patch` (Linux kernel device-tree patch) | GPL-2.0-only (kernel license) |
+| `uboot/u-boot-rockchip.bin` (committed binary) | GPL-2.0-or-later (U-Boot v2026.01; corresponding source: https://source.denx.de/u-boot/u-boot, build recipe in `scripts/build-uboot.sh`) + Rockchip proprietary blobs (RK3576 DDR init, BL31 from rockchip-linux/rkbin — LICENSES/LICENSE.rockchip-rkbin, redistributable on Rockchip SoCs) |
+| `uboot/rk3576_spl_loader_v1.09.108.bin` (committed binary) | Rockchip proprietary (rkbin components — LICENSES/LICENSE.rockchip-rkbin) |
+| `package/libmali/include/*` (Khronos headers) | Khronos/MIT-style, see file headers |
+
+Downloaded at build time (not in this repository): Broadcom/Synaptics
+WiFi firmware (linux-firmware, proprietary-redistributable), the Linux
+kernel (GPL-2.0-only), Buildroot packages (various). Built firmware images
+therefore contain proprietary firmware alongside GPL components, as is
+usual for embedded Linux board support.

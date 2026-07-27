@@ -1,0 +1,31 @@
+From: Isaiah <isaiahdw@gmail.com>
+Subject: [PATCH] dts: rk3576-armsom-sige5: Nerves fixups (mmc aliases, watchdog)
+
+Two board-dts changes the Nerves system needs:
+
+1. Mainline defines no mmc aliases for this board, so mmcblk numbering
+   depends on probe order. Pin the eMMC (the system disk) to mmcblk0
+   and the microSD to mmcblk1 so fw_env.config, the erlinit mounts,
+   and the fwup devpaths are deterministic.
+
+2. The wdt node is status = "disabled" in rk3576.dtsi and nothing
+   enables it. Nerves arms the hardware watchdog through Erlang's
+   heart (nerves_heart on /dev/watchdog0 with WATCHDOG_NOWAYOUT).
+
+--- a/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
++++ b/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
+@@ -1039,3 +1039,14 @@
+ 		remote-endpoint = <&hdmi_in_vp0>;
+ 	};
+ };
++
++/ {
++	aliases {
++		mmc0 = &sdhci;
++		mmc1 = &sdmmc;
++	};
++};
++
++&wdt {
++	status = "okay";
++};

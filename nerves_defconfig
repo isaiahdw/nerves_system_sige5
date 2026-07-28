@@ -66,13 +66,13 @@ BR2_PACKAGE_HOST_UBOOT_TOOLS_ENVIMAGE_SIZE="131072"
 BR2_NERVES_SYSTEM_NAME="nerves_system_sige5"
 BR2_NERVES_ADDITIONAL_IMAGE_FILES="${NERVES_DEFCONFIG_DIR}/fwup.conf ${NERVES_DEFCONFIG_DIR}/extlinux-a.conf ${NERVES_DEFCONFIG_DIR}/extlinux-b.conf ${NERVES_DEFCONFIG_DIR}/uboot/u-boot-rockchip.bin"
 BR2_PACKAGE_NBTTY=y
-# Onboard WiFi (board v1.2+): Synaptics SYN43752 (BCM43752) on SDIO,
-# driven by the in-kernel brcmfmac. linux-firmware provides
-# brcmfmac43752-sdio firmware/CLM; a board NVRAM may be needed (verify
-# on hardware). v1.0/1.1 boards have an RTL8852BS with no mainline
-# driver. Bluetooth (uart4 serdev) is not brought up.
-BR2_PACKAGE_LINUX_FIRMWARE=y
-BR2_PACKAGE_LINUX_FIRMWARE_BRCM_BCM43XXX=y
+# Onboard WiFi (board v1.2+): Synaptics SYN43752 (BCM43752/AP6275S) on
+# SDIO, driven by the in-kernel brcmfmac. The firmware, CLM blob and
+# NVRAM are not in upstream linux-firmware; package/brcmfmac43752-firmware
+# installs them from the Armbian firmware collection. v1.0/1.1 boards
+# have an RTL8852BS with no mainline driver. Bluetooth (uart4 serdev)
+# is not brought up.
+BR2_PACKAGE_BRCMFMAC43752_FIRMWARE=y
 BR2_PACKAGE_NERVES_CONFIG=y
 BR2_PACKAGE_NERVES_CONFIG_ACCEPT_RNG_NOTICE=y
 # GPU userspace (Mesa panfrost) is not in the image yet: Buildroot

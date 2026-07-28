@@ -1,0 +1,9 @@
+config BR2_PACKAGE_BRCMFMAC43752_FIRMWARE
+	bool "brcmfmac43752-firmware"
+	help
+	  Firmware, CLM blob and NVRAM for the Synaptics (Broadcom)
+	  BCM43752 SDIO WiFi module (AP6275S) used on the ArmSoM Sige5
+	  v1.2+. Sourced from the Armbian firmware collection; this chip
+	  is not covered by upstream linux-firmware.
+
+	  https://github.com/armbian/firmware

@@ -13,7 +13,7 @@ Derived from the
 [nerves_system_rock_4d](https://github.com/isaiahdw/nerves_system_rock_4d)
 mainline branch (same SoC). Verified on a Sige5 v1.2 board: eMMC boot,
 OTA updates with validation, both network interfaces, onboard WiFi, GPU,
-watchdog, RTC, and audio devices.
+NPU, HDMI console, watchdog, RTC, and audio devices.
 
 ## Boot architecture
 
@@ -50,7 +50,7 @@ Verified on a Sige5 v1.2, 2026-07-27.
 | WiFi (onboard, board v1.2+) | Yes | BCM43752 (AP6275S) on SDIO via in-kernel brcmfmac; firmware from `package/brcmfmac43752-firmware`. Verified connected with DHCP. v1.0/1.1 boards (RTL8852BS) have no mainline driver |
 | microSD boot | Untested | Boot ROM path; the same image should work for bring-up/recovery |
 | Bluetooth | No | uart4 is deliberately disabled in the mainline dts; needs a serdev node + bring-up |
-| HDMI display + console | Partial | VOP + dw-hdmi-qp bound, framebuffer console enabled; output not yet tested on a display |
+| HDMI display + console | Yes | VOP + dw-hdmi-qp, framebuffer console verified on a display. No GL/EGL userspace yet (see GPU row) |
 | GPU (Mali G52 MC3) | Partial | Kernel panfrost driver probes; no Mesa userspace yet (Buildroot's panfrost requires LLVM) |
 | M.2 NVMe (PCIe 2.1) | Untested | pcie0 + NVMe drivers built in; no drive was fitted during bring-up |
 | USB | Yes | 2x Type-C (one PD power input only, one USB 2.0 OTG/maskrom) + USB3 host; onboard hub enumerates |
@@ -112,11 +112,11 @@ the inactive slot only and revert automatically unless validated.
 ## Kernel
 
 Mainline LTS from kernel.org (6.18.40) with the upstream
-`rk3576-armsom-sige5` device tree. One board patch (`linux/0001`): pin
-the mmc aliases (eMMC = `/dev/mmcblk0`, SD = `/dev/mmcblk1` — mainline
-defines none, so numbering would follow probe order) and enable the
-watchdog node for `nerves_heart`. Configuration is the arm64 `defconfig`
-plus `linux/nerves.config`, documented inline.
+`rk3576-armsom-sige5` device tree and four patches: board fixups
+(`linux/0001`: mmc aliases so the eMMC is `/dev/mmcblk0`, watchdog
+enable), the vendor RKNPU node (`linux/0002`), and two power-domain
+fixes the NPU needs on mainline (`linux/0003`/`0004`). Configuration is
+the arm64 `defconfig` plus `linux/nerves.config`, documented inline.
 
 ## Debug UART
 

@@ -1,0 +1,53 @@
+#!/bin/sh
+#
+# Grow the app partition (p4) and its filesystem to fill the eMMC.
+#
+# fwup only expands the app partition when it writes to a block device.
+# A maskrom flash (rkdeveloptool) writes a fixed-size image file instead,
+# leaving p4 at image size and the backup GPT in the middle of the disk.
+# This runs from erlinit's --pre-run-exec on every boot. The two steps
+# below are independent and idempotent, so a failure in one boot is
+# retried on the next and a converged disk is a no-op.
+
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+DISK=mmcblk0
+PART=4
+DEV=/dev/${DISK}p${PART}
+
+disk_sectors=$(cat /sys/block/$DISK/size) || exit 0
+part_start=$(cat /sys/block/$DISK/${DISK}p${PART}/start) || exit 0
+part_size=$(cat /sys/block/$DISK/${DISK}p${PART}/size) || exit 0
+
+# Step 1: grow the partition if it doesn't reach the end of the disk.
+# The GPT backup header occupies the last 33 sectors; the slack keeps an
+# expanded disk from ever re-triggering. resizepart (BLKPG) updates the
+# kernel's view even though other partitions on the disk are mounted.
+want=$((disk_sectors - part_start - 40))
+if [ "$part_size" -lt "$want" ]; then
+    echo "expand-app-fs: growing ${DISK}p${PART} from $part_size to ~$want sectors"
+    if fwup -a -q -t expand -d /dev/$DISK -i /usr/share/fwup/ops.fw; then
+        resizepart /dev/$DISK $PART $((disk_sectors - part_start - 33))
+        part_size=$(cat /sys/block/$DISK/${DISK}p${PART}/size)
+    else
+        echo "expand-app-fs: fwup expand failed"
+    fi
+fi
+
+# Step 2: grow the filesystem if it is much smaller than the partition
+# (f2fs overprovisioning makes the reported size a few percent smaller,
+# hence the 90% threshold). resize.f2fs needs the filesystem unmounted;
+# nothing has /root open this early in boot. When p4 isn't mounted at
+# all (first factory boot, unformatted), skip: nerves_runtime formats it
+# at full size.
+if grep -q "^$DEV /root f2fs" /proc/mounts; then
+    set -- $(df -k /root | tail -n 1)
+    fs_kb=$2
+    part_kb=$((part_size / 2))
+    if [ "$fs_kb" -gt 0 ] && [ "$fs_kb" -lt $((part_kb / 10 * 9)) ]; then
+        echo "expand-app-fs: growing f2fs on $DEV ($fs_kb kB fs, $part_kb kB partition)"
+        umount /root && resize.f2fs $DEV
+        mount -t f2fs -o nodev $DEV /root
+    fi
+fi
+exit 0

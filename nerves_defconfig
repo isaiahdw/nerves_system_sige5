@@ -42,6 +42,10 @@ BR2_LINUX_KERNEL_NEEDS_HOST_OPENSSL=y
 BR2_PACKAGE_BUSYBOX_CONFIG="${BR2_EXTERNAL_NERVES_PATH}/board/nerves-common/busybox.config"
 BR2_PACKAGE_BUSYBOX_CONFIG_FRAGMENT_FILES="${NERVES_DEFCONFIG_DIR}/busybox.fragment"
 BR2_PACKAGE_F2FS_TOOLS=y
+# resizepart, used by /usr/sbin/expand-app-fs to grow the app partition
+# on the first boot after a maskrom/image flash.
+BR2_PACKAGE_UTIL_LINUX=y
+BR2_PACKAGE_UTIL_LINUX_PARTX=y
 BR2_PACKAGE_CA_CERTIFICATES=y
 BR2_PACKAGE_DTC=y
 BR2_PACKAGE_LIBMNL=y

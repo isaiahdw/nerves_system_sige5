@@ -9,10 +9,11 @@ USB 3.0, and a 40-pin GPIO header. Built on a mainline LTS kernel
 (6.18.y) and mainline U-Boot. The IEx console is on `ttyS0`, the
 1.5 Mbaud debug UART on header pins 8/10/6.
 
-Status: bring-up. Derived from the hardware-verified
+Derived from the
 [nerves_system_rock_4d](https://github.com/isaiahdw/nerves_system_rock_4d)
-mainline branch (same SoC); Sige5-specific parts are untested until the
-first board boot.
+mainline branch (same SoC). Verified on a Sige5 v1.2 board: eMMC boot,
+OTA updates with validation, both network interfaces, onboard WiFi, GPU,
+watchdog, RTC, and audio devices.
 
 ## Boot architecture
 
@@ -37,23 +38,25 @@ boots the previous slot on the next reboot. If the env is missing or the
 nerves boot path fails, `bootflow scan` falls back to
 `extlinux/extlinux.conf` (eMMC first, then SD).
 
-## Hardware support (expected — pre-hardware-verification)
+## Hardware support
+
+Verified on a Sige5 v1.2, 2026-07-27.
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| eMMC boot, A/B firmware slots | Expected | Boot ROM reads the bootloader from eMMC directly; HS400ES |
-| microSD boot | Expected | Boot ROM path; use for bring-up/recovery with the same image |
-| OTA updates (`mix upload`) | Expected | Delta updates supported (fwup >= 1.12 on device) |
-| Ethernet x2 | Expected | gmac0 + gmac1, RTL8211F each (`eth0`/`eth1`) |
-| WiFi (onboard, board v1.2+) | Expected | SYN43752/BCM43752 on SDIO via in-kernel brcmfmac; linux-firmware blobs included; board NVRAM may be needed. v1.0/1.1 boards (RTL8852BS) have no mainline driver |
+| eMMC boot, A/B firmware slots | Yes | Boot ROM reads the bootloader from eMMC directly; HS400ES. App partition grows to fill the eMMC on first boot |
+| OTA updates (`mix upload`) | Yes | Delta updates supported (fwup >= 1.12 on device); validation + automatic revert verified |
+| Ethernet x2 | Yes | gmac0 + gmac1, RTL8211F each. `eth0` verified with DHCP + internet; `eth1` detected but not tested with a cable |
+| WiFi (onboard, board v1.2+) | Yes | BCM43752 (AP6275S) on SDIO via in-kernel brcmfmac; firmware from `package/brcmfmac43752-firmware`. Verified connected with DHCP. v1.0/1.1 boards (RTL8852BS) have no mainline driver |
+| microSD boot | Untested | Boot ROM path; the same image should work for bring-up/recovery |
 | Bluetooth | No | uart4 is deliberately disabled in the mainline dts; needs a serdev node + bring-up |
-| HDMI display + console | Expected | VOP + dw-hdmi-qp; framebuffer console enabled |
-| GPU (Mali G52 MC3) | Partial | Kernel panfrost driver ships (=m); no Mesa userspace yet (Buildroot's panfrost requires LLVM) |
-| M.2 NVMe (PCIe 2.1) | Expected | pcie0 + NVMe drivers built in |
-| USB | Expected | 2x Type-C (one PD power input only, one USB 2.0 OTG/maskrom) + USB3 host |
-| Audio | Expected | ES8388 codec + HDMI audio via ALSA |
-| Watchdog | Expected | dw-wdt enabled by the board patch; armed by `nerves_heart`, NOWAYOUT |
-| RTC | Expected | HYM8563-compatible; battery connector on board |
+| HDMI display + console | Partial | VOP + dw-hdmi-qp bound, framebuffer console enabled; output not yet tested on a display |
+| GPU (Mali G52 MC3) | Partial | Kernel panfrost driver probes; no Mesa userspace yet (Buildroot's panfrost requires LLVM) |
+| M.2 NVMe (PCIe 2.1) | Untested | pcie0 + NVMe drivers built in; no drive was fitted during bring-up |
+| USB | Yes | 2x Type-C (one PD power input only, one USB 2.0 OTG/maskrom) + USB3 host; onboard hub enumerates |
+| Audio | Yes | HDMI audio + onboard analog ES8388, both register as ALSA cards; playback not yet exercised |
+| Watchdog | Yes | dw-wdt enabled by the board patch; armed by `nerves_heart`, NOWAYOUT |
+| RTC | Yes | HYM8563; keeps time with a battery on the board connector |
 | GPIO/I2C/SPI/UART header | Expected | Via [Circuits.*](https://elixir-circuits.github.io/) |
 | NPU (6 TOPS) | No | No mainline RK3576 NPU driver |
 | Video decode | No | rkvdec2 for RK3576 lands in kernel 7.0 |
@@ -96,6 +99,9 @@ rkdeveloptool cs 1                                  # storage: eMMC
 rkdeveloptool wl 0 disk.img
 rkdeveloptool rd
 ```
+
+The image is smaller than the eMMC; on the first boot the system grows
+the app partition to fill the disk automatically.
 
 Alternative with no tools: `mix burn` the same firmware to a microSD and
 boot from the slot — useful for first bring-up and recovery.

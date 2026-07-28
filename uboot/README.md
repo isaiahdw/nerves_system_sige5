@@ -79,6 +79,11 @@ rkdeveloptool wl 0 disk.img                       # write the whole image
 rkdeveloptool rd                                  # reboot
 ```
 
+The disk image is much smaller than the eMMC. That's fine: the app
+partition is marked expandable, and on the first boot the system rewrites
+the GPT and grows the filesystem to fill the disk
+(`/usr/sbin/expand-app-fs`, run from erlinit).
+
 `rk3576_spl_loader_v1.09.108.bin` is the RK3576 maskrom download loader,
 built from the Rockchip vendor SDK's U-Boot (`./make.sh rk3576` packs it
 from the rkbin SPL/DDR components). The SoC is the same across RK3576

@@ -58,7 +58,7 @@ Verified on a Sige5 v1.2, 2026-07-27.
 | Watchdog | Yes | dw-wdt enabled by the board patch; armed by `nerves_heart`, NOWAYOUT |
 | RTC | Yes | HYM8563; keeps time with a battery on the board connector |
 | GPIO/I2C/SPI/UART header | Expected | Via [Circuits.*](https://elixir-circuits.github.io/) |
-| NPU (6 TOPS) | No | No mainline RK3576 NPU driver |
+| NPU (6 TOPS) | Yes | Vendor rknpu driver built out-of-tree against the mainline kernel (`package/rknpu-driver`) + librknnrt 2.3.2. CMA buffers (no IOMMU), fixed 600 MHz clock. Verified with single and chained int8 models; models are built on a host with rknn-toolkit2 |
 | Video decode | No | rkvdec2 for RK3576 lands in kernel 7.0 |
 | PWM / fan header | No | No RK3576 PWM nodes in mainline 6.18 |
 | MIPI CSI/DSI | No | Not wired up in mainline for this board |

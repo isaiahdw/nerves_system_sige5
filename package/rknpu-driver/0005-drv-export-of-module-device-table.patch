@@ -1,0 +1,19 @@
+Export the OF match table so the module autoloads.
+
+The vendor kernel builds rknpu in-tree and never needed the alias;
+as an out-of-tree module, without MODULE_DEVICE_TABLE(of, ...) there
+is no of: alias in modules.alias and udev/nerves_uevent cannot load
+the driver for the 27700000.npu platform device at boot.
+
+Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+
+--- a/rknpu_drv.c
++++ b/rknpu_drv.c
+@@ -313,6 +314,7 @@ static const struct of_device_id rknpu_of_match[] = {
+ 	},
+ 	{},
+ };
++MODULE_DEVICE_TABLE(of, rknpu_of_match);
+ 
+ static int rknpu_get_drv_version(uint32_t *version)
+ {

@@ -1,0 +1,106 @@
+Compat stub headers for the vendor soc/rockchip includes, and gate the
+devfreq code on its own (unset) flag instead of CONFIG_PM_DEVFREQ. The
+runtime-PM stubs return 0 so runtime suspend/resume still succeeds.
+Without an IOMMU rockchip_iommu_is_enabled() reports disabled, putting
+the driver in CMA/contiguous buffer mode.
+
+Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+
+diff --git a/include/rknpu_devfreq.h b/include/rknpu_devfreq.h
+index c5fa9b2..b1759bf 100644
+--- a/include/rknpu_devfreq.h
++++ b/include/rknpu_devfreq.h
+@@ -7,7 +7,7 @@
+ #ifndef __LINUX_RKNPU_DEVFREQ_H
+ #define __LINUX_RKNPU_DEVFREQ_H
+ 
+-#ifdef CONFIG_PM_DEVFREQ
++#ifdef CONFIG_ROCKCHIP_RKNPU_DEVFREQ
+ void rknpu_devfreq_lock(struct rknpu_device *rknpu_dev);
+ void rknpu_devfreq_unlock(struct rknpu_device *rknpu_dev);
+ int rknpu_devfreq_init(struct rknpu_device *rknpu_dev);
+@@ -34,13 +34,13 @@ static inline void rknpu_devfreq_unlock(struct rknpu_device *rknpu_dev)
+ 
+ static inline int rknpu_devfreq_runtime_suspend(struct device *dev)
+ {
+-	return -EOPNOTSUPP;
++	return 0;
+ }
+ 
+ static inline int rknpu_devfreq_runtime_resume(struct device *dev)
+ {
+-	return -EOPNOTSUPP;
++	return 0;
+ }
+-#endif /* CONFIG_PM_DEVFREQ */
++#endif /* CONFIG_ROCKCHIP_RKNPU_DEVFREQ */
+ 
+ #endif /* __LINUX_RKNPU_DEVFREQ_H_ */
+diff --git a/rknpu/include/soc/rockchip/rockchip_iommu.h b/include/soc/rockchip/rockchip_iommu.h
+new file mode 100644
+index 0000000..b75d8ba
+--- /dev/null
++++ b/include/soc/rockchip/rockchip_iommu.h
+@@ -0,0 +1,17 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Mainline compat stub for the vendor kernel's rockchip_iommu.h.
++ * The NPU runs without an IOMMU on this system (CMA/contiguous buffers),
++ * so the vendor helper always reports the IOMMU as disabled.
++ */
++#ifndef __SOC_ROCKCHIP_IOMMU_COMPAT_H
++#define __SOC_ROCKCHIP_IOMMU_COMPAT_H
++
++#include <linux/device.h>
++
++static inline int rockchip_iommu_is_enabled(struct device *dev)
++{
++	return 0;
++}
++
++#endif
+diff --git a/rknpu/include/soc/rockchip/rockchip_opp_select.h b/include/soc/rockchip/rockchip_opp_select.h
+new file mode 100644
+index 0000000..f95b679
+--- /dev/null
++++ b/include/soc/rockchip/rockchip_opp_select.h
+@@ -0,0 +1,11 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/* Mainline compat stub: only the embedded struct is needed (devfreq is
++ * compiled out); keep it empty-but-valid. */
++#ifndef __SOC_ROCKCHIP_OPP_SELECT_COMPAT_H
++#define __SOC_ROCKCHIP_OPP_SELECT_COMPAT_H
++
++struct rockchip_opp_info {
++	int dummy;
++};
++
++#endif
+diff --git a/rknpu/include/soc/rockchip/rockchip_system_monitor.h b/include/soc/rockchip/rockchip_system_monitor.h
+new file mode 100644
+index 0000000..946e777
+--- /dev/null
++++ b/include/soc/rockchip/rockchip_system_monitor.h
+@@ -0,0 +1,8 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/* Mainline compat stub: referenced only as pointers with devfreq off. */
++#ifndef __SOC_ROCKCHIP_SYSTEM_MONITOR_COMPAT_H
++#define __SOC_ROCKCHIP_SYSTEM_MONITOR_COMPAT_H
++
++struct monitor_dev_info;
++
++#endif
+diff --git a/rknpu/include/soc/rockchip/rockchip_ipa.h b/include/soc/rockchip/rockchip_ipa.h
+new file mode 100644
+index 0000000..5b53be6
+--- /dev/null
++++ b/include/soc/rockchip/rockchip_ipa.h
+@@ -0,0 +1,8 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/* Mainline compat stub: referenced only as pointers with devfreq off. */
++#ifndef __SOC_ROCKCHIP_IPA_COMPAT_H
++#define __SOC_ROCKCHIP_IPA_COMPAT_H
++
++struct ipa_power_model_data;
++
++#endif

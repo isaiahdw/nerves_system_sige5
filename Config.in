@@ -1,3 +1,5 @@
 # Add project-specific packages for Buildroot here
 
 source "$NERVES_DEFCONFIG_DIR/package/brcmfmac43752-firmware/Config.in"
+source "$NERVES_DEFCONFIG_DIR/package/librknnrt/Config.in"
+source "$NERVES_DEFCONFIG_DIR/package/rknpu-driver/Config.in"

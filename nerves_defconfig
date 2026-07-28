@@ -77,13 +77,16 @@ BR2_PACKAGE_NBTTY=y
 # have an RTL8852BS with no mainline driver. Bluetooth (uart4 serdev)
 # is not brought up.
 BR2_PACKAGE_BRCMFMAC43752_FIRMWARE=y
+# NPU: vendor rknpu kernel driver ported to mainline (out-of-tree module,
+# CMA buffers, fixed 600 MHz clock - see package/rknpu-driver and
+# linux/0002) plus the matching librknnrt 2.3.2 runtime.
+BR2_PACKAGE_RKNPU_DRIVER=y
+BR2_PACKAGE_LIBRKNNRT=y
 BR2_PACKAGE_NERVES_CONFIG=y
 BR2_PACKAGE_NERVES_CONFIG_ACCEPT_RNG_NOTICE=y
 # GPU userspace (Mesa panfrost) is not in the image yet: Buildroot
 # 2026.05 makes the panfrost driver depend on LLVM. The kernel ships
 # CONFIG_DRM_PANFROST ready for it; fbcon covers the console meanwhile.
-# The vendor NPU runtime (librknnrt) has no mainline driver to talk to,
-# so it stays off on this branch.
 # Input: eudev (dynamic /dev) and libinput, the input layer DRM/KMS UI
 # stacks read USB keyboards/mice/touchscreens through. No UI toolkit ships
 # in the system — bring your own (a Flutter embedder, LVGL, Slint, Qt, ...)

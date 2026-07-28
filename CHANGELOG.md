@@ -24,5 +24,15 @@ ethernet, onboard WiFi, GPU probe, watchdog, RTC, ALSA devices.
   package/brcmfmac43752-firmware installs them from the Armbian firmware
   collection. Bluetooth not brought up (uart4 disabled in the mainline
   dts).
-- GPU: kernel panfrost driver; no Mesa userspace yet. No NPU, video
-  codecs, or PWM on mainline 6.18.
+- GPU: kernel panfrost driver; no Mesa userspace yet. No video codecs
+  or PWM on mainline 6.18.
+- NPU: the vendor rknpu driver (0.9.8) built out-of-tree against the
+  mainline kernel with a small API-port patch series, plus the matching
+  librknnrt 2.3.2 runtime. Runs without an IOMMU (CMA buffers, 256 MB)
+  at a fixed 600 MHz. Two kernel patches make the NPU power domains
+  work on mainline: run all RKNN clocks during domain transitions
+  (without them the first register access stalls the interconnect) and
+  a 15 us settle delay before QoS restore (both adapted from the
+  RK3576 rocket bring-up by Jiaxing Hu). Verified on hardware with
+  single-op and chained int8 models, including across idle
+  power-off/on cycles.

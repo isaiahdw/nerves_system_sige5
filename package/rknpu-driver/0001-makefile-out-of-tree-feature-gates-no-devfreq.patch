@@ -1,0 +1,28 @@
+Out-of-tree build: define the feature gates the C code expects, drop the
+devfreq object (vendor-only OPP/monitor APIs) and -Werror.
+
+Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+
+diff --git a/Makefile b/Makefile
+index d73563d..bdcb555 100644
+--- a/Makefile
++++ b/Makefile
+@@ -3,14 +3,16 @@ obj-$(CONFIG_ROCKCHIP_RKNPU) += rknpu.o
+ 
+ ccflags-y += -I$(srctree)/$(src)/include
+ ccflags-y += -I$(src)/include
+-ccflags-y += -Werror
++# Out-of-tree build: CONFIG_ symbols passed on the make command line are
++# make variables only, so feature gates used by the C code are defined here.
++ccflags-y += -DCONFIG_ROCKCHIP_RKNPU_DRM_GEM
++ccflags-y += -DCONFIG_ROCKCHIP_RKNPU_DEBUG_FS
+ 
+ rknpu-y += rknpu_drv.o
+ rknpu-y += rknpu_reset.o
+ rknpu-y += rknpu_job.o
+ rknpu-y += rknpu_debugger.o
+ rknpu-y += rknpu_iommu.o
+-rknpu-$(CONFIG_PM_DEVFREQ) += rknpu_devfreq.o
+ rknpu-$(CONFIG_ROCKCHIP_RKNPU_SRAM) += rknpu_mm.o
+ rknpu-$(CONFIG_ROCKCHIP_RKNPU_FENCE) += rknpu_fence.o
+ rknpu-$(CONFIG_ROCKCHIP_RKNPU_DRM_GEM) += rknpu_gem.o

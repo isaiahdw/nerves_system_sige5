@@ -1,0 +1,107 @@
+rknpu_drv.c: mainline API updates, version-guarded: hrtimer_setup,
+nvmem_cell_read_u8, void platform remove, string MODULE_IMPORT_NS,
+drm_driver .date/.gem_prime_mmap/.prime_* member removals.
+
+Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+
+diff --git a/rknpu_drv.c b/rknpu_drv.c
+index 4090344..9610926 100644
+--- a/rknpu_drv.c
++++ b/rknpu_drv.c
+@@ -32,6 +32,7 @@
+ #include <linux/pm_runtime.h>
+ #include <linux/regmap.h>
+ #include <linux/of_address.h>
++#include <linux/nvmem-consumer.h>
+ 
+ #ifndef FPGA_PLATFORM
+ #include <soc/rockchip/rockchip_iommu.h>
+@@ -718,15 +719,19 @@ static struct drm_driver rknpu_drm_driver = {
+ #else
+ 	.dumb_map_offset = drm_gem_dumb_map_offset,
+ #endif
++#if KERNEL_VERSION(6, 6, 0) > LINUX_VERSION_CODE
+ 	.prime_handle_to_fd = drm_gem_prime_handle_to_fd,
+ 	.prime_fd_to_handle = drm_gem_prime_fd_to_handle,
++#endif
+ #if KERNEL_VERSION(4, 13, 0) <= LINUX_VERSION_CODE
+ 	.gem_prime_import = rknpu_gem_prime_import,
+ #else
+ 	.gem_prime_import = drm_gem_prime_import,
+ #endif
+ 	.gem_prime_import_sg_table = rknpu_gem_prime_import_sg_table,
+-#if KERNEL_VERSION(6, 1, 0) <= LINUX_VERSION_CODE
++#if KERNEL_VERSION(6, 6, 0) <= LINUX_VERSION_CODE
++	/* gem_prime_mmap removed; DRM core uses obj->funcs->mmap */
++#elif KERNEL_VERSION(6, 1, 0) <= LINUX_VERSION_CODE
+ 	.gem_prime_mmap = drm_gem_prime_mmap,
+ #else
+ 	.gem_prime_mmap = rknpu_gem_prime_mmap,
+@@ -736,7 +741,9 @@ static struct drm_driver rknpu_drm_driver = {
+ 	.fops = &rknpu_drm_driver_fops,
+ 	.name = DRIVER_NAME,
+ 	.desc = DRIVER_DESC,
++#if KERNEL_VERSION(6, 14, 0) > LINUX_VERSION_CODE
+ 	.date = DRIVER_DATE,
++#endif
+ 	.major = DRIVER_MAJOR,
+ 	.minor = DRIVER_MINOR,
+ 	.patchlevel = DRIVER_PATCHLEVEL,
+@@ -781,8 +788,13 @@ static enum hrtimer_restart hrtimer_handler(struct hrtimer *timer)
+ static void rknpu_init_timer(struct rknpu_device *rknpu_dev)
+ {
+ 	rknpu_dev->kt = ktime_set(0, RKNPU_LOAD_INTERVAL);
++#if KERNEL_VERSION(6, 15, 0) <= LINUX_VERSION_CODE
++	hrtimer_setup(&rknpu_dev->timer, hrtimer_handler, CLOCK_MONOTONIC,
++		      HRTIMER_MODE_REL);
++#else
+ 	hrtimer_init(&rknpu_dev->timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+ 	rknpu_dev->timer.function = hrtimer_handler;
++#endif
+ 	hrtimer_start(&rknpu_dev->timer, rknpu_dev->kt, HRTIMER_MODE_REL);
+ }
+ 
+@@ -1225,8 +1237,12 @@ static int rknpu_get_invalid_core_mask(struct device *dev)
+ 
+ 	if (of_property_match_string(dev->of_node, "nvmem-cell-names",
+ 				     "cores") >= 0) {
++#if KERNEL_VERSION(6, 2, 0) <= LINUX_VERSION_CODE
++		ret = nvmem_cell_read_u8(dev, "cores", &invalid_core_mask);
++#else
+ 		ret = rockchip_nvmem_cell_read_u8(dev->of_node, "cores",
+ 						  &invalid_core_mask);
++#endif
+ 		/* The default valid npu cores for RK3583 are core0 and core1 */
+ 		invalid_core_mask |= RKNPU_CORE2_MASK;
+ 		if (ret) {
+@@ -1627,9 +1643,20 @@ static const struct dev_pm_ops rknpu_pm_ops = {
+ };
+ #endif
+ 
++#if KERNEL_VERSION(6, 11, 0) <= LINUX_VERSION_CODE
++static void rknpu_remove_void(struct platform_device *pdev)
++{
++	rknpu_remove(pdev);
++}
++#endif
++
+ static struct platform_driver rknpu_driver = {
+ 	.probe = rknpu_probe,
++#if KERNEL_VERSION(6, 11, 0) <= LINUX_VERSION_CODE
++	.remove = rknpu_remove_void,
++#else
+ 	.remove = rknpu_remove,
++#endif
+ 	.driver = {
+ 		.owner = THIS_MODULE,
+ 		.name = "RKNPU",
+@@ -1660,5 +1687,9 @@ MODULE_LICENSE("GPL v2");
+ MODULE_VERSION(RKNPU_GET_DRV_VERSION_STRING(DRIVER_MAJOR, DRIVER_MINOR,
+ 					    DRIVER_PATCHLEVEL));
+ #if KERNEL_VERSION(5, 16, 0) < LINUX_VERSION_CODE
++#if KERNEL_VERSION(6, 13, 0) <= LINUX_VERSION_CODE
++MODULE_IMPORT_NS("DMA_BUF");
++#else
+ MODULE_IMPORT_NS(DMA_BUF);
+ #endif
++#endif

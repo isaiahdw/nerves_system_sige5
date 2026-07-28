@@ -61,8 +61,8 @@ BR2_PACKAGE_WPA_SUPPLICANT_WPA3=y
 BR2_PACKAGE_WPA_SUPPLICANT_CTRL_IFACE=y
 # BR2_TARGET_ROOTFS_TAR is not set
 BR2_PACKAGE_HOST_KMOD_XZ=y
-# uboot-env.bin is generated from uboot/uboot.env; U-Boot itself lives in
-# the onboard SPI NOR and is built/flashed out of band (see uboot/README.md).
+# uboot-env.bin is generated from uboot/uboot.env; u-boot-rockchip.bin is
+# written to the eMMC by the fwup factory image (see uboot/README.md).
 BR2_PACKAGE_HOST_UBOOT_TOOLS=y
 BR2_PACKAGE_HOST_UBOOT_TOOLS_ENVIMAGE=y
 BR2_PACKAGE_HOST_UBOOT_TOOLS_ENVIMAGE_SOURCE="${NERVES_DEFCONFIG_DIR}/uboot/uboot.env"
@@ -101,6 +101,3 @@ BR2_PACKAGE_ALSA_UTILS_APLAY=y
 BR2_PACKAGE_ALSA_UTILS_AMIXER=y
 BR2_PACKAGE_ALSA_UTILS_ALSACTL=y
 BR2_PACKAGE_ALSA_UTILS_SPEAKER_TEST=y
-# mtd-utils (flashcp) so a running system can update the SPI NOR bootloader
-BR2_PACKAGE_MTD=y
-BR2_PACKAGE_MTD_FLASHCP=y

@@ -36,4 +36,6 @@ prune_orphan_lib() {
 prune_orphan_lib libSPIRV-LLVM-Translator
 prune_orphan_lib libRemarks
 prune_orphan_lib libLTO
+prune_orphan_lib libclang-cpp
+prune_orphan_lib libclang
 prune_orphan_lib libLLVM

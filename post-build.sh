@@ -31,5 +31,9 @@ prune_orphan_lib() {
         return 1
     fi
 }
+# Order matters: libLTO/libRemarks are LLVM's own companion libraries
+# (installed by the same package) and link libLLVM themselves.
 prune_orphan_lib libSPIRV-LLVM-Translator
+prune_orphan_lib libRemarks
+prune_orphan_lib libLTO
 prune_orphan_lib libLLVM

@@ -1,0 +1,35 @@
+Match the kernel's iommu_dma_cookie layout on 6.14+
+
+The driver allocates NPU IOVAs out of the DMA-IOMMU cookie's iova
+domain by casting the kernel-private struct through a local mirror of
+its layout. Since 6.14 the MSI cookie is a separate struct and iovad
+sits at offset 0; the vendor mirror's leading type enum skews every
+field access by 8 bytes, and the first allocation crashes inside
+alloc_iova() on a garbage spinlock.
+
+Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+
+diff --git a/include/rknpu_iommu.h b/include/rknpu_iommu.h
+index 2251766..04c0b82 100644
+--- a/include/rknpu_iommu.h
++++ b/include/rknpu_iommu.h
+@@ -25,9 +25,17 @@ enum iommu_dma_cookie_type {
+ };
+ 
+ struct rknpu_iommu_dma_cookie {
++#if KERNEL_VERSION(6, 14, 0) > LINUX_VERSION_CODE
+ 	enum iommu_dma_cookie_type type;
+-
+-	/* Full allocator for IOMMU_DMA_IOVA_COOKIE */
++#endif
++	/*
++	 * Mirrors the head of the kernel's private struct iommu_dma_cookie
++	 * (drivers/iommu/dma-iommu.c). Since 6.14 the MSI cookie is a
++	 * separate struct and iovad sits at offset 0 - with the vendor's
++	 * leading type field the iovad pointer lands 8 bytes into the real
++	 * structure and the first alloc_iova() crashes on a garbage
++	 * spinlock. Only iovad is ever accessed through this cast.
++	 */
+ 	struct iova_domain iovad;
+ };
+ 

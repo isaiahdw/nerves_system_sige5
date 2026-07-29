@@ -1,0 +1,52 @@
+iommu/rockchip: attach all power domains for multi-domain MMUs
+
+The RK3576 NPU MMU has register banks in two power domains (one bank
+pair per NPU core, each in that core's domain). The platform core
+auto-attaches only a single domain, so with more than one listed the
+extra banks sit in a powered-down domain and the first access stalls
+the interconnect. Attach the whole list with runtime-PM device links
+so every domain powers up before the IOMMU's resume touches any bank.
+
+Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+
+--- a/drivers/iommu/rockchip-iommu.c
++++ b/drivers/iommu/rockchip-iommu.c
+@@ -22,6 +22,7 @@
+ #include <linux/of.h>
+ #include <linux/of_platform.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_domain.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/slab.h>
+ #include <linux/spinlock.h>
+@@ -117,6 +118,7 @@
+ 	struct iommu_device iommu;
+ 	struct list_head node; /* entry in rk_iommu_domain.iommus */
+ 	struct iommu_domain *domain; /* domain to which iommu is attached */
++	struct dev_pm_domain_list *pd_list; /* multi power-domain banks */
+ };
+ 
+ struct rk_iommudata {
+@@ -1319,6 +1321,22 @@
+ 	err = clk_bulk_prepare(iommu->num_clocks, iommu->clocks);
+ 	if (err)
+ 		return err;
++
++	/*
++	 * Some IOMMUs have register banks spread across power domains
++	 * (the RK3576 NPU MMU: one bank pair per NPU core, each in that
++	 * core's domain). The platform core auto-attaches only a single
++	 * domain, so attach the whole list with runtime-PM device links:
++	 * whenever this IOMMU resumes, every domain covering its banks
++	 * powers up first, and a bank access can never hit a powered-down
++	 * domain.
++	 */
++	if (of_count_phandle_with_args(dev->of_node, "power-domains",
++				       "#power-domain-cells") > 1) {
++		err = devm_pm_domain_attach_list(dev, NULL, &iommu->pd_list);
++		if (err < 0)
++			return err;
++	}
+ 
+ 	pm_runtime_enable(dev);
+ 

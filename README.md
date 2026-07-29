@@ -124,6 +124,22 @@ enable), the vendor RKNPU node (`linux/0002`), and two power-domain
 fixes the NPU needs on mainline (`linux/0003`/`0004`). Configuration is
 the arm64 `defconfig` plus `linux/nerves.config`, documented inline.
 
+## NPU limitations
+
+The vendor NPU driver runs in a reduced configuration on the mainline
+kernel, which sets some practical bounds:
+
+- All NPU buffers (weights, activations, I/O) come from a 256 MB CMA
+  pool, because the vendor IOMMU driver has no mainline counterpart.
+  Vision-class models (MobileNet, YOLO and friends) fit comfortably;
+  LLM-scale models do not initialize. The pool size is
+  `CONFIG_CMA_SIZE_MBYTES` in `linux/nerves.config` - raising it means
+  rebuilding the system, it is not a runtime setting.
+- The clock is fixed at 600 MHz (no devfreq), roughly two thirds of the
+  vendor kernel's peak, and the NPU rail stays on at 800 mV.
+- For LLM workloads or maximum throughput, use a vendor-kernel system
+  instead; this branch trades those for a mainline kernel.
+
 ## Debug UART
 
 40-pin header: pin 8 (TX), pin 10 (RX), pin 6 (GND), 1500000 8N1,

@@ -1,55 +1,52 @@
-Wire the NPU MMUs to the mainline rockchip-iommu driver.
+Wire the NPU MMU to the mainline rockchip-iommu driver.
 
-Per-core MMU nodes with the register layout from the vendor tree
-(core_base + 0x2000/0x2100), the rk3568-iommu compatible the other
-rk3576 MMUs use upstream, and per-core power domains so genpd cannot
-power a domain off under an active MMU. With iommus present the rknpu
-driver leaves CMA/contiguous mode: buffers become pageable and the
-256 MB CMA cap no longer applies to the NPU.
+One node covering both cores' bank pairs (registers from the vendor
+tree: core_base + 0x2000/0x2100), using the rk3568-iommu compatible
+the other rk3576 MMUs use upstream. The mainline driver supports one
+IOMMU instance per master - a per-core split leaves the second
+instance unlinked and its core in bypass (jobs then time out with no
+page faults, reading unmapped IOVAs as physical addresses).
+
+With iommus present the rknpu driver leaves CMA/contiguous mode:
+buffers become pageable and the 256 MB CMA cap no longer applies to
+the NPU.
 
 Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
 
 --- a/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
 +++ b/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
-@@ -1073,8 +1073,42 @@
+@@ -1073,8 +1073,35 @@
  		power-domains = <&power RK3576_PD_NPU0>,
  				<&power RK3576_PD_NPU1>;
  		power-domain-names = "npu0", "npu1";
-+		iommus = <&rknpu_mmu0>, <&rknpu_mmu1>;
++		iommus = <&rknpu_mmu>;
  		status = "okay";
-+	};
-+
-+	/*
-+	 * Per-core NPU MMUs, driven by the mainline rockchip-iommu driver
-+	 * (the hardware is the same v2 IP the rk3576 video-decoder MMU
-+	 * uses). Register banks sit at core_base + 0x2000/0x2100; the
-+	 * vendor tree wires all four banks into one node, but per-core
-+	 * nodes let each MMU hold its own power domain so genpd cannot
-+	 * cut power under an active MMU during the NPU's asynchronous
-+	 * runtime suspend.
-+	 */
-+	rknpu_mmu0: iommu@27702000 {
-+		compatible = "rockchip,rk3576-iommu", "rockchip,rk3568-iommu";
-+		reg = <0x0 0x27702000 0x0 0x100>,
-+		      <0x0 0x27702100 0x0 0x100>;
-+		interrupts = <GIC_SPI 247 IRQ_TYPE_LEVEL_HIGH>;
-+		clocks = <&cru ACLK_RKNN0>, <&cru HCLK_RKNN_ROOT>,
-+			 <&cru ACLK_RKNN_CBUF>, <&cru HCLK_RKNN_CBUF>;
-+		clock-names = "aclk", "iface", "aclk_cbuf", "hclk_cbuf";
-+		#iommu-cells = <0>;
-+		power-domains = <&power RK3576_PD_NPU0>;
  	};
 +
-+	rknpu_mmu1: iommu@2770a000 {
++	/*
++	 * NPU MMU, driven by the mainline rockchip-iommu driver (the same
++	 * v2 IP the rk3576 video-decoder MMU uses upstream). One node
++	 * covering both cores' bank pairs (core_base + 0x2000/0x2100),
++	 * mirroring the vendor tree: the mainline driver supports one
++	 * IOMMU instance per master, so per-core nodes leave one core's
++	 * MMU unlinked and in bypass. The node holds NPU0's power domain;
++	 * NPU1 is held by the NPU driver whenever the MMU is touched.
++	 */
++	rknpu_mmu: iommu@27702000 {
 +		compatible = "rockchip,rk3576-iommu", "rockchip,rk3568-iommu";
-+		reg = <0x0 0x2770a000 0x0 0x100>,
++		reg = <0x0 0x27702000 0x0 0x100>,
++		      <0x0 0x27702100 0x0 0x100>,
++		      <0x0 0x2770a000 0x0 0x100>,
 +		      <0x0 0x2770a100 0x0 0x100>;
-+		interrupts = <GIC_SPI 248 IRQ_TYPE_LEVEL_HIGH>;
-+		clocks = <&cru ACLK_RKNN1>, <&cru HCLK_RKNN_ROOT>,
-+			 <&cru ACLK_RKNN_CBUF>, <&cru HCLK_RKNN_CBUF>;
-+		clock-names = "aclk", "iface", "aclk_cbuf", "hclk_cbuf";
++		interrupts = <GIC_SPI 247 IRQ_TYPE_LEVEL_HIGH>,
++			     <GIC_SPI 248 IRQ_TYPE_LEVEL_HIGH>;
++		clocks = <&cru ACLK_RKNN0>, <&cru ACLK_RKNN1>,
++			 <&cru HCLK_RKNN_ROOT>, <&cru ACLK_RKNN_CBUF>,
++			 <&cru HCLK_RKNN_CBUF>;
++		clock-names = "aclk0", "aclk1", "iface",
++			      "aclk_cbuf", "hclk_cbuf";
 +		#iommu-cells = <0>;
-+		power-domains = <&power RK3576_PD_NPU1>;
++		power-domains = <&power RK3576_PD_NPU0>;
 +	};
  };
  

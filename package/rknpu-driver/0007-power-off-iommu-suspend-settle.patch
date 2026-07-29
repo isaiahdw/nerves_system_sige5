@@ -1,0 +1,38 @@
+Settle instead of polling the vendor iommu API at power-off
+
+The vendor kernel polls rockchip_iommu_is_enabled() before releasing
+the NPU power domains, because the IOMMU's runtime suspend is
+asynchronous and touches MMU registers - if the domain goes down
+first, that access hangs the interconnect. Our mainline stub made the
+poll pass instantly, removing the protection. Mirror the driver's own
+FPGA fallback: a 20 ms settle after the main device suspends.
+
+Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+
+--- a/rknpu_drv.c
++++ b/rknpu_drv.c
+@@ -1043,6 +1043,16 @@
+ 		 * If pm runtime framework can handle this issue in the future, remove
+ 		 * this.
+ 		 */
++#if KERNEL_VERSION(6, 0, 0) <= LINUX_VERSION_CODE
++		/*
++		 * Mainline has no rockchip_iommu_is_enabled() to poll, so
++		 * mirror the FPGA fallback below: give the IOMMU's
++		 * asynchronous runtime suspend time to finish its register
++		 * access before the power domains go down.
++		 */
++		if (rknpu_dev->iommu_en)
++			msleep(20);
++#else
+ 		ret = readx_poll_timeout(rockchip_iommu_is_enabled, dev, val,
+ 					 !val, NPU_MMU_DISABLED_POLL_PERIOD_US,
+ 					 NPU_MMU_DISABLED_POLL_TIMEOUT_US);
+@@ -1052,6 +1062,7 @@
+ 			rknpu_devfreq_unlock(rknpu_dev);
+ 			return ret;
+ 		}
++#endif
+ #else
+ 		if (rknpu_dev->iommu_en)
+ 			msleep(20);

@@ -138,7 +138,12 @@ kernel, which sets some practical bounds:
 - The clock is fixed at 600 MHz (no devfreq), roughly two thirds of the
   vendor kernel's peak, and the NPU rail stays on at 800 mV.
 - For LLM workloads or maximum throughput, use a vendor-kernel system
-  instead; this branch trades those for a mainline kernel.
+  for now; this branch trades those for a mainline kernel.
+
+Both limitations are being worked on: the NPU's MMU looks driveable by
+mainline's rockchip-iommu (which would lift the CMA cap), and the
+devfreq integration can be rebuilt on standard OPP APIs (which would
+restore frequency scaling).
 
 ## Debug UART
 

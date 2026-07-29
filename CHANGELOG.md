@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.0 (unreleased)
+## v0.1.0 - 2026-07-29
 
 Initial release, derived from nerves_system_rock_4d's mainline branch
 (same RK3576 SoC, mainline U-Boot v2026.01 + kernel 6.18.y). Verified on
@@ -25,10 +25,12 @@ ethernet, onboard WiFi, GPU probe, watchdog, RTC, ALSA devices.
   collection. Bluetooth not brought up (uart4 disabled in the mainline
   dts).
 - GPU: panfrost with Mesa userspace (OpenGL ES 3.1 over EGL/GBM, no
-  X11/Wayland in the image). Buildroot requires LLVM in the target Mesa
-  for panfrost, which adds ~88 MB to the rootfs; the GL stack is
-  verified with kmscube at a vsync-locked 60 fps on HDMI. No video
-  codecs or PWM on mainline 6.18.
+  X11/Wayland in the image), verified with kmscube at a vsync-locked
+  60 fps on HDMI. Buildroot's Kconfig requires LLVM in the target Mesa
+  for panfrost, but nothing in this driver set uses it at runtime:
+  Mesa is built with draw-use-llvm=false and post-build.sh removes the
+  orphaned LLVM libraries (readelf-gated), keeping them out of the
+  image. No video codecs or PWM on mainline 6.18.
 - SARADC enabled (upstream leaves it disabled with no board enable);
   ADC inputs on the 40-pin header.
 - Auto-revert of unvalidated firmware, watchdog recovery, CPU DVFS,

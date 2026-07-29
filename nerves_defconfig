@@ -84,9 +84,19 @@ BR2_PACKAGE_RKNPU_DRIVER=y
 BR2_PACKAGE_LIBRKNNRT=y
 BR2_PACKAGE_NERVES_CONFIG=y
 BR2_PACKAGE_NERVES_CONFIG_ACCEPT_RNG_NOTICE=y
-# GPU userspace (Mesa panfrost) is not in the image yet: Buildroot
-# 2026.05 makes the panfrost driver depend on LLVM. The kernel ships
-# CONFIG_DRM_PANFROST ready for it; fbcon covers the console meanwhile.
+# GPU userspace: Mesa panfrost (EGL/GLES2 over GBM/KMS; no X11 or
+# Wayland ships in the system). Buildroot requires LLVM in the target
+# Mesa for panfrost - the real requirement is the host-side shader
+# precompiler (mesa_clc/panfrost_compile); the target-LLVM link is
+# packaging conservatism that costs rootfs size, acceptable on this
+# class of board. kmscube is included as a GL smoke test.
+BR2_PACKAGE_MESA3D=y
+BR2_PACKAGE_MESA3D_LLVM=y
+BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_PANFROST=y
+BR2_PACKAGE_MESA3D_GBM=y
+BR2_PACKAGE_MESA3D_OPENGL_EGL=y
+BR2_PACKAGE_MESA3D_OPENGL_ES=y
+BR2_PACKAGE_KMSCUBE=y
 # Input: eudev (dynamic /dev) and libinput, the input layer DRM/KMS UI
 # stacks read USB keyboards/mice/touchscreens through. No UI toolkit ships
 # in the system — bring your own (a Flutter embedder, LVGL, Slint, Qt, ...)

@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.2.0 - 2026-07-29
+
+The NPU's MMU now runs on mainline's rockchip-iommu, on both cores:
+NPU buffers are ordinary pageable memory, the 256 MB CMA cap is gone
+(400 MB single allocations verified on hardware), and inference is
+bit-exact against Rockchip's reference outputs through the IOMMU.
+Soak-tested: 91/91 runs across alternating-core, parallel dual-core,
+idle power-cycle, and allocation-cycling phases with no faults and no
+leaks.
+
+What it took: a rockchip-iommu patch attaching all of a node's power
+domains with runtime-PM device links (the NPU MMU's bank pairs live in
+the two NPU core domains; upstream submission planned), two IOTLB/fault
+robustness patches adapted from the RK3576 rocket bring-up, a fix for
+the rknpu driver's mirror of the kernel-private iommu_dma_cookie
+layout (changed in 6.14), and a power-off settle replacing a
+vendor-only API poll.
+
+Still fixed at 600 MHz (devfreq on mainline OPP APIs is the remaining
+NPU gap).
+
+
 ## v0.1.0 - 2026-07-29
 
 Initial release, derived from nerves_system_rock_4d's mainline branch

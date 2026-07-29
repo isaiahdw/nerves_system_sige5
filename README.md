@@ -129,21 +129,14 @@ the arm64 `defconfig` plus `linux/nerves.config`, documented inline.
 The vendor NPU driver runs in a reduced configuration on the mainline
 kernel, which sets some practical bounds:
 
-- All NPU buffers (weights, activations, I/O) come from a 256 MB CMA
-  pool, because the vendor IOMMU driver has no mainline counterpart.
-  Vision-class models (MobileNet, YOLO and friends) fit comfortably;
-  LLM-scale models do not initialize. The pool size is
-  `CONFIG_CMA_SIZE_MBYTES` in `linux/nerves.config` - raising it means
-  rebuilding the system, it is not a runtime setting.
-- The clock is fixed at 600 MHz (no devfreq), roughly two thirds of the
-  vendor kernel's peak, and the NPU rail stays on at 800 mV.
-- For LLM workloads or maximum throughput, use a vendor-kernel system
-  for now; this branch trades those for a mainline kernel.
-
-Both limitations are being worked on: the NPU's MMU looks driveable by
-mainline's rockchip-iommu (which would lift the CMA cap), and the
-devfreq integration can be rebuilt on standard OPP APIs (which would
-restore frequency scaling).
+- The NPU's MMU runs on mainline's rockchip-iommu (both cores; one
+  small driver patch attaches the MMU's two power domains), so buffers
+  are ordinary pageable memory - no CMA cap, and 400 MB single
+  allocations verified on hardware. Verified bit-exact against
+  Rockchip's reference outputs through the IOMMU on both cores.
+- The clock is fixed at 600 MHz (no devfreq yet), roughly two thirds
+  of the vendor kernel's peak, and the NPU rail stays on at 800 mV.
+  Rebuilding devfreq on standard OPP APIs is the remaining gap.
 
 ## Debug UART
 

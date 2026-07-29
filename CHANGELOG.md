@@ -24,8 +24,16 @@ ethernet, onboard WiFi, GPU probe, watchdog, RTC, ALSA devices.
   package/brcmfmac43752-firmware installs them from the Armbian firmware
   collection. Bluetooth not brought up (uart4 disabled in the mainline
   dts).
-- GPU: kernel panfrost driver; no Mesa userspace yet. No video codecs
-  or PWM on mainline 6.18.
+- GPU: panfrost with Mesa userspace (OpenGL ES 3.1 over EGL/GBM, no
+  X11/Wayland in the image). Buildroot requires LLVM in the target Mesa
+  for panfrost, which adds ~88 MB to the rootfs; the GL stack is
+  verified with kmscube at a vsync-locked 60 fps on HDMI. No video
+  codecs or PWM on mainline 6.18.
+- SARADC enabled (upstream leaves it disabled with no board enable);
+  ADC inputs on the 40-pin header.
+- Auto-revert of unvalidated firmware, watchdog recovery, CPU DVFS,
+  thermal throttling, LEDs, and the hardware RNG are all verified on
+  hardware.
 - NPU: the vendor rknpu driver (0.9.8) built out-of-tree against the
   mainline kernel with a small API-port patch series, plus the matching
   librknnrt 2.3.2 runtime. Runs without an IOMMU (CMA buffers, 256 MB)

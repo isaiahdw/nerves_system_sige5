@@ -51,12 +51,18 @@ Verified on a Sige5 v1.2, 2026-07-27.
 | microSD boot | Untested | Boot ROM path; the same image should work for bring-up/recovery |
 | Bluetooth | No | uart4 is deliberately disabled in the mainline dts; needs a serdev node + bring-up |
 | HDMI display + console | Yes | VOP + dw-hdmi-qp, framebuffer console verified on a display. No GL/EGL userspace yet (see GPU row) |
-| GPU (Mali G52 MC3) | Partial | Kernel panfrost driver probes; no Mesa userspace yet (Buildroot's panfrost requires LLVM) |
+| GPU (Mali G52 MC3) | Yes | Kernel panfrost + Mesa (OpenGL ES 3.1, EGL/GBM, no X11/Wayland); kmscube runs vsync-locked at 60 fps on HDMI. LLVM in the target Mesa (a Buildroot packaging requirement) adds ~88 MB to the rootfs |
 | M.2 NVMe (PCIe 2.1) | Untested | pcie0 + NVMe drivers built in; no drive was fitted during bring-up |
-| USB | Yes | 2x Type-C (one PD power input only, one USB 2.0 OTG/maskrom) + USB3 host; onboard hub enumerates |
+| USB | Yes | 2x Type-C (one PD power input only, one USB 2.0 OTG/maskrom) + USB3 host; verified with a CDC-ACM device (Zigbee coordinator) through the onboard hub. SuperSpeed not yet exercised |
 | Audio | Yes | HDMI audio + onboard analog ES8388, both register as ALSA cards; playback not yet exercised |
 | Watchdog | Yes | dw-wdt enabled by the board patch; armed by `nerves_heart`, NOWAYOUT |
 | RTC | Yes | HYM8563; keeps time with a battery on the board connector |
+| CPU frequency scaling | Yes | schedutil via SCMI; A53 cluster to 2.016 GHz, A72 cluster to 2.208 GHz |
+| Thermal | Yes | tsadc zones with cpufreq cooling |
+| LEDs | Yes | Green heartbeat + red status + mmc activity triggers |
+| Hardware RNG | Yes | /dev/hwrng feeds the kernel entropy pool |
+| ADC (SARADC) | Yes | Enabled by `linux/0005` (upstream leaves it disabled); header ADC inputs, vref from vcca_1v8_s0 |
+| CAN | No | RK3576 CAN-FD has no mainline driver or dts nodes |
 | GPIO/I2C/SPI/UART header | Expected | Via [Circuits.*](https://elixir-circuits.github.io/) |
 | NPU (6 TOPS) | Yes | Vendor rknpu driver built out-of-tree against the mainline kernel (`package/rknpu-driver`) + librknnrt 2.3.2. CMA buffers (no IOMMU), fixed 600 MHz clock. Verified with single and chained int8 models; models are built on a host with rknn-toolkit2 |
 | Video decode | No | rkvdec2 for RK3576 lands in kernel 7.0 |

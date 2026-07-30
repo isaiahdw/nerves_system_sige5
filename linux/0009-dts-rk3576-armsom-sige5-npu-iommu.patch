@@ -14,7 +14,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
 +++ b/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
-@@ -1146,3 +1146,30 @@
+@@ -1156,3 +1156,30 @@
  	status = "okay";
  	vref-supply = <&vcca_1v8_s0>;
  };

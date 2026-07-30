@@ -14,10 +14,11 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
 +++ b/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
-@@ -1050,3 +1050,90 @@
+@@ -1049,4 +1049,101 @@
+ 
  &wdt {
  	status = "okay";
- };
++};
 +
 +&{/soc} {
 +	rknpu: npu@27700000 {
@@ -28,23 +29,28 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +			     <GIC_SPI 248 IRQ_TYPE_LEVEL_HIGH>;
 +		interrupt-names = "npu0_irq", "npu1_irq";
 +		/*
-+		 * clk_npu comes from the CRU, not SCMI. The vendor uses
-+		 * <&scmi_clk CLK_RKNN_DSU0> to reach 900/950 MHz via BL31's
-+		 * PVTPLL, and that was tried here: the board boots on it, but
-+		 * every attempt to change the rate hangs the CPU - with the
-+		 * domain down, on a live core, and in the power-on window
-+		 * alike. The rkbin BL31 this system ships with evidently does
-+		 * not implement that rate-change path, and no DT or driver
-+		 * change fixes it. The CRU tops out at 786 MHz for this clock
-+		 * but scales reliably under load.
++		 * clk_npu is the SCMI handle: BL31 owns the NPU PVTPLL and is
++		 * the only way past 786 MHz, which is all the CRU dividers can
++		 * make from GPLL/CPLL/AUPLL/SPLL.
++		 *
++		 * PCLK_NPUTOP_ROOT matters as much as the rest. BL31 programs
++		 * PVTPLL by writing registers in the NPU top, reached over
++		 * that APB clock, and it does not enable the clock itself -
++		 * it assumes the kernel holds it. Mainline declares
++		 * PCLK_NPUTOP_ROOT without CLK_IS_CRITICAL, so with nobody
++		 * claiming it the clock is gated and every SCMI rate change
++		 * writes into a dead bus and hangs the CPU. Listing it here
++		 * is what makes the SCMI path usable at all.
++		 *
++		 * No assigned-clocks: those are applied at probe with the NPU
++		 * domain still down, and PVTPLL lives inside that domain.
 +		 */
-+		clocks = <&cru CLK_RKNN_DSU0>, <&cru ACLK_RKNN0>,
++		clocks = <&scmi_clk 238>, <&cru ACLK_RKNN0>,
 +			 <&cru ACLK_RKNN1>, <&cru HCLK_RKNN_ROOT>,
-+			 <&cru ACLK_RKNN_CBUF>, <&cru HCLK_RKNN_CBUF>;
++			 <&cru ACLK_RKNN_CBUF>, <&cru HCLK_RKNN_CBUF>,
++			 <&cru PCLK_NPUTOP_ROOT>;
 +		clock-names = "clk_npu", "aclk0", "aclk1", "hclk_root",
-+			      "aclk_cbuf", "hclk_cbuf";
-+		assigned-clocks = <&cru CLK_RKNN_DSU0>;
-+		assigned-clock-rates = <600000000>;
++			      "aclk_cbuf", "hclk_cbuf", "pclk";
 +		resets = <&cru SRST_A_RKNN0>, <&cru SRST_A_RKNN1>,
 +			 <&cru SRST_A_RKNN_CBUF>, <&cru SRST_H_RKNN_CBUF>;
 +		reset-names = "srst_a0", "srst_a1",
@@ -57,7 +63,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +		iommus = <&rknpu_mmu>;
 +		status = "okay";
 +	};
-+};
+ };
 +
 +/*
 + * NPU operating points. Frequencies and voltages are the vendor's own
@@ -70,9 +76,14 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 + * Rockchip OPP driver, so this table uses the unbinned values, which
 + * are the conservative ones.
 + *
-+ * Only rates the CRU can produce are listed: its parents are GPLL 1188,
-+ * CPLL 1000, AUPLL 786 and SPLL 702, so 300/400/500/600/800 are
-+ * reachable and 700/900/950 are not.
++ * Tops out at 800 MHz. BL31's own table (rk3576_npu_rates in TF-A)
++ * goes to 900, and 900 does run here, but not for long: it fails under
++ * sustained load even at 875 mV, the highest the vendor allows for
++ * that point. The vendor gates 900 MHz on chip bin
++ * (opp-supported-hw = <0xf1 0xffff>) and picks voltages per part from
++ * nvmem; without that binning there is no safe way to offer it, and
++ * this part evidently is not one of the good ones. 950 MHz is not in
++ * BL31's table at all.
 + */
 +&{/} {
 +	npu_opp_table: opp-table-npu {

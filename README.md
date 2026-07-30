@@ -143,11 +143,11 @@ IOMMU driving the NPU MMU:
   the mainline OPP core, and the NPU comes up on the userspace governor
   (`echo simple_ondemand > /sys/class/devfreq/27700000.npu/governor`
   for load-based scaling). Compute-bound work scales close to linearly
-  - MobileNet is 6.21 ms at 297 MHz, 3.97 at 500, 3.45 at 594, 2.59 at
-  786. The table stops at 800 MHz because that is the CRU ceiling for
-  this clock; the vendor's 900/950 MHz points come from BL31's PVTPLL
-  over SCMI, which hangs the SoC here on any rate change (see
-  linux/0002 and scripts/build-uboot.sh for what was ruled out).
+  - MobileNet is 4.78 ms at 300 MHz, 3.03 at 600 and 2.58 at 800.
+  The clock comes from BL31's PVTPLL over SCMI, which needs
+  PCLK_NPUTOP_ROOT held (mainline gates it; see linux/0002). 900 MHz
+  runs but is not stable here under load - the vendor gates that point
+  on chip bin, which needs nvmem support we do not have.
   LLM token generation is memory-bandwidth-bound and flat above
   600 MHz, so for that workload DVFS mainly saves idle power.
 

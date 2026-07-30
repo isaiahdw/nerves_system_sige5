@@ -1,37 +1,24 @@
-Add the vendor RKNPU node for the out-of-tree rknpu module
-(package/rknpu-driver) and librknnrt.
+Add the RKNPU node and its OPP table.
 
-Register map, interrupts, clocks, resets and power domains are taken
-from the vendor rk3576.dtsi at the same commit the driver comes from.
-Three deliberate differences from the vendor node:
+Registers, interrupts, clocks, resets and power domains come from the
+vendor rk3576.dtsi at the same commit as the driver.
 
-1. clk_npu comes from the CRU (CLK_RKNN_DSU0), not from SCMI. The
-   vendor node clocks the NPU DSU through BL31's SCMI PVTPLL, but the
-   SCMI rate call touches NPU_GRF/PVTPLL registers inside the NPU
-   power domain. assigned-clocks are applied at probe, before the
-   driver powers those domains on, and with the domains off (mainline
-   disables unused domains early in boot) the call wedges the CPU in
-   EL3. The CRU path only touches always-on CRU registers and drives
-   the DSU from GPLL dividers, which is what the rocket bring-up on
-   this SoC converged on as well.
+The OPP table lists only rates the CRU can actually produce for
+CLK_RKNN_DSU0. Its parents are GPLL 1188, CPLL 1000, AUPLL 786 and SPLL
+702, so 300, 400, 500, 600 and 800 are reachable and the vendor's 700,
+900 and 950 are not - those need BL31's PVTPLL over SCMI, which the NPU
+does not survive (tried: the SoC boots, then dies on the first
+inference).
 
-2. No iommus property and no OPP table: the vendor IOMMU driver
-   (rockchip,iommu-v2) does not exist in mainline, so the driver runs
-   in CMA/contiguous buffer mode (see CONFIG_CMA_SIZE_MBYTES in
-   linux/nerves.config), and devfreq is compiled out of the module, so
-   the clock is fixed by assigned-clock-rates.
-
-3. The NPU rail is pinned to 800 mV, which covers the fixed 600 MHz
-   (725 mV on the vendor OPP table) with margin.
-
-Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
 +++ b/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
-@@ -1050,3 +1050,40 @@
+@@ -1049,4 +1049,69 @@
+ 
  &wdt {
  	status = "okay";
- };
++};
 +
 +&{/soc} {
 +	rknpu: npu@27700000 {
@@ -46,8 +33,6 @@ Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
 +			 <&cru ACLK_RKNN_CBUF>, <&cru HCLK_RKNN_CBUF>;
 +		clock-names = "clk_npu", "aclk0", "aclk1", "hclk_root",
 +			      "aclk_cbuf", "hclk_cbuf";
-+		assigned-clocks = <&cru CLK_RKNN_DSU0>;
-+		assigned-clock-rates = <600000000>;
 +		resets = <&cru SRST_A_RKNN0>, <&cru SRST_A_RKNN1>,
 +			 <&cru SRST_A_RKNN_CBUF>, <&cru SRST_H_RKNN_CBUF>;
 +		reset-names = "srst_a0", "srst_a1",
@@ -55,17 +40,47 @@ Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
 +		power-domains = <&power RK3576_PD_NPU0>,
 +				<&power RK3576_PD_NPU1>;
 +		power-domain-names = "npu0", "npu1";
++		assigned-clocks = <&cru CLK_RKNN_DSU0>;
++		assigned-clock-rates = <600000000>;
++		operating-points-v2 = <&npu_opp_table>;
++		rknpu-supply = <&vdd_npu_s0>;
++		iommus = <&rknpu_mmu>;
 +		status = "okay";
++	};
+ };
++
++/*
++ * NPU operating points, from the vendor table. devfreq moves clock and
++ * rail together through these.
++ */
++&{/} {
++	npu_opp_table: opp-table-npu {
++		compatible = "operating-points-v2";
++
++		opp-300000000 {
++			opp-hz = /bits/ 64 <300000000>;
++			opp-microvolt = <675000>;
++		};
++		opp-400000000 {
++			opp-hz = /bits/ 64 <400000000>;
++			opp-microvolt = <675000>;
++		};
++		opp-500000000 {
++			opp-hz = /bits/ 64 <500000000>;
++			opp-microvolt = <700000>;
++		};
++		opp-600000000 {
++			opp-hz = /bits/ 64 <600000000>;
++			opp-microvolt = <725000>;
++		};
++		opp-800000000 {
++			opp-hz = /bits/ 64 <800000000>;
++			opp-microvolt = <825000>;
++		};
 +	};
 +};
 +
-+/*
-+ * The NPU rail: nothing manages it at runtime (devfreq is compiled out
-+ * of the rknpu module), so keep it on at a voltage that covers the
-+ * fixed NPU clock.
-+ */
++/* Nothing else votes for this rail, so keep it on; devfreq scales it. */
 +&vdd_npu_s0 {
 +	regulator-always-on;
-+	regulator-min-microvolt = <800000>;
-+	regulator-max-microvolt = <800000>;
 +};

@@ -1,0 +1,77 @@
+From: Jiaxing Hu <huhuvmb88@outlook.com>
+Date: Wed, 10 Jun 2026 16:34:44 +1200
+Subject: [PATCH] iommu/rockchip: take all DT clocks, not just aclk+iface
+
+Diagnostics from the RK3576 NPU bring-up nailed the failure: right after
+the NPU0 domain powers on (while pm-domains still has the domain clocks
+enabled) the MMU DTE_ADDR registers accept writes -- the debug value
+written from rockchip_pd_power() lands and reads back.  Microseconds
+later rk_iommu_resume() writes DTE_ADDR_DUMMY with only "aclk" + "iface"
+(ACLK_RKNN0 + HCLK_RKNN_ROOT) enabled and the write is silently dropped:
+the readback still shows the debug value.  Reads work, writes need more
+clocks.
+
+The RK3576 NPU MMU sits behind additional gates (CBUF/DSU) that must be
+running for register writes to land; the vendor keeps every NPU clock
+enabled while the device is powered.  Switch rk_iommu to
+devm_clk_bulk_get_all() so it takes whatever clocks the devicetree lists
+-- identical for every existing devicetree, which all carry exactly
+aclk + iface -- letting a DT with the full NPU clock set work. The NPU
+MMU DT nodes with that full clock set are added separately (they are not
+in mainline).
+
+Signed-off-by: Jiaxing Hu <huhuvmb88@outlook.com>
+---
+ drivers/iommu/rockchip-iommu.c | 30 ++++++-------
+ 1 file changed, 10 insertions(+), 20 deletions(-)
+
+--- a/drivers/iommu/rockchip-iommu.c
++++ b/drivers/iommu/rockchip-iommu.c
+@@ -93,11 +93,6 @@
+ 	struct iommu_domain domain;
+ };
+ 
+-/* list of clocks required by IOMMU */
+-static const char * const rk_iommu_clocks[] = {
+-	"aclk", "iface",
+-};
+-
+ struct rk_iommu_ops {
+ 	phys_addr_t (*pt_address)(u32 dte);
+ 	u32 (*mk_dtentries)(dma_addr_t pt_dma);
+@@ -1246,25 +1241,20 @@
+ 	iommu->reset_disabled = device_property_read_bool(dev,
+ 					"rockchip,disable-mmu-reset");
+ 
+-	iommu->num_clocks = ARRAY_SIZE(rk_iommu_clocks);
+-	iommu->clocks = devm_kcalloc(iommu->dev, iommu->num_clocks,
+-				     sizeof(*iommu->clocks), GFP_KERNEL);
+-	if (!iommu->clocks)
+-		return -ENOMEM;
+-
+-	for (i = 0; i < iommu->num_clocks; ++i)
+-		iommu->clocks[i].id = rk_iommu_clocks[i];
+-
+ 	/*
+-	 * iommu clocks should be present for all new devices and devicetrees
+-	 * but there are older devicetrees without clocks out in the wild.
+-	 * So clocks as optional for the time being.
++	 * Take every clock the devicetree provides.  Most IOMMU instances
++	 * need exactly "aclk" + "iface", but e.g. the RK3576 NPU IOMMUs sit
++	 * behind additional gates (CBUF/DSU) whose clocks must be running
++	 * for register writes to land.  Clocks stay optional because there
++	 * are older devicetrees without clocks out in the wild.
+ 	 */
+-	err = devm_clk_bulk_get(iommu->dev, iommu->num_clocks, iommu->clocks);
+-	if (err == -ENOENT)
++	err = devm_clk_bulk_get_all(iommu->dev, &iommu->clocks);
++	if (err == -ENOENT || err == 0)
+ 		iommu->num_clocks = 0;
+-	else if (err)
++	else if (err < 0)
+ 		return err;
++	else
++		iommu->num_clocks = err;
+ 
+ 	err = clk_bulk_prepare(iommu->num_clocks, iommu->clocks);
+ 	if (err)

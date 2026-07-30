@@ -7,7 +7,7 @@ extra banks sit in a powered-down domain and the first access stalls
 the interconnect. Attach the whole list with runtime-PM device links
 so every domain powers up before the IOMMU's resume touches any bank.
 
-Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/drivers/iommu/rockchip-iommu.c
 +++ b/drivers/iommu/rockchip-iommu.c

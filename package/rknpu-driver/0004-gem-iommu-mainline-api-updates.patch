@@ -3,7 +3,7 @@ iommu_map/iommu_map_sg GFP argument, sg_dma_is_bus_address rename,
 pfn_t removal, explicit vmalloc.h, vendor version_compat_defs.h only
 on older kernels.
 
-Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 diff --git a/rknpu_iommu.c b/rknpu_iommu.c
 index 3e05fd5..e95446a 100644

@@ -7,7 +7,7 @@ sits at offset 0; the vendor mirror's leading type enum skews every
 field access by 8 bytes, and the first allocation crashes inside
 alloc_iova() on a garbage spinlock.
 
-Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 diff --git a/include/rknpu_iommu.h b/include/rknpu_iommu.h
 index 2251766..04c0b82 100644

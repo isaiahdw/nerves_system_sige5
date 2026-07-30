@@ -4,7 +4,7 @@ runtime-PM stubs return 0 so runtime suspend/resume still succeeds.
 Without an IOMMU rockchip_iommu_is_enabled() reports disabled, putting
 the driver in CMA/contiguous buffer mode.
 
-Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 diff --git a/include/rknpu_devfreq.h b/include/rknpu_devfreq.h
 index c5fa9b2..b1759bf 100644

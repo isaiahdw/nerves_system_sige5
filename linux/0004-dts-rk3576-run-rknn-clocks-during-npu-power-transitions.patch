@@ -14,7 +14,7 @@ Adapted from the RK3576 rocket bring-up patch by Jiaxing Hu
 from that series, which its own history found unnecessary once the
 clocks were fixed.
 
-Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/arch/arm64/boot/dts/rockchip/rk3576.dtsi
 +++ b/arch/arm64/boot/dts/rockchip/rk3576.dtsi

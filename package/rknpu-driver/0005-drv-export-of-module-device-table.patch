@@ -5,7 +5,7 @@ as an out-of-tree module, without MODULE_DEVICE_TABLE(of, ...) there
 is no of: alias in modules.alias and udev/nerves_uevent cannot load
 the driver for the 27700000.npu platform device at boot.
 
-Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/rknpu_drv.c
 +++ b/rknpu_drv.c

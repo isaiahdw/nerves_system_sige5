@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- NPU frequency scaling: devfreq reimplemented on mainline OPP APIs
+  (the vendor version depends on Rockchip-only infrastructure). Rate
+  changes are deferred while the NPU is unpowered, since its clock and
+  rail sit inside the NPU power domains. MobileNet scales 6.23 ms at
+  297 MHz to 2.84 ms at 786 MHz; LLM decode is memory-bound and flat
+  above 600 MHz. The OPP table lists only rates the CRU can
+  produce (300-800 MHz); the vendor's 900/950 need BL31's PVTPLL over
+  SCMI, which the NPU does not survive - the SoC boots on it and then
+  dies on the first inference.
+- LLM inference validated on hardware: Qwen3-0.6B (W4A16) through
+  rkllm 1.3.0 at 17-18 tokens/s, 17-run soak with no failures and no
+  memory growth, multi-turn conversations with history retention.
+  Thermals settle at 66 C under sustained load with no throttling.
+  All at the fixed 600 MHz clock.
+- IOMMU: force v2 page tables into the DMA32 zone. The RK3576 v2 walker
+  was believed to reach above 4 GB, but that was concluded on a 4 GB
+  board; on this 8 GB board large NPU mappings wedge the interconnect
+  without it. Also take all DT clocks in the IOMMU driver so the MMU's
+  CBUF gates run during resume.
+
 ## v0.2.0 - 2026-07-29
 
 The NPU's MMU now runs on mainline's rockchip-iommu, on both cores:

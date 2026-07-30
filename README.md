@@ -124,19 +124,30 @@ enable), the vendor RKNPU node (`linux/0002`), and two power-domain
 fixes the NPU needs on mainline (`linux/0003`/`0004`). Configuration is
 the arm64 `defconfig` plus `linux/nerves.config`, documented inline.
 
-## NPU limitations
+## NPU notes
 
-The vendor NPU driver runs in a reduced configuration on the mainline
-kernel, which sets some practical bounds:
+The vendor NPU driver runs on the mainline kernel with mainline's own
+IOMMU driving the NPU MMU:
 
-- The NPU's MMU runs on mainline's rockchip-iommu (both cores; one
-  small driver patch attaches the MMU's two power domains), so buffers
-  are ordinary pageable memory - no CMA cap, and 400 MB single
-  allocations verified on hardware. Verified bit-exact against
-  Rockchip's reference outputs through the IOMMU on both cores.
-- The clock is fixed at 600 MHz (no devfreq yet), roughly two thirds
-  of the vendor kernel's peak, and the NPU rail stays on at 800 mV.
-  Rebuilding devfreq on standard OPP APIs is the remaining gap.
+- Both cores go through mainline's rockchip-iommu (one small driver
+  patch attaches the MMU's two power domains), so NPU buffers are
+  ordinary pageable memory. No CMA cap: 1 GB single allocations
+  verified on hardware.
+- Vision inference is bit-exact against Rockchip's reference outputs
+  through the IOMMU on both cores.
+- LLM inference works. Qwen3-0.6B (W4A16) via rkllm 1.3.0 runs at
+  17-18 tokens/s, holds that rate across a 17-run soak, and supports
+  multi-turn conversations with history (throughput tapers with
+  context, as expected). No memory growth across 25 inferences.
+- Frequency scaling works: devfreq drives the vendor OPP table through
+  the mainline OPP core, and the NPU comes up on the userspace governor
+  (`echo simple_ondemand > /sys/class/devfreq/27700000.npu/governor`
+  for load-based scaling). Compute-bound work scales close to linearly
+  - MobileNet is 6.23 ms at 297 MHz, 3.39 ms at 594, 2.84 ms at 786.
+  Rates above 800 MHz need BL31's PVTPLL over SCMI, which this NPU
+  does not survive, so the table stops there.
+  LLM token generation is memory-bandwidth-bound and flat above
+  600 MHz, so for that workload DVFS mainly saves idle power.
 
 ## Debug UART
 

@@ -14,11 +14,10 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
 +++ b/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
-@@ -1049,4 +1049,69 @@
- 
+@@ -1050,3 +1050,90 @@
  &wdt {
  	status = "okay";
-+};
+ };
 +
 +&{/soc} {
 +	rknpu: npu@27700000 {
@@ -28,11 +27,24 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +		interrupts = <GIC_SPI 247 IRQ_TYPE_LEVEL_HIGH>,
 +			     <GIC_SPI 248 IRQ_TYPE_LEVEL_HIGH>;
 +		interrupt-names = "npu0_irq", "npu1_irq";
++		/*
++		 * clk_npu comes from the CRU, not SCMI. The vendor uses
++		 * <&scmi_clk CLK_RKNN_DSU0> to reach 900/950 MHz via BL31's
++		 * PVTPLL, and that was tried here: the board boots on it, but
++		 * every attempt to change the rate hangs the CPU - with the
++		 * domain down, on a live core, and in the power-on window
++		 * alike. The rkbin BL31 this system ships with evidently does
++		 * not implement that rate-change path, and no DT or driver
++		 * change fixes it. The CRU tops out at 786 MHz for this clock
++		 * but scales reliably under load.
++		 */
 +		clocks = <&cru CLK_RKNN_DSU0>, <&cru ACLK_RKNN0>,
 +			 <&cru ACLK_RKNN1>, <&cru HCLK_RKNN_ROOT>,
 +			 <&cru ACLK_RKNN_CBUF>, <&cru HCLK_RKNN_CBUF>;
 +		clock-names = "clk_npu", "aclk0", "aclk1", "hclk_root",
 +			      "aclk_cbuf", "hclk_cbuf";
++		assigned-clocks = <&cru CLK_RKNN_DSU0>;
++		assigned-clock-rates = <600000000>;
 +		resets = <&cru SRST_A_RKNN0>, <&cru SRST_A_RKNN1>,
 +			 <&cru SRST_A_RKNN_CBUF>, <&cru SRST_H_RKNN_CBUF>;
 +		reset-names = "srst_a0", "srst_a1",
@@ -40,18 +52,27 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +		power-domains = <&power RK3576_PD_NPU0>,
 +				<&power RK3576_PD_NPU1>;
 +		power-domain-names = "npu0", "npu1";
-+		assigned-clocks = <&cru CLK_RKNN_DSU0>;
-+		assigned-clock-rates = <600000000>;
 +		operating-points-v2 = <&npu_opp_table>;
 +		rknpu-supply = <&vdd_npu_s0>;
 +		iommus = <&rknpu_mmu>;
 +		status = "okay";
 +	};
- };
++};
 +
 +/*
-+ * NPU operating points, from the vendor table. devfreq moves clock and
-+ * rail together through these.
++ * NPU operating points. Frequencies and voltages are the vendor's own
++ * (rk3576.dtsi npu_opp_table), not estimates: the vendor holds 725 mV
++ * flat from 300 to 700 MHz and only climbs above that. An earlier table
++ * here guessed lower voltages at the low end and browned the NPU out.
++ *
++ * The vendor additionally bins these per chip via nvmem
++ * (opp-supported-hw and opp-microvolt-L0/L1/L2). That needs the
++ * Rockchip OPP driver, so this table uses the unbinned values, which
++ * are the conservative ones.
++ *
++ * Only rates the CRU can produce are listed: its parents are GPLL 1188,
++ * CPLL 1000, AUPLL 786 and SPLL 702, so 300/400/500/600/800 are
++ * reachable and 700/900/950 are not.
 + */
 +&{/} {
 +	npu_opp_table: opp-table-npu {
@@ -59,15 +80,15 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +
 +		opp-300000000 {
 +			opp-hz = /bits/ 64 <300000000>;
-+			opp-microvolt = <675000>;
++			opp-microvolt = <725000>;
 +		};
 +		opp-400000000 {
 +			opp-hz = /bits/ 64 <400000000>;
-+			opp-microvolt = <675000>;
++			opp-microvolt = <725000>;
 +		};
 +		opp-500000000 {
 +			opp-hz = /bits/ 64 <500000000>;
-+			opp-microvolt = <700000>;
++			opp-microvolt = <725000>;
 +		};
 +		opp-600000000 {
 +			opp-hz = /bits/ 64 <600000000>;
@@ -75,7 +96,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +		};
 +		opp-800000000 {
 +			opp-hz = /bits/ 64 <800000000>;
-+			opp-microvolt = <825000>;
++			opp-microvolt = <800000>;
 +		};
 +	};
 +};

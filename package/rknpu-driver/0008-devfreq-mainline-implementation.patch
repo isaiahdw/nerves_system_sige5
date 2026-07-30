@@ -37,7 +37,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  rknpu-y += rknpu_reset.o
 --- a/rknpu_devfreq.c
 +++ b/rknpu_devfreq.c
-@@ -2,807 +2,269 @@
+@@ -2,807 +2,257 @@
  /*
   * Copyright (C) Rockchip Electronics Co., Ltd.
   * Author: Finley Xiao <finley.xiao@rock-chips.com>
@@ -151,15 +151,15 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
 -	if (rm == opp_info->current_rm || rm == UINT_MAX)
 +	/*
-+	 * A rate change touches the NPU clock tree and rail, both of which
-+	 * live inside the NPU power domains: doing it while the block is
-+	 * unpowered stalls the interconnect and takes the SoC down.
++	 * The NPU clock and rail live inside the NPU power domains, so a
++	 * rate change with the domain down stalls the interconnect. When
++	 * the block is unpowered, record the request and let the next
++	 * power-on apply it.
 +	 *
-+	 * Locking note: this runs with devfreq->lock held, and
-+	 * rknpu_power_on()/rknpu_power_off() take that same lock (after
-+	 * power_lock) around their transitions. So the power state cannot
-+	 * change underneath us here, and we must NOT take power_lock
-+	 * ourselves - that is the reverse order and deadlocks.
++	 * Locking: devfreq holds devfreq->lock across this, and the power
++	 * paths take it after power_lock, so taking power_lock here would
++	 * deadlock. It is not needed: those same locks serialise power
++	 * transitions against this callback.
 +	 */
 +	if (atomic_read(&rknpu_dev->power_refcount) <= 0) {
 +		rknpu_dev->ondemand_freq = *freq;
@@ -167,23 +167,38 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	}
  
 -	LOG_DEV_DEBUG(dev, "set rm to %d\n", rm);
--
++	ret = dev_pm_opp_set_rate(dev, *freq);
++	if (ret) {
++		LOG_DEV_ERROR(dev, "failed to set npu rate %lu: %d\n", *freq,
++			      ret);
++		return ret;
++	}
+ 
 -	regmap_write(opp_info->grf, 0x08, 0x001c0000 | (rm << 2));
 -	regmap_write(opp_info->grf, 0x0c, 0x003c0000 | (rm << 2));
 -	regmap_write(opp_info->grf, 0x10, 0x001c0000 | (rm << 2));
--
--	return 0;
--}
--
++	rknpu_dev->current_freq = clk_get_rate(rknpu_dev->clks[0].clk);
++	rknpu_dev->ondemand_freq = *freq;
++	if (rknpu_dev->vdd)
++		rknpu_dev->current_volt = regulator_get_voltage(rknpu_dev->vdd);
+ 
+ 	return 0;
+ }
+ 
 -static int rk3588_npu_get_soc_info(struct device *dev, struct device_node *np,
 -				   int *bin, int *process)
--{
++static int npu_devfreq_apply_pending(struct device *dev)
+ {
 -	int ret = 0;
 -	u8 value = 0;
--
++	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
++	int ret;
+ 
 -	if (!bin)
--		return 0;
--
++	if (!rknpu_dev->ondemand_freq ||
++	    rknpu_dev->ondemand_freq == rknpu_dev->current_freq)
+ 		return 0;
+ 
 -	if (of_property_match_string(np, "nvmem-cell-names",
 -				     "specification_serial_number") >= 0) {
 -		ret = rockchip_nvmem_cell_read_u8(
@@ -193,31 +208,29 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -				dev,
 -				"Failed to get specification_serial_number\n");
 -			return ret;
-+	/*
-+	 * Don't retune under a running job either: the vendor driver
-+	 * changes rate only between jobs. Defer to the next transition.
-+	 */
-+	spin_lock_irqsave(&rknpu_dev->irq_lock, irqflags);
-+	for (i = 0; i < rknpu_dev->config->num_irqs; i++) {
-+		if (rknpu_dev->subcore_datas[i].job) {
-+			busy = true;
-+			break;
- 		}
+-		}
 -		/* RK3588M */
 -		if (value == 0xd)
 -			*bin = 1;
 -		/* RK3588J */
 -		else if (value == 0xa)
 -			*bin = 2;
++	ret = dev_pm_opp_set_rate(dev, rknpu_dev->ondemand_freq);
++	if (ret) {
++		LOG_DEV_ERROR(dev, "failed to set npu rate %lu: %d\n",
++			      rknpu_dev->ondemand_freq, ret);
++		return ret;
  	}
 -	if (*bin < 0)
 -		*bin = 0;
 -	LOG_DEV_INFO(dev, "bin=%d\n", *bin);
-+	spin_unlock_irqrestore(&rknpu_dev->irq_lock, irqflags);
  
 -	return ret;
 -}
--
++	rknpu_dev->current_freq = clk_get_rate(rknpu_dev->clks[0].clk);
++	if (rknpu_dev->vdd)
++		rknpu_dev->current_volt = regulator_get_voltage(rknpu_dev->vdd);
+ 
 -#if KERNEL_VERSION(6, 1, 0) <= LINUX_VERSION_CODE
 -static int rk3588_npu_set_soc_info(struct device *dev, struct device_node *np,
 -				   struct rockchip_opp_info *opp_info)
@@ -225,39 +238,18 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -	int bin = opp_info->bin;
 -
 -	if (opp_info->volt_sel < 0)
-+	if (busy) {
-+		rknpu_dev->ondemand_freq = *freq;
- 		return 0;
+-		return 0;
 -	if (bin < 0)
 -		bin = 0;
-+	}
- 
+-
 -	if (!of_property_read_bool(np, "rockchip,supported-hw"))
 -		return 0;
-+	/* dev_pm_opp_set_rate() moves clock and voltage together, in the
-+	 * safe order for both directions.
-+	 */
-+	ret = dev_pm_opp_set_rate(dev, *freq);
-+	if (ret) {
-+		LOG_DEV_ERROR(dev, "failed to set npu rate %lu: %d\n", *freq,
-+			      ret);
-+		return ret;
-+	}
- 
+-
 -	/* SoC Version */
 -	opp_info->supported_hw[0] = BIT(bin);
 -	/* Speed Grade */
 -	opp_info->supported_hw[1] = BIT(opp_info->volt_sel);
-+	/*
-+	 * Report what the clock actually produced, not what was asked
-+	 * for: a rate the PLL cannot hit is rounded silently, and a
-+	 * cur_freq that repeats the request just hides that.
-+	 */
-+	rknpu_dev->current_freq = clk_get_rate(rknpu_dev->clks[0].clk);
-+	rknpu_dev->ondemand_freq = *freq;
-+	if (rknpu_dev->vdd)
-+		rknpu_dev->current_volt = regulator_get_voltage(rknpu_dev->vdd);
- 
+-
  	return 0;
  }
 -#else
@@ -303,19 +295,19 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -	return 0;
 -}
 -#endif
-+	stat->busy_time = (unsigned long)ktime_to_us(busy);
-+	stat->total_time = RKNPU_LOAD_INTERVAL / 1000;
-+	if (stat->busy_time > stat->total_time)
-+		stat->busy_time = stat->total_time;
-+	stat->current_frequency = rknpu_dev->current_freq;
- 
+-
 -static int rk3588_npu_set_read_margin(struct device *dev,
 -				      struct rockchip_opp_info *opp_info,
 -				      u32 rm)
 -{
 -	u32 offset = 0, val = 0;
 -	int i, ret = 0;
--
++	stat->busy_time = (unsigned long)ktime_to_us(busy);
++	stat->total_time = RKNPU_LOAD_INTERVAL / 1000;
++	if (stat->busy_time > stat->total_time)
++		stat->busy_time = stat->total_time;
++	stat->current_frequency = rknpu_dev->current_freq;
+ 
 -	if (!opp_info->grf || !opp_info->volt_rm_tbl)
 -		return 0;
 -
@@ -545,8 +537,10 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		ret = PTR_ERR(rknpu_dev->devfreq);
  		rknpu_dev->devfreq = NULL;
 -		goto err_remove_governor;
--	}
--
++		LOG_DEV_ERROR(dev, "failed to add devfreq device: %d\n", ret);
++		return ret;
+ 	}
+ 
 -	npu_mdevp.data = rknpu_dev->devfreq;
 -	npu_mdevp.opp_info = &rknpu_dev->opp_info;
 -	rknpu_dev->mdev_info =
@@ -554,15 +548,13 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -	if (IS_ERR(rknpu_dev->mdev_info)) {
 -		dev_dbg(dev, "without system monitor\n");
 -		rknpu_dev->mdev_info = NULL;
-+		LOG_DEV_ERROR(dev, "failed to add devfreq device: %d\n", ret);
-+		return ret;
- 	}
+-	}
++	devm_devfreq_register_opp_notifier(dev, rknpu_dev->devfreq);
  
 -	rknpu_dev->current_freq = clk_get_rate(rknpu_dev->clks[0].clk);
 -	rknpu_dev->ondemand_freq = rknpu_dev->current_freq;
 -	rknpu_dev->current_volt = regulator_get_voltage(rknpu_dev->vdd);
-+	devm_devfreq_register_opp_notifier(dev, rknpu_dev->devfreq);
- 
+-
 -	rknpu_dev->devfreq->previous_freq = rknpu_dev->current_freq;
 -	if (rknpu_dev->devfreq->suspend_freq)
 -		rknpu_dev->devfreq->resume_freq = rknpu_dev->current_freq;
@@ -963,17 +955,9 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -	if (ret) {
 -		LOG_DEV_INFO(dev, "failed to enable opp clks\n");
 -		return ret;
-+	/*
-+	 * Apply any rate requested while the device was powered down. This
-+	 * runs from the driver's power-on path with the block powered, so
-+	 * the register access is safe.
-+	 */
-+	if (rknpu_dev->ondemand_freq &&
-+	    rknpu_dev->ondemand_freq != rknpu_dev->current_freq) {
-+		if (!dev_pm_opp_set_rate(dev, rknpu_dev->ondemand_freq))
-+			rknpu_dev->current_freq =
-+				clk_get_rate(rknpu_dev->clks[0].clk);
- 	}
+-	}
++	/* Power is on and no job has started yet: the safe window. */
++	npu_devfreq_apply_pending(dev);
  
 -	if (opp_info->data && opp_info->data->set_read_margin)
 -		opp_info->data->set_read_margin(dev, opp_info,

@@ -24,6 +24,13 @@ UBOOT_VERSION="v2026.01"
 RKBIN_COMMIT="ecb4fcbe954edf38b3ae037d5de6d9f5bccf81f4"
 DDR_BIN="bin/rk35/rk3576_ddr_lp4_2112MHz_lp5_2736MHz_v1.12.bin"
 BL31_ELF="bin/rk35/rk3576_bl31_v1.24.elf"
+# No BL32. Rockchip's RK3576TRUST.ini loads rk3576_bl32_v1.08.bin (OP-TEE)
+# next to BL31, and its absence is the best remaining explanation for why
+# SCMI/PVTPLL clock changes hang the NPU here (see linux/0002). Passing it
+# as TEE= does not work: binman wants an ELF and rkbin ships a raw blob
+# that only Rockchip's own trust_merger packs. Loading it would mean
+# building OP-TEE from source, and upstream optee_os has no RK3576
+# platform. Left undone deliberately.
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 

@@ -1,0 +1,117 @@
+iommu/rockchip: do not treat an orphaned fault bank as un-stalled
+
+A bank left with PAGE_FAULT_ACTIVE but no STALL_ACTIVE and IDLE set is
+carrying an orphaned fault from firmware, raised before paging was ever
+configured. It will not enter stall mode, but it has no transaction in
+flight either, so it is already quiescent. Counting it as "not stalled"
+made rk_iommu_enable_stall() poll it to the timeout on every attach.
+
+Skipping those banks means the two callers can no longer share one
+predicate, because they are not asking the same question.
+
+rk_iommu_enable_stall() wants every bank that can stall to have stalled -
+an AND - and with all banks orphaned that is trivially true, so it stops
+waiting immediately.
+
+rk_iommu_disable_stall() wants to know whether any bank is still being
+held - an OR. The AND form is wrong for it twice over: it would go false
+as soon as the first bank cleared, letting the poll return while another
+was still stalled, and with every bank orphaned it would stay true for
+ever and poll a DISABLE_STALL that no bank acts on all the way to the
+timeout.
+
+Compute both readings in one pass and give each caller its own wrapper.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/drivers/iommu/rockchip-iommu.c
++++ b/drivers/iommu/rockchip-iommu.c
+@@ -373,16 +373,67 @@
+ 	}
+ }
+ 
+-static bool rk_iommu_is_stall_active(struct rk_iommu *iommu)
++/*
++ * Report both readings of stall state across the banks, skipping orphans.
++ *
++ * A bank stuck with PAGE_FAULT_ACTIVE but without STALL_ACTIVE and with IDLE
++ * set is carrying an orphaned fault raised by firmware before paging was
++ * configured.  It will not enter stall mode, but it has no transaction in
++ * flight either, so it is already quiescent and counting it as "not stalled"
++ * only makes the callers wait for something that cannot happen.
++ *
++ * With every bank skipped, *all is true and *any is false, which is what the
++ * two callers below separately need.
++ */
++static void rk_iommu_stall_state(struct rk_iommu *iommu, bool *all, bool *any)
+ {
+-	bool active = true;
++	bool every = true;
++	bool some = false;
+ 	int i;
+ 
+-	for (i = 0; i < iommu->num_mmu; i++)
+-		active &= !!(rk_iommu_read(iommu->bases[i], RK_MMU_STATUS) &
+-					   RK_MMU_STATUS_STALL_ACTIVE);
++	for (i = 0; i < iommu->num_mmu; i++) {
++		u32 status = rk_iommu_read(iommu->bases[i], RK_MMU_STATUS);
++
++		if ((status & RK_MMU_STATUS_PAGE_FAULT_ACTIVE) &&
++		    !(status & RK_MMU_STATUS_STALL_ACTIVE) &&
++		    (status & RK_MMU_STATUS_IDLE))
++			continue;
++
++		every &= !!(status & RK_MMU_STATUS_STALL_ACTIVE);
++		some |= !!(status & RK_MMU_STATUS_STALL_ACTIVE);
++	}
+ 
+-	return active;
++	*all = every;
++	*any = some;
++}
++
++/*
++ * Every bank that can stall has stalled.  rk_iommu_enable_stall() waits on
++ * this, and with all banks orphaned it is true straight away.
++ */
++static bool rk_iommu_is_stall_active(struct rk_iommu *iommu)
++{
++	bool all, any;
++
++	rk_iommu_stall_state(iommu, &all, &any);
++
++	return all;
++}
++
++/*
++ * Any bank is still being held in stall mode.  rk_iommu_disable_stall() needs
++ * this rather than the predicate above for both of its questions: the "all"
++ * form would go false as soon as the first bank cleared, letting it return
++ * while another was still stalled, and with every bank orphaned it would stay
++ * true for ever and poll a DISABLE_STALL that no bank acts on to the timeout.
++ */
++static bool rk_iommu_is_stall_engaged(struct rk_iommu *iommu)
++{
++	bool all, any;
++
++	rk_iommu_stall_state(iommu, &all, &any);
++
++	return any;
+ }
+ 
+ static bool rk_iommu_is_paging_enabled(struct rk_iommu *iommu)
+@@ -438,12 +489,12 @@
+ 	int ret, i;
+ 	bool val;
+ 
+-	if (!rk_iommu_is_stall_active(iommu))
++	if (!rk_iommu_is_stall_engaged(iommu))
+ 		return 0;
+ 
+ 	rk_iommu_command(iommu, RK_MMU_CMD_DISABLE_STALL);
+ 
+-	ret = readx_poll_timeout(rk_iommu_is_stall_active, iommu, val,
++	ret = readx_poll_timeout(rk_iommu_is_stall_engaged, iommu, val,
+ 				 !val, RK_MMU_POLL_PERIOD_US,
+ 				 RK_MMU_POLL_TIMEOUT_US);
+ 	if (ret)

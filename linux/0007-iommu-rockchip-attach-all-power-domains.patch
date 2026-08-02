@@ -27,7 +27,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  };
  
  struct rk_iommudata {
-@@ -1319,6 +1321,22 @@
+@@ -1319,6 +1321,24 @@
  	err = clk_bulk_prepare(iommu->num_clocks, iommu->clocks);
  	if (err)
  		return err;
@@ -44,8 +44,10 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	if (of_count_phandle_with_args(dev->of_node, "power-domains",
 +				       "#power-domain-cells") > 1) {
 +		err = devm_pm_domain_attach_list(dev, NULL, &iommu->pd_list);
-+		if (err < 0)
++		if (err < 0) {
++			clk_bulk_unprepare(iommu->num_clocks, iommu->clocks);
 +			return err;
++		}
 +	}
  
  	pm_runtime_enable(dev);

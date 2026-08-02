@@ -1,0 +1,120 @@
+dt-bindings: opp: describe the RKNPU OPP table
+
+The NPU OPP table carries two properties the generic operating-points-v2
+schema has no place for: a phandle to the NPU GRF, and the table mapping
+rail voltage to the memory read margin the driver programs alongside it.
+Nothing described them, so a node using them passed dtc and would have
+failed dtbs_check.
+
+Give them a compatible of their own, following the same shape as the
+other SoC-specific OPP tables, and require the two properties together -
+half a configuration leaves the margin at its reset value, which is what
+having it at all is meant to prevent. The margin is bounded to the three
+bits the register field has, and the table to the eight entries the
+driver stores.
+
+Operating points that share a frequency across variants need distinct
+node names, so the child pattern allows a second number after the
+frequency; opp-supported-hw still selects between them.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+diff --git a/Documentation/devicetree/bindings/opp/opp-v2-rknpu.yaml b/Documentation/devicetree/bindings/opp/opp-v2-rknpu.yaml
+new file mode 100644
+--- /dev/null
++++ b/Documentation/devicetree/bindings/opp/opp-v2-rknpu.yaml
+@@ -0,0 +1,94 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/opp/opp-v2-rknpu.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Rockchip RKNPU OPP table
++
++maintainers:
++  - Isaiah DeRose-Wilson <isaiahdw@gmail.com>
++
++allOf:
++  - $ref: opp-v2-base.yaml#
++
++description: |
++  The NPU on some Rockchip SoCs carries a memory read-margin setting that has
++  to track the operating voltage. It lives in the NPU GRF and is rewritten as
++  part of each voltage transition, so the table that defines the operating
++  points also describes where the setting is and which value each voltage
++  needs.
++
++properties:
++  compatible:
++    const: operating-points-v2-rknpu
++
++  rockchip,grf:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description:
++      Phandle to the NPU general register file holding the memory read-margin
++      registers.
++
++  rockchip,volt-mem-read-margin:
++    $ref: /schemas/types.yaml#/definitions/uint32-matrix
++    description:
++      Voltage thresholds and the read margin each requires, highest voltage
++      first. The margin for an operating point is taken from the first entry
++      whose threshold is at or below its voltage.
++    minItems: 1
++    maxItems: 8
++    items:
++      items:
++        - description: voltage threshold in microvolts
++        - description: read margin to program at or above that voltage
++          maximum: 7
++
++patternProperties:
++  '^opp(-[0-9]+){1,2}$':
++    type: object
++    additionalProperties: false
++    description:
++      A trailing second number distinguishes operating points that share a
++      frequency but belong to different variants, since node names must be
++      unique. Which variant an entry applies to comes from opp-supported-hw.
++
++    properties:
++      opp-hz: true
++      opp-microvolt: true
++      opp-supported-hw: true
++
++    required:
++      - opp-hz
++
++dependencies:
++  "rockchip,grf": ["rockchip,volt-mem-read-margin"]
++  rockchip,volt-mem-read-margin: ["rockchip,grf"]
++
++required:
++  - compatible
++
++additionalProperties: false
++
++examples:
++  - |
++    opp-table-npu {
++        compatible = "operating-points-v2-rknpu";
++
++        rockchip,grf = <&npu_grf>;
++        rockchip,volt-mem-read-margin = <855000 1>,
++                                        <765000 2>,
++                                        <675000 3>,
++                                        <495000 4>;
++
++        opp-300000000 {
++            opp-hz = /bits/ 64 <300000000>;
++            opp-microvolt = <750000>;
++            opp-supported-hw = <0xf9 0xffff>;
++        };
++
++        opp-300000000-1 {
++            opp-hz = /bits/ 64 <300000000>;
++            opp-microvolt = <750000>;
++            opp-supported-hw = <0x06 0xffff>;
++        };
++    };

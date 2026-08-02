@@ -1,0 +1,123 @@
+debugfs: report the raw DVFS signal
+
+Measurement support. The load counters are only read by devfreq, and devfreq
+only reads them under a polling governor, so with the userspace governor
+selected there is no way to see what the driver considers busy - which is the
+one thing worth knowing before choosing a governor policy.
+
+Add a "dvfs" node reporting, per core, the cumulative busy count, the pending
+task count and whether a job is on the hardware, plus the current rate and
+voltage and the last sample devfreq was handed. The busy counts are monotonic,
+so a reader takes two samples and divides by the elapsed timestamp; that works
+at any interval and does not require a governor to be polling.
+
+npu_core_busy_cum() stops being static so the node computes busy time exactly
+the way the governor does, rather than a second implementation that can drift.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/rknpu_devfreq.c
++++ b/rknpu_devfreq.c
+@@ -482,7 +482,7 @@
+  * been accounted yet. Monotonic, so the difference between two reads is the
+  * busy time between them. Caller holds irq_lock.
+  */
+-static ktime_t npu_core_busy_cum(struct rknpu_subcore_data *sd, ktime_t now)
++ktime_t rknpu_devfreq_core_busy_cum(struct rknpu_subcore_data *sd, ktime_t now)
+ {
+ 	ktime_t cum = ktime_add(sd->timer.busy_cum, sd->timer.busy_time);
+ 
+@@ -509,7 +509,7 @@
+ 	now = ktime_get();
+ 	for (i = 0; i < rknpu_dev->config->num_irqs; i++) {
+ 		struct rknpu_subcore_data *sd = &rknpu_dev->subcore_datas[i];
+-		ktime_t cum = npu_core_busy_cum(sd, now);
++		ktime_t cum = rknpu_devfreq_core_busy_cum(sd, now);
+ 		ktime_t delta = ktime_sub(cum, sd->timer.devfreq_prev);
+ 
+ 		sd->timer.devfreq_prev = cum;
+--- a/include/rknpu_devfreq.h
++++ b/include/rknpu_devfreq.h
+@@ -13,6 +13,8 @@
+ int rknpu_devfreq_runtime_suspend(struct device *dev);
+ int rknpu_devfreq_runtime_resume(struct device *dev);
+ int rknpu_devfreq_sync_rate(struct device *dev);
++ktime_t rknpu_devfreq_core_busy_cum(struct rknpu_subcore_data *sd,
++				    ktime_t now);
+ #else
+ static inline int rknpu_devfreq_init(struct rknpu_device *rknpu_dev)
+ {
+@@ -32,6 +34,12 @@
+ {
+ 	return 0;
+ }
++
++static inline ktime_t
++rknpu_devfreq_core_busy_cum(struct rknpu_subcore_data *sd, ktime_t now)
++{
++	return 0;
++}
+ #endif /* CONFIG_ROCKCHIP_RKNPU_DEVFREQ */
+ 
+ #endif /* __LINUX_RKNPU_DEVFREQ_H_ */
+--- a/rknpu_debugger.c
++++ b/rknpu_debugger.c
+@@ -23,6 +23,7 @@
+ #include "rknpu_mm.h"
+ #include "rknpu_reset.h"
+ #include "rknpu_debugger.h"
++#include "rknpu_devfreq.h"
+ 
+ #define RKNPU_DEBUGGER_ROOT_NAME "rknpu"
+ 
+@@ -301,9 +302,50 @@
+ 	return len;
+ }
+ 
++static int rknpu_dvfs_show(struct seq_file *m, void *data)
++{
++	struct rknpu_debugger_node *node = m->private;
++	struct rknpu_debugger *debugger = node->debugger;
++	struct rknpu_device *rknpu_dev =
++		container_of(debugger, struct rknpu_device, debugger);
++	unsigned long flags;
++	ktime_t now;
++	int i;
++
++	/*
++	 * One sample per read. The busy counts are cumulative and monotonic,
++	 * so a reader takes two samples and divides the difference by the
++	 * elapsed timestamp; that works at any interval and does not depend
++	 * on a governor polling.
++	 */
++	spin_lock_irqsave(&rknpu_dev->irq_lock, flags);
++	now = ktime_get();
++	seq_printf(m, "ts_ns %lld\n", ktime_to_ns(now));
++	for (i = 0; i < rknpu_dev->config->num_irqs; i++) {
++		struct rknpu_subcore_data *sd = &rknpu_dev->subcore_datas[i];
++
++		seq_printf(m, "core %d busy_ns %lld queue %lld running %d\n", i,
++			   ktime_to_ns(rknpu_devfreq_core_busy_cum(sd, now)),
++			   sd->task_num, sd->job ? 1 : 0);
++	}
++	spin_unlock_irqrestore(&rknpu_dev->irq_lock, flags);
++
++	seq_printf(m, "freq_hz %lu\n", rknpu_dev->current_freq);
++	seq_printf(m, "volt_uv %lu\n", rknpu_dev->current_volt);
++
++	/* What the governor was last handed, empty while nothing polls. */
++	if (rknpu_dev->devfreq)
++		seq_printf(m, "gov_busy_us %lu gov_total_us %lu\n",
++			   rknpu_dev->devfreq->last_status.busy_time,
++			   rknpu_dev->devfreq->last_status.total_time);
++
++	return 0;
++}
++
+ static struct rknpu_debugger_list rknpu_debugger_root_list[] = {
+ 	{ "version", rknpu_version_show, NULL, NULL },
+ 	{ "load", rknpu_load_show, NULL, NULL },
++	{ "dvfs", rknpu_dvfs_show, NULL, NULL },
+ 	{ "power", rknpu_power_show, rknpu_power_set, NULL },
+ 	{ "freq", rknpu_freq_show, rknpu_freq_set, NULL },
+ 	{ "volt", rknpu_volt_show, NULL, NULL },

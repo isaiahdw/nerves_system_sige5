@@ -1,0 +1,108 @@
+devfreq: report demand rather than duty cycle, and scale by default
+
+A utilization governor asks what fraction of the window the device spent
+executing, and treats a device idle half the time as one that can be slowed
+down for free. That holds when the device is the bottleneck. This one is not:
+an inference is about 2.3 ms of NPU time inside a 9 ms pipeline, so even at
+full load and the highest rate the busiest core measures ~50% - and at the
+lowest rate only ~64%, never reaching the 85% simple_ondemand needs to hold.
+It therefore walks to the lowest OPP for every workload measured, which costs
+29% throughput on mobilenet and 27% on a chained model, because the NPU is
+still on the critical path even while it is idle half the time.
+
+There is no backlog to measure instead. Pending tasks only exist while a job
+is on the hardware, so time-with-work-queued tracks time-executing to within
+a fraction of a percent and carries no extra information.
+
+So report demand. Any execution inside a sampling window means the device was
+wanted during that window and a higher rate would finish the work sooner, so
+the window is reported as fully busy. The rate is only allowed to fall after
+several consecutive windows with no work at all, which stops the gap between
+inferences from causing a transition. dvfs_demand_metric=N restores the duty
+cycle metric for comparison.
+
+With a metric that can reach the top of the range, load-based scaling is worth
+having, so the device now comes up on simple_ondemand rather than userspace.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/rknpu_devfreq.c
++++ b/rknpu_devfreq.c
+@@ -29,6 +29,18 @@
+ 
+ #define POWER_DOWN_FREQ 200000000
+ 
++/*
++ * Idle sampling windows before the rate is allowed to fall. At the 50 ms
++ * polling interval this is 200 ms, comfortably longer than the gap between
++ * inferences in a pipeline that is feeding the NPU as fast as it can.
++ */
++#define RKNPU_DVFS_IDLE_WINDOWS 4
++
++static bool dvfs_demand_metric = true;
++module_param(dvfs_demand_metric, bool, 0644);
++MODULE_PARM_DESC(dvfs_demand_metric,
++		 "report demand (default) rather than duty cycle to devfreq");
++
+ static int npu_devfreq_apply_locked(struct device *dev);
+ 
+ /*
+@@ -521,9 +533,21 @@
+ 	rknpu_dev->devfreq_last_sample = now;
+ 	spin_unlock_irqrestore(&rknpu_dev->irq_lock, irqflags);
+ 
+-	stat->busy_time = (unsigned long)ktime_to_us(busy);
+-	if (stat->busy_time > stat->total_time)
+-		stat->busy_time = stat->total_time;
++	if (dvfs_demand_metric) {
++		if (busy > 0)
++			rknpu_dev->devfreq_idle_windows = 0;
++		else if (rknpu_dev->devfreq_idle_windows <
++			 RKNPU_DVFS_IDLE_WINDOWS)
++			rknpu_dev->devfreq_idle_windows++;
++
++		stat->busy_time =
++			rknpu_dev->devfreq_idle_windows < RKNPU_DVFS_IDLE_WINDOWS ?
++				stat->total_time : 0;
++	} else {
++		stat->busy_time = (unsigned long)ktime_to_us(busy);
++		if (stat->busy_time > stat->total_time)
++			stat->busy_time = stat->total_time;
++	}
+ 	stat->current_frequency = rknpu_dev->current_freq;
+ 
+ 	return 0;
+@@ -540,10 +564,8 @@
+ 
+ static struct devfreq_dev_profile npu_devfreq_profile = {
+ 	/*
+-	 * The device comes up on the userspace governor, so nothing changes
+-	 * the NPU rate until something asks for it and this interval goes
+-	 * unused. It is set so that selecting a polling governor at runtime
+-	 * (echo simple_ondemand > .../governor) is all that is needed.
++	 * Fast enough to follow a burst without the sampling itself costing
++	 * anything measurable; the same interval panfrost uses for the GPU.
+ 	 */
+ 	.polling_ms = 50,
+ 	.target = npu_devfreq_target,
+@@ -680,7 +702,8 @@
+ 
+ 	rknpu_dev->devfreq_last_sample = ktime_get();
+ 	rknpu_dev->devfreq = devm_devfreq_add_device(dev, dp,
+-						     DEVFREQ_GOV_USERSPACE, NULL);
++						     DEVFREQ_GOV_SIMPLE_ONDEMAND,
++						     NULL);
+ 	if (IS_ERR(rknpu_dev->devfreq)) {
+ 		ret = PTR_ERR(rknpu_dev->devfreq);
+ 		rknpu_dev->devfreq = NULL;
+--- a/include/rknpu_drv.h
++++ b/include/rknpu_drv.h
+@@ -162,6 +162,8 @@
+ 	unsigned long current_volt;
+ 	/* When devfreq last sampled the load, for the elapsed window. */
+ 	ktime_t devfreq_last_sample;
++	/* Consecutive devfreq samples that saw no work at all. */
++	unsigned int devfreq_idle_windows;
+ 	/*
+ 	 * Serialises every rate change. The OPP call and the clk_set_rate
+ 	 * after it have to be one step, or a request arriving between them

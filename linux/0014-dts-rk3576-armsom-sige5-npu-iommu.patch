@@ -14,7 +14,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
 +++ b/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
-@@ -1156,3 +1156,30 @@
+@@ -1158,3 +1158,33 @@
  	status = "okay";
  	vref-supply = <&vcca_1v8_s0>;
  };
@@ -26,22 +26,25 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 + * core power domains; both are listed, and the driver attaches the full
 + * list with runtime-PM links so a bank is never touched unpowered.
 + */
-+&{/soc} {
-+	rknpu_mmu: iommu@27702000 {
-+		compatible = "rockchip,rk3576-iommu", "rockchip,rk3568-iommu";
-+		reg = <0x0 0x27702000 0x0 0x100>,
-+		      <0x0 0x27702100 0x0 0x100>,
-+		      <0x0 0x2770a000 0x0 0x100>,
-+		      <0x0 0x2770a100 0x0 0x100>;
-+		interrupts = <GIC_SPI 247 IRQ_TYPE_LEVEL_HIGH>,
-+			     <GIC_SPI 248 IRQ_TYPE_LEVEL_HIGH>;
-+		clocks = <&cru ACLK_RKNN0>, <&cru HCLK_RKNN_ROOT>,
-+			 <&cru ACLK_RKNN1>, <&cru ACLK_RKNN_CBUF>,
-+			 <&cru HCLK_RKNN_CBUF>;
-+		clock-names = "aclk", "iface", "aclk1",
-+			      "aclk_cbuf", "hclk_cbuf";
-+		#iommu-cells = <0>;
-+		power-domains = <&power RK3576_PD_NPU0>,
-+				<&power RK3576_PD_NPU1>;
++/ {
++	soc {
++		rknpu_mmu: iommu@27702000 {
++			compatible = "rockchip,rk3576-npu-iommu",
++				     "rockchip,rk3568-iommu";
++			reg = <0x0 0x27702000 0x0 0x100>,
++			      <0x0 0x27702100 0x0 0x100>,
++			      <0x0 0x2770a000 0x0 0x100>,
++			      <0x0 0x2770a100 0x0 0x100>;
++			interrupts = <GIC_SPI 247 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 248 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&cru ACLK_RKNN0>, <&cru HCLK_RKNN_ROOT>,
++				 <&cru ACLK_RKNN1>, <&cru ACLK_RKNN_CBUF>,
++				 <&cru HCLK_RKNN_CBUF>;
++			clock-names = "aclk", "iface", "aclk1",
++				      "aclk_cbuf", "hclk_cbuf";
++			#iommu-cells = <0>;
++			power-domains = <&power RK3576_PD_NPU0>,
++					<&power RK3576_PD_NPU1>;
++		};
 +	};
 +};

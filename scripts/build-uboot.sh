@@ -25,12 +25,32 @@ RKBIN_COMMIT="ecb4fcbe954edf38b3ae037d5de6d9f5bccf81f4"
 DDR_BIN="bin/rk35/rk3576_ddr_lp4_2112MHz_lp5_2736MHz_v1.12.bin"
 BL31_ELF="bin/rk35/rk3576_bl31_v1.24.elf"
 # No BL32. Rockchip's RK3576TRUST.ini loads rk3576_bl32_v1.08.bin (OP-TEE)
-# next to BL31, and its absence is the best remaining explanation for why
-# SCMI/PVTPLL clock changes hang the NPU here (see linux/0002). Passing it
-# as TEE= does not work: binman wants an ELF and rkbin ships a raw blob
-# that only Rockchip's own trust_merger packs. Loading it would mean
-# building OP-TEE from source, and upstream optee_os has no RK3576
-# platform. Left undone deliberately.
+# next to BL31. Nothing here needs it: the NPU hangs that were once blamed
+# on its absence turned out to be PVTPLL state not surviving a power domain
+# cycle, fixed in the driver (see package/rknpu-driver/0008).
+#
+# It is left out, not impossible. Two routes exist if a secure world is ever
+# wanted - for key storage, RPMB, or secure boot:
+#
+#   - Rockchip's blob has the useful security features (OEM OTP key, key
+#     ladder, RPMB). binman rejects it directly - that path takes an ELF, or
+#     a binary carrying an optee_v1_header, and rkbin's blob has neither - so
+#     WITH_BL32=1 below wraps it in an ELF at the RK3576TRUST.ini address.
+#   - Upstream optee_os does have a plat-rockchip rk3576 (platform_rk3576.c)
+#     and builds to an ELF, so it packages cleanly - but that file only sets
+#     up the DDR firewall. With no tee_otp_get_hw_unique_key() behind it,
+#     OP-TEE falls back to its built-in default HUK. RPMB derives its
+#     authentication key from that HUK, so secure storage would be keyed on a
+#     constant published in public source. Rockchip's blob is the one with
+#     real OTP backing, which is why WITH_BL32 uses it.
+#
+# WITH_BL32=1 is opt-in and unset by default: a secure world nothing has
+# tested yet has no business in a firmware image. Before shipping it, the
+# kernel needs a reserved-memory node covering BL32_ADDR - rkbin blobs
+# publish no reservation, and Linux will otherwise allocate over OP-TEE's
+# DRAM and crash.
+BL32_BIN="bin/rk35/rk3576_bl32_v1.08.bin"
+BL32_ADDR="0x08400000"   # [BL32_OPTION] ADDR in RKTRUST/RK3576TRUST.ini
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -50,6 +70,28 @@ cd /u-boot
 export ROCKCHIP_TPL=/rkbin/$DDR_BIN
 export BL31=/rkbin/$BL31_ELF
 
+if [ '${WITH_BL32:-0}' = 1 ]; then
+    # Wrap the raw blob so binman will take it: objcopy it into an ELF whose
+    # single loadable segment sits at the address BL31 expects.
+    cat > /tee.ld <<'LDEOF'
+OUTPUT_FORMAT(\"elf64-littleaarch64\", \"elf64-littleaarch64\", \"elf64-littleaarch64\")
+OUTPUT_ARCH(aarch64)
+ENTRY(_start)
+SECTIONS
+{
+	. = $BL32_ADDR;
+	_start = .;
+	.text : { *(.data) }
+}
+LDEOF
+    aarch64-linux-gnu-objcopy -B aarch64 -I binary -O elf64-littleaarch64 \\
+        --rename-section .data=.text,alloc,load,readonly,code,contents \\
+        /rkbin/$BL32_BIN /bl32.o
+    aarch64-linux-gnu-ld -T /tee.ld /bl32.o -o /tee.elf
+    aarch64-linux-gnu-readelf -l /tee.elf | grep -A1 LOAD
+    export TEE=/tee.elf
+fi
+
 make sige5-rk3576_defconfig
 
 # Nerves environment: stored on the SD card (mmc dev 0) at 15 MB, shared
@@ -65,7 +107,14 @@ grep -E 'CONFIG_ENV_IS|CONFIG_ENV_OFFSET|CONFIG_ENV_SIZE|CONFIG_SYS_MMC_ENV_DEV'
 
 make -j\$(nproc) CROSS_COMPILE=aarch64-linux-gnu-
 
-cp u-boot-rockchip.bin /out/
+if [ '${WITH_BL32:-0}' = 1 ]; then
+    # Deliberately not u-boot-rockchip.bin: fwup packages that name, and a
+    # bootloader carrying an untested secure world should not be picked up
+    # by simply having been built. Enabling it is a rename, on purpose.
+    cp u-boot-rockchip.bin /out/u-boot-rockchip-bl32.bin
+else
+    cp u-boot-rockchip.bin /out/
+fi
 "
 
 echo "=== done. Updated uboot/u-boot-rockchip.bin"

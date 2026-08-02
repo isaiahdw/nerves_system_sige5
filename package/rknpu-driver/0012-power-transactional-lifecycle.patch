@@ -1,0 +1,616 @@
+Make the power lifecycle transactional and stop discarding its errors
+
+rknpu_power_on() enabled the regulators, the clock bulk and each power
+domain in turn and returned the first failure without undoing any of it,
+so a failure part way through left the earlier ones enabled with nothing
+recording that. It unwinds in reverse now, and only runs state_init()
+once the device is actually resumed rather than on the way out of a
+failed pm_runtime_get_sync().
+
+rknpu_power_get() left its reference incremented when the power-on it had
+just triggered failed, so the count said the hardware was up when it was
+not and no later put could correct it. It rolls the count back.
+
+Both ioctl paths then acted on that ignored failure, touching registers
+behind clocks that were never enabled. They return the error instead.
+
+Probe powered the hardware up behind the refcount's back, with a direct
+rknpu_power_on() against a still-zero count, which is why the earlier
+"do not zero it on failure" change did nothing: it was already zero.
+Probe takes a counted reference and releases it through rknpu_power_put()
+like every other user, so the count describes the hardware throughout and
+a power-off that cannot run is retried rather than forgotten.
+
+Probe also discarded what rknpu_devfreq_init() returned. -EOPNOTSUPP just
+means there is no OPP table, which is supported, but everything else was
+being swallowed - including the -EPROBE_DEFER raised when the OTP holding
+the variant selection has not bound yet, which would leave an RK3576S
+running the full 900 MHz table.
+
+Remove destroyed the retry workqueue before attempting the power-off, so
+a power-off that answered -EBUSY queued its retry onto freed memory, and
+it detached the power domains and disabled runtime PM whether or not the
+hardware had actually gone down. The workqueue now outlives the attempt,
+and a failed power-off leaves the suppliers attached rather than pulling
+them out from under live hardware.
+
+Finally, delete rknpu_devfreq_lock() and rknpu_devfreq_unlock(). They
+have been empty since the devfreq rewrite - the vendor state they guarded
+does not exist here - and kept suggesting the power paths took a lock
+they did not.
+
+The failure paths needed the same care as the success path.
+
+Remove cannot refuse: the callback the kernel calls returns void, so an
+early return only skipped the rest of the teardown while unbind carried
+on regardless - leaving the retry worker alive holding rknpu_dev and
+module text. It now quiesces that worker first, powers down second, and
+frees third, in that order, and says so loudly if the power-off failed
+rather than pretending it was declined. Cancelling the work before the
+final power-off also closes the window where a queued worker could
+decrement the count to zero and power the same rails down twice.
+
+Probe creates the retry workqueue before anything can take a power
+reference, since dropping one queues onto it, and its error paths drop
+the probe-time reference instead of leaving the hardware powered across a
+reprobe.
+
+The unwinds check what they undo. A domain that will not go down still
+has registers behind the clocks and rails below it, so the unwind stops
+there and leaks rather than pulling them; and a failed rate restore only
+tears down once pm_runtime_put_sync() confirms the device really
+suspended.
+
+Ownership across a failed power-on. Two of the unwind paths deliberately
+leave resources enabled - a domain that will not go down, a device that
+will not suspend - and rknpu_power_get() was releasing its reference
+anyway, so the count described powered hardware as off and the next get
+would enable it a second time. Those paths answer -EBUSY now and the
+count stays held.
+
+Remove closes the ioctl paths before quiescing the worker, since they take
+power references and one arriving afterwards would queue a retry onto a
+workqueue that is already gone. Everything else is freed either way -
+removal cannot be declined - but if the final power-off fails the domains
+stay attached and runtime PM stays enabled, because yanking the suppliers
+out from under live hardware is worse than leaking them.
+
+Probe's failure paths undo pm_runtime_enable() and the named domain
+attach, which they were leaving behind, and follow the same rule about
+not detaching suppliers when the hardware could not be powered down.
+
+The retry itself is bounded: a floor under the debugfs-settable delay so
+zero cannot busy-loop the workqueue, and a cap so a persistent failure
+complains once instead of retrying and logging for ever.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/rknpu_drv.c
++++ b/rknpu_drv.c
+@@ -383,8 +383,17 @@
+ 	int ret = 0;
+ 
+ 	mutex_lock(&rknpu_dev->power_lock);
+-	if (atomic_inc_return(&rknpu_dev->power_refcount) == 1)
++	if (atomic_inc_return(&rknpu_dev->power_refcount) == 1) {
+ 		ret = rknpu_power_on(rknpu_dev);
++		/*
++		 * -EBUSY is rknpu_power_on() reporting that it could not unwind
++		 * and left resources enabled. Releasing the count there would
++		 * describe powered hardware as off and let the next get enable
++		 * it a second time, so the count stays held.
++		 */
++		if (ret && ret != -EBUSY)
++			atomic_dec(&rknpu_dev->power_refcount);
++	}
+ 	mutex_unlock(&rknpu_dev->power_lock);
+ 
+ 	return ret;
+@@ -627,7 +636,9 @@
+ 
+ 	rknpu_dev = ((struct rknpu_session *)file->private_data)->rknpu_dev;
+ 
+-	rknpu_power_get(rknpu_dev);
++	ret = rknpu_power_get(rknpu_dev);
++	if (ret)
++		return ret;
+ 
+ 	switch (_IOC_NR(cmd)) {
+ 	case RKNPU_ACTION:
+@@ -688,8 +699,9 @@
+ 			    struct drm_file *file_priv)                     \
+ 	{                                                                   \
+ 		struct rknpu_device *rknpu_dev = dev_get_drvdata(dev->dev); \
+-		int ret = -EINVAL;                                          \
+-		rknpu_power_get(rknpu_dev);                                 \
++		int ret = rknpu_power_get(rknpu_dev);                       \
++		if (ret)                                                    \
++			return ret;                                         \
+ 		ret = func(dev, data, file_priv);                           \
+ 		rknpu_power_put_delay(rknpu_dev);                           \
+ 		return ret;                                                 \
+@@ -951,7 +963,8 @@
+ static int rknpu_power_on(struct rknpu_device *rknpu_dev)
+ {
+ 	struct device *dev = rknpu_dev->dev;
+-	int ret = -EINVAL;
++	bool domain_err = false;
++	int ret;
+ 
+ #ifndef FPGA_PLATFORM
+ 	if (rknpu_dev->vdd) {
+@@ -972,7 +985,7 @@
+ 				dev,
+ 				"failed to enable mem reg for rknpu, ret: %d\n",
+ 				ret);
+-			return ret;
++			goto err_vdd;
+ 		}
+ 	}
+ #endif
+@@ -981,85 +994,120 @@
+ 	if (ret) {
+ 		LOG_DEV_ERROR(dev, "failed to enable clk for rknpu, ret: %d\n",
+ 			      ret);
+-		return ret;
++		goto err_mem;
+ 	}
+ 
+-#ifndef FPGA_PLATFORM
+-	rknpu_devfreq_lock(rknpu_dev);
+-#endif
+-
+ 	if (rknpu_dev->multiple_domains) {
+ 		if (rknpu_dev->genpd_dev_npu0) {
+-#if KERNEL_VERSION(5, 5, 0) < LINUX_VERSION_CODE
+ 			ret = pm_runtime_resume_and_get(
+ 				rknpu_dev->genpd_dev_npu0);
+-#else
+-			ret = pm_runtime_get_sync(rknpu_dev->genpd_dev_npu0);
+-#endif
+ 			if (ret < 0) {
+ 				LOG_DEV_ERROR(
+ 					dev,
+ 					"failed to get pm runtime for npu0, ret: %d\n",
+ 					ret);
+-				goto out;
++				goto err_clk;
+ 			}
+ 		}
+ 		if (rknpu_dev->genpd_dev_npu1) {
+-#if KERNEL_VERSION(5, 5, 0) < LINUX_VERSION_CODE
+ 			ret = pm_runtime_resume_and_get(
+ 				rknpu_dev->genpd_dev_npu1);
+-#else
+-			ret = pm_runtime_get_sync(rknpu_dev->genpd_dev_npu1);
+-#endif
+ 			if (ret < 0) {
+ 				LOG_DEV_ERROR(
+ 					dev,
+ 					"failed to get pm runtime for npu1, ret: %d\n",
+ 					ret);
+-				goto out;
++				goto err_npu0;
+ 			}
+ 		}
+ 		if (rknpu_dev->genpd_dev_npu2) {
+-#if KERNEL_VERSION(5, 5, 0) < LINUX_VERSION_CODE
+ 			ret = pm_runtime_resume_and_get(
+ 				rknpu_dev->genpd_dev_npu2);
+-#else
+-			ret = pm_runtime_get_sync(rknpu_dev->genpd_dev_npu2);
+-#endif
+ 			if (ret < 0) {
+ 				LOG_DEV_ERROR(
+ 					dev,
+ 					"failed to get pm runtime for npu2, ret: %d\n",
+ 					ret);
+-				goto out;
++				goto err_npu1;
+ 			}
+ 		}
+ 	}
++
+ 	/* Clocks and domains are up: the SCMI path is safe from here. */
+ 	WRITE_ONCE(rknpu_dev->hw_powered, true);
+ 
+ 	ret = pm_runtime_get_sync(dev);
+-	if (ret >= 0) {
+-		/*
+-		 * No resume callback runs when the device was already active -
+-		 * which is what writing "on" to power/control leaves behind -
+-		 * so nothing else would apply a rate deferred while the gate
+-		 * was shut.
+-		 */
+-		rknpu_devfreq_sync_rate(dev);
+-	}
+ 	if (ret < 0) {
+ 		LOG_DEV_ERROR(dev,
+ 			      "failed to get pm runtime for rknpu, ret: %d\n",
+ 			      ret);
++		pm_runtime_put_noidle(dev);
++		goto err_hw;
++	}
++
++	/*
++	 * No resume callback runs when the device was already active - which is
++	 * what writing "on" to power/control leaves behind - so nothing else
++	 * would apply a rate deferred while the gate was shut.
++	 */
++	ret = rknpu_devfreq_sync_rate(dev);
++	if (ret) {
++		int pmret;
++
++		LOG_DEV_ERROR(dev, "failed to restore npu rate, ret: %d\n",
++			      ret);
++		/*
++		 * The clocks and domains below can only come down once the
++		 * device is really suspended. If it is not - another reference
++		 * is held, or the mandatory park failed - leave the whole stack
++		 * up rather than pulling the suppliers out from under it.
++		 */
++		pmret = pm_runtime_put_sync(dev);
++		if (pmret < 0 || !pm_runtime_status_suspended(dev)) {
++			LOG_DEV_ERROR(
++				dev,
++				"npu still active after failed resume, leaving it powered\n");
++			return -EBUSY;
++		}
++		goto err_hw;
+ 	}
+ 
+ 	if (rknpu_dev->config->state_init != NULL)
+ 		rknpu_dev->config->state_init(rknpu_dev);
+ 
+-out:
++	return 0;
++
++err_hw:
++	WRITE_ONCE(rknpu_dev->hw_powered, false);
++	if (rknpu_dev->multiple_domains && rknpu_dev->genpd_dev_npu2)
++		domain_err |= pm_runtime_put_sync(rknpu_dev->genpd_dev_npu2) < 0;
++err_npu1:
++	if (rknpu_dev->multiple_domains && rknpu_dev->genpd_dev_npu1)
++		domain_err |= pm_runtime_put_sync(rknpu_dev->genpd_dev_npu1) < 0;
++err_npu0:
++	if (rknpu_dev->multiple_domains && rknpu_dev->genpd_dev_npu0)
++		domain_err |= pm_runtime_put_sync(rknpu_dev->genpd_dev_npu0) < 0;
++
++	/*
++	 * A domain that would not go down still has registers behind these
++	 * clocks and rails. Unwinding them anyway is what the unwind exists to
++	 * prevent, so stop here and leave the leak.
++	 */
++	if (domain_err) {
++		LOG_DEV_ERROR(
++			dev,
++			"npu domains did not go down, leaving clocks and rails up\n");
++		return -EBUSY;
++	}
++err_clk:
++	clk_bulk_disable_unprepare(rknpu_dev->num_clks, rknpu_dev->clks);
++err_mem:
+ #ifndef FPGA_PLATFORM
+-	rknpu_devfreq_unlock(rknpu_dev);
++	if (rknpu_dev->mem)
++		regulator_disable(rknpu_dev->mem);
++err_vdd:
++	if (rknpu_dev->vdd)
++		regulator_disable(rknpu_dev->vdd);
+ #endif
+ 
+ 	return ret;
+@@ -1075,7 +1123,6 @@
+ 	bool val;
+ #endif
+ 
+-	rknpu_devfreq_lock(rknpu_dev);
+ #endif
+ 
+ #ifndef FPGA_PLATFORM
+@@ -1098,7 +1145,6 @@
+ 		WRITE_ONCE(rknpu_dev->hw_powered, true);
+ 		pm_runtime_get_noresume(dev);
+ 		LOG_DEV_ERROR(dev, "failed to suspend npu: %d\n", ret);
+-		rknpu_devfreq_unlock(rknpu_dev);
+ 		return ret;
+ 	}
+ 	/*
+@@ -1112,7 +1158,6 @@
+ 	if (!pm_runtime_status_suspended(dev)) {
+ 		WRITE_ONCE(rknpu_dev->hw_powered, true);
+ 		pm_runtime_get_noresume(dev);
+-		rknpu_devfreq_unlock(rknpu_dev);
+ 		return -EBUSY;
+ 	}
+ #else
+@@ -1152,8 +1197,7 @@
+ 		if (ret) {
+ 			LOG_DEV_ERROR(dev, "iommu still enabled\n");
+ 			pm_runtime_get_sync(dev);
+-			rknpu_devfreq_unlock(rknpu_dev);
+-			return ret;
++				return ret;
+ 		}
+ #endif
+ #else
+@@ -1168,10 +1212,6 @@
+ 			pm_runtime_put_sync(rknpu_dev->genpd_dev_npu0);
+ 	}
+ 
+-#ifndef FPGA_PLATFORM
+-	rknpu_devfreq_unlock(rknpu_dev);
+-#endif
+-
+ 	clk_bulk_disable_unprepare(rknpu_dev->num_clks, rknpu_dev->clks);
+ 
+ #ifndef FPGA_PLATFORM
+@@ -1182,6 +1222,8 @@
+ 		regulator_disable(rknpu_dev->mem);
+ #endif
+ 
++	rknpu_dev->power_off_retries = 0;
++
+ 	return 0;
+ }
+ 
+@@ -1366,6 +1408,7 @@
+ 	struct resource *res = NULL;
+ 	struct rknpu_device *rknpu_dev = NULL;
+ 	struct device *dev = &pdev->dev;
++	bool powered = false;
+ 	struct device *virt_dev = NULL;
+ 	const struct of_device_id *match = NULL;
+ 	const struct rknpu_config *config = NULL;
+@@ -1576,33 +1619,49 @@
+ 		rknpu_dev->multiple_domains = true;
+ 	}
+ 
+-	ret = rknpu_power_on(rknpu_dev);
+-	if (ret)
+-		goto err_remove_drv;
+-
+-#ifndef FPGA_PLATFORM
+-	rknpu_devfreq_init(rknpu_dev);
+-#endif
+-
+-	// set default power put delay to 3s
++	/*
++	 * Before any power reference exists: dropping one can queue a retry
++	 * onto this workqueue, so it cannot be created afterwards.
++	 */
+ 	rknpu_dev->power_put_delay = 3000;
+ 	rknpu_dev->power_off_wq =
+ 		create_freezable_workqueue("rknpu_power_off_wq");
+ 	if (!rknpu_dev->power_off_wq) {
+ 		LOG_DEV_ERROR(dev, "rknpu couldn't create power_off workqueue");
+ 		ret = -ENOMEM;
+-		goto err_devfreq_remove;
++		goto err_remove_drv;
+ 	}
+ 	INIT_DEFERRABLE_WORK(&rknpu_dev->power_off_work,
+ 			     rknpu_power_off_delay_work);
+ 
++	/*
++	 * Take a counted reference rather than powering up behind the
++	 * refcount's back, so the release below goes through the same path as
++	 * every other user and the count always describes the hardware.
++	 */
++	ret = rknpu_power_get(rknpu_dev);
++	if (ret)
++		goto err_remove_wq;
++
++#ifndef FPGA_PLATFORM
++	/*
++	 * -EOPNOTSUPP just means no OPP table, which is a supported
++	 * configuration. Anything else is fatal, including the -EPROBE_DEFER
++	 * raised when the OTP that selects the variant OPPs is not up yet:
++	 * binding anyway would run an RK3576S against the full table.
++	 */
++	ret = rknpu_devfreq_init(rknpu_dev);
++	if (ret && ret != -EOPNOTSUPP)
++		goto err_power_put;
++#endif
++
+ 	if (IS_ENABLED(CONFIG_NO_GKI) &&
+ 	    IS_ENABLED(CONFIG_ROCKCHIP_RKNPU_SRAM) && rknpu_dev->iommu_en) {
+ 		if (!rknpu_find_sram_resource(rknpu_dev)) {
+ 			ret = rknpu_mm_create(rknpu_dev->sram_size, PAGE_SIZE,
+ 					      &rknpu_dev->sram_mm);
+ 			if (ret != 0)
+-				goto err_remove_wq;
++				goto err_power_put;
+ 		} else {
+ 			LOG_DEV_WARN(dev, "could not find sram resource!\n");
+ 		}
+@@ -1619,14 +1678,12 @@
+ 		rknpu_iommu_init_domain(rknpu_dev);
+ 
+ 	/*
+-	 * A failed power-off leaves the regulators, clocks and domains still
+-	 * referenced. Zeroing the count regardless would tell the next
+-	 * power-on to enable them a second time.
++	 * Drop the probe-time reference. rknpu_power_put() puts the count back
++	 * and schedules a retry if the power-off could not run, so the count
++	 * keeps describing the hardware either way.
+ 	 */
+-	if (rknpu_power_off(rknpu_dev))
+-		LOG_DEV_WARN(dev, "failed to power off after probe\n");
+-	else
+-		atomic_set(&rknpu_dev->power_refcount, 0);
++	if (rknpu_power_put(rknpu_dev))
++		LOG_DEV_WARN(dev, "deferred power off after probe\n");
+ 	atomic_set(&rknpu_dev->cmdline_power_refcount, 0);
+ 	atomic_set(&rknpu_dev->iommu_domain_refcount, 0);
+ 
+@@ -1635,14 +1692,46 @@
+ 
+ 	return 0;
+ 
+-err_remove_wq:
+-	destroy_workqueue(rknpu_dev->power_off_wq);
++err_power_put:
++	/*
++	 * Drop the probe-time reference before the resources it depends on go
++	 * away, or a failed probe leaves the hardware powered across a reprobe.
++	 */
++	if (rknpu_power_put(rknpu_dev)) {
++		LOG_DEV_ERROR(
++			dev,
++			"npu still powered after a failed probe, leaving its suppliers attached\n");
++		powered = true;
++	}
++	cancel_delayed_work_sync(&rknpu_dev->power_off_work);
+ 
+-err_devfreq_remove:
+ #ifndef FPGA_PLATFORM
+ 	rknpu_devfreq_remove(rknpu_dev);
+ #endif
+ 
++err_remove_wq:
++	destroy_workqueue(rknpu_dev->power_off_wq);
++	rknpu_dev->power_off_wq = NULL;
++
++	/*
++	 * Only reached once pm_runtime_enable() and the named domain attach
++	 * have run; earlier failures jump straight to err_remove_drv.
++	 */
++	if (!powered) {
++		if (rknpu_dev->multiple_domains) {
++			if (rknpu_dev->genpd_dev_npu0)
++				dev_pm_domain_detach(rknpu_dev->genpd_dev_npu0,
++						     true);
++			if (rknpu_dev->genpd_dev_npu1)
++				dev_pm_domain_detach(rknpu_dev->genpd_dev_npu1,
++						     true);
++			if (rknpu_dev->genpd_dev_npu2)
++				dev_pm_domain_detach(rknpu_dev->genpd_dev_npu2,
++						     true);
++		}
++		pm_runtime_disable(dev);
++	}
++
+ err_remove_drv:
+ #ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
+ 	rknpu_drm_remove(rknpu_dev);
+@@ -1657,10 +1746,42 @@
+ static int rknpu_remove(struct platform_device *pdev)
+ {
+ 	struct rknpu_device *rknpu_dev = platform_get_drvdata(pdev);
++	bool powered = false;
+ 	int i = 0;
+ 
++	/*
++	 * Close the ioctl paths first. They take power references, and one
++	 * arriving after the workqueue is gone would try to queue a retry onto
++	 * it.
++	 */
++#ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
++	rknpu_drm_remove(rknpu_dev);
++#endif
++#ifdef CONFIG_ROCKCHIP_RKNPU_DMA_HEAP
++	misc_deregister(&(rknpu_dev->miscdev));
++#endif
++
++	/*
++	 * Then the retry worker. It holds rknpu_dev and can power the device
++	 * off by itself, so leaving it runnable races everything below.
++	 */
+ 	cancel_delayed_work_sync(&rknpu_dev->power_off_work);
+ 	destroy_workqueue(rknpu_dev->power_off_wq);
++	rknpu_dev->power_off_wq = NULL;
++
++	/*
++	 * Then power down, before freeing anything the power path touches.
++	 * The remove callback the kernel calls returns void, so a failure here
++	 * cannot stop the teardown - say so rather than pretending otherwise.
++	 */
++	mutex_lock(&rknpu_dev->power_lock);
++	if (atomic_read(&rknpu_dev->power_refcount) > 0) {
++		if (rknpu_power_off(rknpu_dev))
++			powered = true;
++		else
++			atomic_set(&rknpu_dev->power_refcount, 0);
++	}
++	mutex_unlock(&rknpu_dev->power_lock);
+ 
+ 	rknpu_debugger_remove(rknpu_dev);
+ 	rknpu_cancel_timer(rknpu_dev);
+@@ -1688,21 +1809,23 @@
+ 		iommu_group_put(rknpu_dev->iommu_group);
+ 	}
+ 
+-#ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
+-	rknpu_drm_remove(rknpu_dev);
+-#endif
+-#ifdef CONFIG_ROCKCHIP_RKNPU_DMA_HEAP
+-	misc_deregister(&(rknpu_dev->miscdev));
+-#endif
+-
+ #ifndef FPGA_PLATFORM
+ 	rknpu_devfreq_remove(rknpu_dev);
+ #endif
+ 
+-	mutex_lock(&rknpu_dev->power_lock);
+-	if (atomic_read(&rknpu_dev->power_refcount) > 0)
+-		rknpu_power_off(rknpu_dev);
+-	mutex_unlock(&rknpu_dev->power_lock);
++	if (powered) {
++		/*
++		 * Everything above is freed either way - the callback the
++		 * kernel calls returns void, so removal cannot be declined.
++		 * The suppliers are the exception: detaching the domains and
++		 * disabling runtime PM under hardware that is still running is
++		 * worse than leaking them.
++		 */
++		LOG_DEV_ERROR(
++			rknpu_dev->dev,
++			"npu still powered on remove, leaving its suppliers attached\n");
++		return 0;
++	}
+ 
+ 	if (rknpu_dev->multiple_domains) {
+ 		if (rknpu_dev->genpd_dev_npu0)
+--- a/rknpu_devfreq.c
++++ b/rknpu_devfreq.c
+@@ -253,14 +253,6 @@
+ 	.get_cur_freq = npu_devfreq_get_cur_freq,
+ };
+ 
+-void rknpu_devfreq_lock(struct rknpu_device *rknpu_dev)
+-{
+-}
+-
+-void rknpu_devfreq_unlock(struct rknpu_device *rknpu_dev)
+-{
+-}
+-
+ /*
+  * Bin numbers as the vendor's rockchip_get_soc_info() assigns them, and one of
+  * ours. BIT(bin) is matched against the first cell of opp-supported-hw in the
+--- a/include/rknpu_devfreq.h
++++ b/include/rknpu_devfreq.h
+@@ -8,8 +8,6 @@
+ #define __LINUX_RKNPU_DEVFREQ_H
+ 
+ #ifdef CONFIG_ROCKCHIP_RKNPU_DEVFREQ
+-void rknpu_devfreq_lock(struct rknpu_device *rknpu_dev);
+-void rknpu_devfreq_unlock(struct rknpu_device *rknpu_dev);
+ int rknpu_devfreq_init(struct rknpu_device *rknpu_dev);
+ void rknpu_devfreq_remove(struct rknpu_device *rknpu_dev);
+ int rknpu_devfreq_runtime_suspend(struct device *dev);
+@@ -25,14 +23,6 @@
+ {
+ }
+ 
+-static inline void rknpu_devfreq_lock(struct rknpu_device *rknpu_dev)
+-{
+-}
+-
+-static inline void rknpu_devfreq_unlock(struct rknpu_device *rknpu_dev)
+-{
+-}
+-
+ static inline int rknpu_devfreq_runtime_suspend(struct device *dev)
+ {
+ 	return 0;

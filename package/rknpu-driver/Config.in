@@ -5,7 +5,9 @@ config BR2_PACKAGE_RKNPU_DRIVER
 	  Vendor RKNPU kernel driver (v0.9.8, Rockchip 6.1 BSP) built
 	  out-of-tree against the mainline kernel, ported with a small
 	  patch series. Provides /dev/dri render node ioctls for the
-	  librknnrt runtime. Devfreq/OPP integration is compiled out;
-	  the NPU runs at a fixed clock without an IOMMU (CMA buffers).
+	  librknnrt runtime. The vendor's devfreq/OPP integration is
+	  reimplemented on generic APIs, giving 300-900 MHz scaling, and
+	  the NPU attaches to mainline's rockchip-iommu, so its buffers
+	  are pageable rather than CMA-backed.
 
 	  https://github.com/armbian/linux-rockchip

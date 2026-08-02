@@ -82,27 +82,6 @@ showed it because its GOV_RESUME handler does not touch that mutex. lockdep:
   but task is already holding lock:
     (&devfreq->lock) at: rknpu_devfreq_lock+0x20/0x30 [rknpu]
 
-Serialise every rate change on one lock and one code path. The OPP call and
-the clk_set_rate after it have to be a single step: a request landing between
-them leaves the rail set for one point with the clock at another - 725 mV
-holding up 900 MHz. The governor, a deferred request replayed on power-on and
-the thermal cooling device all now go through npu_devfreq_apply_locked(),
-which re-reads the request after applying it instead of counting attempts, so
-a writer that lands mid-apply is neither lost nor left waiting for the next
-power cycle.
-
-Apply the pending rate for a caller that has just powered the hardware up.
-pm_runtime_get_sync() runs no resume callback when the device is already
-RPM_ACTIVE, which is the state writing "on" to power/control leaves behind, so
-without rknpu_devfreq_sync_rate() a rate deferred while the SCMI gate was shut
-would sit there unapplied.
-
-Park unconditionally. The park is what stops the PVTPLL rate outliving the
-power domain and wedging the SoC on the next job, so devfreq never having come
-up is not a reason to skip it - only the devfreq bookkeeping around it is
-conditional.
-
-
 Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/Makefile
@@ -119,7 +98,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  rknpu-y += rknpu_reset.o
 --- a/rknpu_devfreq.c
 +++ b/rknpu_devfreq.c
-@@ -2,807 +2,430 @@
+@@ -2,807 +2,392 @@
  /*
   * Copyright (C) Rockchip Electronics Co., Ltd.
   * Author: Finley Xiao <finley.xiao@rock-chips.com>
@@ -136,8 +115,9 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  #include <linux/clk.h>
 -#include <linux/clk-provider.h>
+-#include <linux/devfreq_cooling.h>
 +#include <linux/devfreq.h>
- #include <linux/devfreq_cooling.h>
++#include <linux/devfreq_cooling.h>
 +#include <linux/pm_opp.h>
  #include <linux/pm_runtime.h>
 -#include <linux/regmap.h>
@@ -149,7 +129,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  #define POWER_DOWN_FREQ 200000000
  
--static int npu_devfreq_target(struct device *dev, unsigned long *freq,
+ static int npu_devfreq_target(struct device *dev, unsigned long *freq,
 -			      u32 flags);
 -
 -static struct monitor_dev_profile npu_mdevp = {
@@ -165,21 +145,23 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -
 -static int npu_devfreq_get_dev_status(struct device *dev,
 -				      struct devfreq_dev_status *stat)
--{
--	return 0;
--}
-+static int npu_devfreq_apply_locked(struct device *dev);
- 
--static int npu_devfreq_get_cur_freq(struct device *dev, unsigned long *freq)
-+static int npu_devfreq_target(struct device *dev, unsigned long *freq,
 +			      u32 flags)
  {
+-	return 0;
+-}
+-
+-static int npu_devfreq_get_cur_freq(struct device *dev, unsigned long *freq)
+-{
  	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
 +	struct dev_pm_opp *opp;
 +	int ret;
  
 -	*freq = rknpu_dev->current_freq;
--
++	opp = devfreq_recommended_opp(dev, freq, flags);
++	if (IS_ERR(opp))
++		return PTR_ERR(opp);
++	dev_pm_opp_put(opp);
+ 
 -	return 0;
 -}
 -
@@ -207,23 +189,13 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -{
 -	return 0;
 -}
-+	opp = devfreq_recommended_opp(dev, freq, flags);
-+	if (IS_ERR(opp))
-+		return PTR_ERR(opp);
-+	dev_pm_opp_put(opp);
- 
+-
 -static struct devfreq_governor devfreq_rknpu_ondemand = {
 -	.name = "rknpu_ondemand",
 -	.get_target_freq = devfreq_rknpu_ondemand_func,
 -	.event_handler = devfreq_rknpu_ondemand_handler,
 -};
-+	/*
-+	 * Publish before comparing. Returning early without this leaves an
-+	 * older deferred request standing, and the next resume replays that
-+	 * rather than what was last asked for.
-+	 */
-+	WRITE_ONCE(rknpu_dev->ondemand_freq, *freq);
- 
+-
 -static int rk3576_npu_set_read_margin(struct device *dev,
 -				      struct rockchip_opp_info *opp_info,
 -				      u32 rm)
@@ -242,8 +214,10 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	 * re-enter devfreq through devfreq_suspend_device() and deadlock on
 +	 * it. The driver's power-off work does the idling.
 +	 */
-+	if (pm_runtime_get_if_active(dev) <= 0)
-+		return 0;
++	if (pm_runtime_get_if_active(dev) <= 0) {
++		WRITE_ONCE(rknpu_dev->ondemand_freq, *freq);
+ 		return 0;
++	}
 +
 +	/*
 +	 * RPM_ACTIVE does not mean reachable: power/control=on resumes the
@@ -251,18 +225,28 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	 * registers sit behind gated. hw_powered tracks the real state.
 +	 */
 +	if (!READ_ONCE(rknpu_dev->hw_powered)) {
++		WRITE_ONCE(rknpu_dev->ondemand_freq, *freq);
 +		pm_runtime_put_noidle(dev);
- 		return 0;
++		return 0;
 +	}
  
 -	LOG_DEV_DEBUG(dev, "set rm to %d\n", rm);
-+	mutex_lock(&rknpu_dev->dvfs_lock);
-+	ret = npu_devfreq_apply_locked(dev);
-+	mutex_unlock(&rknpu_dev->dvfs_lock);
++	ret = dev_pm_opp_set_rate(dev, *freq);
++	if (ret)
++		LOG_DEV_ERROR(dev, "failed to set npu rate %lu: %d\n", *freq,
++			      ret);
  
 -	regmap_write(opp_info->grf, 0x08, 0x001c0000 | (rm << 2));
 -	regmap_write(opp_info->grf, 0x0c, 0x003c0000 | (rm << 2));
 -	regmap_write(opp_info->grf, 0x10, 0x001c0000 | (rm << 2));
++	if (!ret) {
++		rknpu_dev->current_freq = *freq; /* SCMI readback is unreliable */
++		WRITE_ONCE(rknpu_dev->ondemand_freq, *freq);
++		if (rknpu_dev->vdd)
++			rknpu_dev->current_volt =
++				regulator_get_voltage(rknpu_dev->vdd);
++	}
++
 +	pm_runtime_put_noidle(dev);
  
 -	return 0;
@@ -280,13 +264,39 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 + * refcounts, so nesting is free.
 + */
 +static int npu_clks_get(struct rknpu_device *rknpu_dev)
++{
++	return clk_bulk_prepare_enable(rknpu_dev->num_clks, rknpu_dev->clks);
++}
++
++static void npu_clks_put(struct rknpu_device *rknpu_dev)
++{
++	clk_bulk_disable_unprepare(rknpu_dev->num_clks, rknpu_dev->clks);
++}
++
++static int npu_devfreq_apply_pending(struct device *dev)
  {
 -	int ret = 0;
 -	u8 value = 0;
--
++	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
++	unsigned long freq;
++	int tries = 0;
++	int ret;
+ 
 -	if (!bin)
--		return 0;
--
++	/*
++	 * npu_devfreq_target() can publish a new request underneath this:
++	 * one arriving while the device is still RPM_RESUMING takes the
++	 * deferred path and writes ondemand_freq. Work from a single
++	 * snapshot, or the regulator and the clock below can be left
++	 * configured for different OPPs - 725 mV holding up 900 MHz.
++	 * A request that lands after the snapshot is not lost; it stays in
++	 * ondemand_freq for the next target() or power-on to apply.
++	 */
++retry:
++	freq = READ_ONCE(rknpu_dev->ondemand_freq);
++	if (!freq)
+ 		return 0;
+ 
 -	if (of_property_match_string(np, "nvmem-cell-names",
 -				     "specification_serial_number") >= 0) {
 -		ret = rockchip_nvmem_cell_read_u8(
@@ -303,20 +313,45 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -		/* RK3588J */
 -		else if (value == 0xa)
 -			*bin = 2;
--	}
++	ret = dev_pm_opp_set_rate(dev, freq);
++	if (ret) {
++		LOG_DEV_ERROR(dev, "failed to set npu rate %lu: %d\n",
++			      freq, ret);
++		return ret;
+ 	}
 -	if (*bin < 0)
 -		*bin = 0;
 -	LOG_DEV_INFO(dev, "bin=%d\n", *bin);
--
+ 
 -	return ret;
-+	return clk_bulk_prepare_enable(rknpu_dev->num_clks, rknpu_dev->clks);
- }
+-}
++	/*
++	 * The park uses a bare clk_set_rate() the OPP core never sees, so its
++	 * cached rate survives and the call above can be a no-op. Set the clock
++	 * explicitly; the rail is already correct.
++	 */
++	ret = clk_set_rate(rknpu_dev->clks[0].clk, freq);
++	if (ret) {
++		LOG_DEV_ERROR(dev, "failed to restore npu clock %lu: %d\n",
++			      freq, ret);
++		return ret;
++	}
++
++	rknpu_dev->current_freq = freq;
++	if (rknpu_dev->vdd)
++		rknpu_dev->current_volt = regulator_get_voltage(rknpu_dev->vdd);
++
++	/*
++	 * Re-read rather than count attempts: a request landing mid-apply is
++	 * applied here instead of waiting for the next power cycle.
++	 */
++	if (READ_ONCE(rknpu_dev->ondemand_freq) != freq && ++tries < 3)
++		goto retry;
  
 -#if KERNEL_VERSION(6, 1, 0) <= LINUX_VERSION_CODE
 -static int rk3588_npu_set_soc_info(struct device *dev, struct device_node *np,
 -				   struct rockchip_opp_info *opp_info)
-+static void npu_clks_put(struct rknpu_device *rknpu_dev)
- {
+-{
 -	int bin = opp_info->bin;
 -
 -	if (opp_info->volt_sel < 0)
@@ -332,33 +367,37 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -	/* Speed Grade */
 -	opp_info->supported_hw[1] = BIT(opp_info->volt_sel);
 -
--	return 0;
-+	clk_bulk_disable_unprepare(rknpu_dev->num_clks, rknpu_dev->clks);
+ 	return 0;
  }
 -#else
 -static int rk3588_npu_set_soc_info(struct device *dev, struct device_node *np,
 -				   int bin, int process, int volt_sel)
--{
++
++static int npu_devfreq_get_dev_status(struct device *dev,
++				      struct devfreq_dev_status *stat)
+ {
 -	struct opp_table *opp_table;
 -	u32 supported_hw[2];
--
++	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
++	unsigned long irqflags;
++	ktime_t busy = 0;
++	int i;
+ 
 -	if (volt_sel < 0)
 -		return 0;
 -	if (bin < 0)
 -		bin = 0;
++	/*
++	 * Report the busiest core, so the governor scales up when any one is
++	 * saturated. irq_lock guards the accumulator against a torn read.
++	 */
++	spin_lock_irqsave(&rknpu_dev->irq_lock, irqflags);
++	for (i = 0; i < rknpu_dev->config->num_irqs; i++) {
++		ktime_t t = rknpu_dev->subcore_datas[i].timer.total_busy_time;
  
 -	if (!of_property_read_bool(np, "rockchip,supported-hw"))
 -		return 0;
-+/*
-+ * Park the clock at a rate the CRU can produce alone. BL31's PVTPLL state does
-+ * not survive the power domain going down, and coming back up still set to a
-+ * PVTPLL rate wedges the SoC on the next job.
-+ */
-+static int npu_devfreq_park(struct device *dev)
-+{
-+	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
-+	int ret;
- 
+-
 -	/* SoC Version */
 -	supported_hw[0] = BIT(bin);
 -	/* Speed Grade */
@@ -367,83 +406,50 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -	if (IS_ERR(opp_table)) {
 -		LOG_DEV_ERROR(dev, "failed to set supported opp\n");
 -		return PTR_ERR(opp_table);
-+	ret = npu_clks_get(rknpu_dev);
-+	if (!ret) {
-+		ret = clk_set_rate(rknpu_dev->clks[0].clk, POWER_DOWN_FREQ);
-+		npu_clks_put(rknpu_dev);
++		if (ktime_compare(t, busy) > 0)
++			busy = t;
  	}
-+	if (ret) {
-+		LOG_DEV_ERROR(dev, "failed to park npu rate: %d\n", ret);
-+		return ret;
-+	}
-+
-+	rknpu_dev->current_freq = POWER_DOWN_FREQ;
++	spin_unlock_irqrestore(&rknpu_dev->irq_lock, irqflags);
  
- 	return 0;
- }
+-	return 0;
+-}
 -#endif
- 
+-
 -static int rk3588_npu_set_read_margin(struct device *dev,
 -				      struct rockchip_opp_info *opp_info,
 -				      u32 rm)
-+/*
-+ * The one place a rate is applied. The governor, a deferred request replayed
-+ * on power-on and the thermal cooling device all come through here holding
-+ * dvfs_lock, so the OPP and the clock cannot describe different points.
-+ */
-+static int npu_devfreq_apply_locked(struct device *dev)
- {
+-{
 -	u32 offset = 0, val = 0;
 -	int i, ret = 0;
--
++	stat->busy_time = (unsigned long)ktime_to_us(busy);
++	stat->total_time = RKNPU_LOAD_INTERVAL / 1000;
++	if (stat->busy_time > stat->total_time)
++		stat->busy_time = stat->total_time;
++	stat->current_frequency = rknpu_dev->current_freq;
+ 
 -	if (!opp_info->grf || !opp_info->volt_rm_tbl)
 -		return 0;
-+	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
-+	unsigned long freq;
-+	int ret;
- 
+-
 -	if (rm == opp_info->current_rm || rm == UINT_MAX)
 -		return 0;
-+	lockdep_assert_held(&rknpu_dev->dvfs_lock);
- 
+-
 -	LOG_DEV_DEBUG(dev, "set rm to %d\n", rm);
-+	for (;;) {
-+		freq = READ_ONCE(rknpu_dev->ondemand_freq);
-+		if (!freq)
-+			return 0;
- 
+-
 -	for (i = 0; i < 3; i++) {
 -		ret = regmap_read(opp_info->grf, offset, &val);
 -		if (ret < 0) {
 -			LOG_DEV_ERROR(dev, "failed to get rm from 0x%x\n",
 -				      offset);
-+		ret = dev_pm_opp_set_rate(dev, freq);
-+		if (ret) {
-+			LOG_DEV_ERROR(dev, "failed to set npu rate %lu: %d\n",
-+				      freq, ret);
- 			return ret;
- 		}
+-			return ret;
+-		}
 -		val &= ~0x1c;
 -		regmap_write(opp_info->grf, offset, val | (rm << 2));
 -		offset += 4;
 -	}
 -	opp_info->current_rm = rm;
- 
--	return 0;
--}
-+		/*
-+		 * The park uses a bare clk_set_rate() the OPP core never sees,
-+		 * so its cached rate survives and the call above can be a
-+		 * no-op. Set the clock and margin explicitly; the rail is
-+		 * already correct.
-+		 */
-+		ret = clk_set_rate(rknpu_dev->clks[0].clk, freq);
-+		if (ret) {
-+			LOG_DEV_ERROR(dev,
-+				      "failed to restore npu clock %lu: %d\n",
-+				      freq, ret);
-+			return ret;
-+		}
+-
+ 	return 0;
+ }
  
 -#if KERNEL_VERSION(6, 1, 0) <= LINUX_VERSION_CODE
 -static int npu_opp_config_regulators(struct device *dev,
@@ -451,33 +457,27 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -				     struct dev_pm_opp *new_opp,
 -				     struct regulator **regulators,
 -				     unsigned int count)
--{
--	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
-+		rknpu_dev->current_freq = freq;
-+		if (rknpu_dev->vdd)
-+			rknpu_dev->current_volt =
-+				regulator_get_voltage(rknpu_dev->vdd);
++static int npu_devfreq_get_cur_freq(struct device *dev, unsigned long *freq)
+ {
+ 	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
  
 -	return rockchip_opp_config_regulators(dev, old_opp, new_opp, regulators,
 -					      count, &rknpu_dev->opp_info);
-+		if (READ_ONCE(rknpu_dev->ondemand_freq) == freq)
-+			return 0;
-+	}
- }
+-}
++	*freq = rknpu_dev->current_freq;
  
 -static int npu_opp_config_clks(struct device *dev, struct opp_table *opp_table,
 -			       struct dev_pm_opp *opp, void *data,
 -			       bool scaling_down)
-+static int npu_devfreq_apply_pending(struct device *dev)
- {
- 	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
-+	int ret;
- 
+-{
+-	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
+-
 -	return rockchip_opp_config_clks(dev, opp_table, opp, data, scaling_down,
 -					&rknpu_dev->opp_info);
--}
++	return 0;
+ }
 -#endif
--
+ 
 -static const struct rockchip_opp_data rk3576_npu_opp_data = {
 -	.set_read_margin = rk3576_npu_set_read_margin,
 -	.set_soc_info = rockchip_opp_set_low_length,
@@ -485,8 +485,19 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -	.config_regulators = npu_opp_config_regulators,
 -	.config_clks = npu_opp_config_clks,
 -#endif
--};
--
++static struct devfreq_dev_profile npu_devfreq_profile = {
++	/*
++	 * No automatic polling at probe: the device comes up on the
++	 * userspace governor so nothing changes the NPU rate until
++	 * something asks for it. Switch to simple_ondemand at runtime
++	 * (echo simple_ondemand > .../governor) for load-based scaling.
++	 */
++	.polling_ms = 0,
++	.target = npu_devfreq_target,
++	.get_dev_status = npu_devfreq_get_dev_status,
++	.get_cur_freq = npu_devfreq_get_cur_freq,
+ };
+ 
 -static const struct rockchip_opp_data rk3588_npu_opp_data = {
 -	.get_soc_info = rk3588_npu_get_soc_info,
 -	.set_soc_info = rk3588_npu_set_soc_info,
@@ -510,51 +521,56 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -};
 -
 -#if KERNEL_VERSION(6, 1, 0) <= LINUX_VERSION_CODE
--void rknpu_devfreq_lock(struct rknpu_device *rknpu_dev)
--{
+ void rknpu_devfreq_lock(struct rknpu_device *rknpu_dev)
+ {
 -	if (rknpu_dev->devfreq)
 -		rockchip_opp_dvfs_lock(&rknpu_dev->opp_info);
--}
+ }
 -EXPORT_SYMBOL(rknpu_devfreq_lock);
-+	mutex_lock(&rknpu_dev->dvfs_lock);
-+	ret = npu_devfreq_apply_locked(dev);
-+	mutex_unlock(&rknpu_dev->dvfs_lock);
  
--void rknpu_devfreq_unlock(struct rknpu_device *rknpu_dev)
--{
+ void rknpu_devfreq_unlock(struct rknpu_device *rknpu_dev)
+ {
 -	if (rknpu_dev->devfreq)
 -		rockchip_opp_dvfs_unlock(&rknpu_dev->opp_info);
-+	return ret;
  }
 -EXPORT_SYMBOL(rknpu_devfreq_unlock);
  
 -static int npu_devfreq_target(struct device *dev, unsigned long *freq,
 -			      u32 flags)
-+/*
-+ * Apply any pending rate for a caller that has just powered the hardware up.
-+ * pm_runtime_get_sync() runs no resume callback when the device is already
-+ * RPM_ACTIVE, so nothing else would apply a rate deferred while it was down.
-+ */
-+int rknpu_devfreq_sync_rate(struct device *dev)
++int rknpu_devfreq_init(struct rknpu_device *rknpu_dev)
  {
- 	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
+-	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
 -	struct rockchip_opp_info *opp_info = &rknpu_dev->opp_info;
--	struct dev_pm_opp *opp;
++	struct device *dev = rknpu_dev->dev;
++	struct devfreq_dev_profile *dp = &npu_devfreq_profile;
+ 	struct dev_pm_opp *opp;
 -	unsigned long opp_volt;
 -	int ret = 0;
--
++	int ret;
+ 
 -	if (!opp_info->is_rate_volt_checked)
 -		return -EINVAL;
--
++	if (!of_find_property(dev->of_node, "operating-points-v2", NULL)) {
++		LOG_DEV_INFO(dev, "no OPP table, running at a fixed rate\n");
++		return -EOPNOTSUPP;
++	}
+ 
 -	opp = devfreq_recommended_opp(dev, freq, flags);
 -	if (IS_ERR(opp))
 -		return PTR_ERR(opp);
 -	opp_volt = dev_pm_opp_get_voltage(opp);
 -	dev_pm_opp_put(opp);
++	ret = devm_pm_opp_set_clkname(dev, "clk_npu");
++	if (ret) {
++		LOG_DEV_ERROR(dev, "failed to set opp clkname: %d\n", ret);
++		return ret;
++	}
  
 -	if (*freq == rknpu_dev->current_freq)
-+	if (!rknpu_dev->devfreq || !READ_ONCE(rknpu_dev->hw_powered))
- 		return 0;
+-		return 0;
++	if (of_find_property(dev->of_node, "rknpu-supply", NULL)) {
++		/* NULL-terminated: the OPP core counts with while (*temp++) */
++		const char *const reg_names[] = { "rknpu", NULL };
  
 -	rockchip_opp_dvfs_lock(opp_info);
 -	if (pm_runtime_active(dev))
@@ -570,22 +586,24 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -		rknpu_dev->current_volt = opp_volt;
 -		LOG_DEV_DEBUG(dev, "set rknpu freq: %lu, volt: %lu\n",
 -			      rknpu_dev->current_freq, rknpu_dev->current_volt);
--	}
++		ret = devm_pm_opp_set_regulators(dev, reg_names);
++		if (ret) {
++			LOG_DEV_ERROR(dev, "failed to set opp regulator: %d\n",
++				      ret);
++			return ret;
++		}
+ 	}
 -	rockchip_opp_dvfs_unlock(opp_info);
--
--	return ret;
-+	return npu_devfreq_apply_pending(dev);
- }
-+EXPORT_SYMBOL(rknpu_devfreq_sync_rate);
  
+-	return ret;
+-}
+-
 -static const struct rockchip_opp_data rockchip_npu_opp_data = {
 -	.config_clks = npu_opp_config_clks,
 -};
 -
 -int rknpu_devfreq_init(struct rknpu_device *rknpu_dev)
-+static int npu_devfreq_get_dev_status(struct device *dev,
-+				      struct devfreq_dev_status *stat)
- {
+-{
 -	struct rockchip_opp_info *info = &rknpu_dev->opp_info;
 -	struct device *dev = rknpu_dev->dev;
 -	struct devfreq_dev_profile *dp;
@@ -596,26 +614,32 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -	info->data = &rockchip_npu_opp_data;
 -	rockchip_get_opp_data(rockchip_npu_of_match, info);
 -	ret = rockchip_init_opp_table(dev, info, "clk_npu", "rknpu");
--	if (ret) {
++	ret = devm_pm_opp_of_add_table(dev);
+ 	if (ret) {
 -		LOG_DEV_ERROR(dev, "failed to init_opp_table\n");
 -		return -EINVAL;
--	}
--
--	rknpu_dev->current_freq = clk_get_rate(rknpu_dev->clks[0].clk);
--	opp = devfreq_recommended_opp(dev, &rknpu_dev->current_freq, 0);
++		LOG_DEV_ERROR(dev, "failed to add opp table: %d\n", ret);
++		return ret;
+ 	}
+ 
+ 	rknpu_dev->current_freq = clk_get_rate(rknpu_dev->clks[0].clk);
+ 	opp = devfreq_recommended_opp(dev, &rknpu_dev->current_freq, 0);
 -	if (IS_ERR(opp)) {
 -		ret = PTR_ERR(opp);
 -		goto err_uinit_table;
 -	}
--	dev_pm_opp_put(opp);
--
++	if (IS_ERR(opp))
++		return PTR_ERR(opp);
+ 	dev_pm_opp_put(opp);
+ 
 -	dp = &npu_devfreq_profile;
--	dp->initial_freq = rknpu_dev->current_freq;
+ 	dp->initial_freq = rknpu_dev->current_freq;
 -	of_property_read_u32(dev->of_node, "dynamic-power-coefficient",
 -			     &dyn_power_coeff);
 -	if (dyn_power_coeff)
 -		dp->is_cooling_device = true;
--
++	rknpu_dev->ondemand_freq = rknpu_dev->current_freq;
+ 
 -	ret = devfreq_add_governor(&devfreq_rknpu_ondemand);
 -	if (ret) {
 -		LOG_DEV_ERROR(dev, "failed to add rknpu_ondemand governor\n");
@@ -624,13 +648,17 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -
 -	rknpu_dev->devfreq = devm_devfreq_add_device(dev, dp, "rknpu_ondemand",
 -						     (void *)rknpu_dev);
--	if (IS_ERR(rknpu_dev->devfreq)) {
++	rknpu_dev->devfreq = devm_devfreq_add_device(dev, dp,
++						     DEVFREQ_GOV_USERSPACE, NULL);
+ 	if (IS_ERR(rknpu_dev->devfreq)) {
 -		LOG_DEV_ERROR(dev, "failed to add devfreq\n");
--		ret = PTR_ERR(rknpu_dev->devfreq);
--		rknpu_dev->devfreq = NULL;
+ 		ret = PTR_ERR(rknpu_dev->devfreq);
+ 		rknpu_dev->devfreq = NULL;
 -		goto err_remove_governor;
--	}
--
++		LOG_DEV_ERROR(dev, "failed to add devfreq device: %d\n", ret);
++		return ret;
+ 	}
+ 
 -	npu_mdevp.data = rknpu_dev->devfreq;
 -	npu_mdevp.opp_info = &rknpu_dev->opp_info;
 -	rknpu_dev->mdev_info =
@@ -639,7 +667,20 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -		dev_dbg(dev, "without system monitor\n");
 -		rknpu_dev->mdev_info = NULL;
 -	}
--
++	devm_devfreq_register_opp_notifier(dev, rknpu_dev->devfreq);
++
++	/*
++	 * The upstream npu-thermal zone has only a critical trip, so without a
++	 * cooling device there is nothing between sustained load and a reset.
++	 */
++	rknpu_dev->devfreq_cooling =
++		of_devfreq_cooling_register(dev->of_node, rknpu_dev->devfreq);
++	if (IS_ERR(rknpu_dev->devfreq_cooling)) {
++		LOG_DEV_ERROR(dev, "no devfreq cooling: %ld\n",
++			      PTR_ERR(rknpu_dev->devfreq_cooling));
++		rknpu_dev->devfreq_cooling = NULL;
++	}
+ 
 -	rknpu_dev->current_freq = clk_get_rate(rknpu_dev->clks[0].clk);
 -	rknpu_dev->ondemand_freq = rknpu_dev->current_freq;
 -	rknpu_dev->current_volt = regulator_get_voltage(rknpu_dev->vdd);
@@ -647,36 +688,17 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -	rknpu_dev->devfreq->previous_freq = rknpu_dev->current_freq;
 -	if (rknpu_dev->devfreq->suspend_freq)
 -		rknpu_dev->devfreq->resume_freq = rknpu_dev->current_freq;
--	rknpu_dev->devfreq->last_status.current_frequency =
--		rknpu_dev->current_freq;
+ 	rknpu_dev->devfreq->last_status.current_frequency =
+ 		rknpu_dev->current_freq;
 -	rknpu_dev->devfreq->last_status.total_time = 1;
 -	rknpu_dev->devfreq->last_status.busy_time = 1;
-+	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
-+	unsigned long irqflags;
-+	ktime_t busy = 0;
-+	int i;
-+
-+	/*
-+	 * Report the busiest core, so the governor scales up when any one is
-+	 * saturated. irq_lock guards the accumulator against a torn read.
-+	 */
-+	spin_lock_irqsave(&rknpu_dev->irq_lock, irqflags);
-+	for (i = 0; i < rknpu_dev->config->num_irqs; i++) {
-+		ktime_t t = rknpu_dev->subcore_datas[i].timer.total_busy_time;
-+
-+		if (ktime_compare(t, busy) > 0)
-+			busy = t;
-+	}
-+	spin_unlock_irqrestore(&rknpu_dev->irq_lock, irqflags);
-+
-+	stat->busy_time = (unsigned long)ktime_to_us(busy);
-+	stat->total_time = RKNPU_LOAD_INTERVAL / 1000;
-+	if (stat->busy_time > stat->total_time)
-+		stat->busy_time = stat->total_time;
-+	stat->current_frequency = rknpu_dev->current_freq;
++	if (rknpu_dev->vdd)
++		rknpu_dev->current_volt = regulator_get_voltage(rknpu_dev->vdd);
  
- 	return 0;
--
+-	return 0;
++	LOG_DEV_INFO(dev, "devfreq ready, current rate %lu Hz\n",
++		     rknpu_dev->current_freq);
+ 
 -err_remove_governor:
 -	devfreq_remove_governor(&devfreq_rknpu_ondemand);
 -err_uinit_table:
@@ -687,35 +709,36 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -#endif
 -
 -	return ret;
- }
+-}
 -EXPORT_SYMBOL(rknpu_devfreq_init);
- 
+-
 -int rknpu_devfreq_runtime_suspend(struct device *dev)
-+static int npu_devfreq_get_cur_freq(struct device *dev, unsigned long *freq)
- {
- 	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
+-{
+-	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
 -	struct rockchip_opp_info *opp_info = &rknpu_dev->opp_info;
- 
+-
 -	if (opp_info->is_scmi_clk) {
 -		if (clk_set_rate(opp_info->clk, POWER_DOWN_FREQ))
 -			LOG_DEV_ERROR(dev, "failed to restore clk rate\n");
 -	}
 -	opp_info->current_rm = UINT_MAX;
-+	*freq = rknpu_dev->current_freq;
- 
+-
  	return 0;
  }
 -EXPORT_SYMBOL(rknpu_devfreq_runtime_suspend);
--
+ 
 -int rknpu_devfreq_runtime_resume(struct device *dev)
--{
++void rknpu_devfreq_remove(struct rknpu_device *rknpu_dev)
+ {
++	if (rknpu_dev->devfreq_cooling)
++		devfreq_cooling_unregister(rknpu_dev->devfreq_cooling);
 -	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
 -	struct rockchip_opp_info *opp_info = &rknpu_dev->opp_info;
 -	int ret = 0;
 -
 -	if (!rknpu_dev->current_freq || !rknpu_dev->current_volt)
 -		return 0;
- 
+-
 -	ret = clk_bulk_prepare_enable(opp_info->nclocks, opp_info->clocks);
 -	if (ret) {
 -		LOG_DEV_INFO(dev, "failed to enable opp clks\n");
@@ -731,30 +754,19 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -	}
 -
 -	clk_bulk_disable_unprepare(opp_info->nclocks, opp_info->clocks);
-+static struct devfreq_dev_profile npu_devfreq_profile = {
-+	/*
-+	 * No automatic polling at probe: the device comes up on the
-+	 * userspace governor so nothing changes the NPU rate until
-+	 * something asks for it. Switch to simple_ondemand at runtime
-+	 * (echo simple_ondemand > .../governor) for load-based scaling.
-+	 */
-+	.polling_ms = 0,
-+	.target = npu_devfreq_target,
-+	.get_dev_status = npu_devfreq_get_dev_status,
-+	.get_cur_freq = npu_devfreq_get_cur_freq,
-+};
- 
+-
 -	return ret;
--}
+ }
 -EXPORT_SYMBOL(rknpu_devfreq_runtime_resume);
 -#else
- void rknpu_devfreq_lock(struct rknpu_device *rknpu_dev)
- {
+-void rknpu_devfreq_lock(struct rknpu_device *rknpu_dev)
+-{
 -	rockchip_monitor_volt_adjust_lock(rknpu_dev->mdev_info);
- }
+-}
 -EXPORT_SYMBOL(rknpu_devfreq_lock);
  
- void rknpu_devfreq_unlock(struct rknpu_device *rknpu_dev)
+-void rknpu_devfreq_unlock(struct rknpu_device *rknpu_dev)
++int rknpu_devfreq_runtime_suspend(struct device *dev)
  {
 -	rockchip_monitor_volt_adjust_unlock(rknpu_dev->mdev_info);
 -}
@@ -770,7 +782,8 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -	struct regulator *vdd_reg = data->regulators[0];
 -	struct regulator *mem_reg = data->regulators[1];
 -	struct clk *clk = data->clk;
--	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
+ 	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
++	int ret;
 -	struct rockchip_opp_info *opp_info = &rknpu_dev->opp_info;
 -	unsigned long old_freq = data->old_opp.rate;
 -	unsigned long new_freq = data->new_opp.rate;
@@ -778,7 +791,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -	bool is_set_clk = true;
 -	u32 target_rm = UINT_MAX;
 -	int ret = 0;
--
+ 
 -	if (!pm_runtime_active(dev)) {
 -		is_set_rm = false;
 -		if (opp_info->scmi_clk)
@@ -869,16 +882,13 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -	clk_bulk_disable_unprepare(opp_info->num_clks, opp_info->clks);
 -
 -	return ret;
- }
- 
+-}
+-
 -static int npu_devfreq_target(struct device *dev, unsigned long *freq,
 -			      u32 flags)
-+int rknpu_devfreq_init(struct rknpu_device *rknpu_dev)
- {
+-{
 -	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
-+	struct device *dev = rknpu_dev->dev;
-+	struct devfreq_dev_profile *dp = &npu_devfreq_profile;
- 	struct dev_pm_opp *opp;
+-	struct dev_pm_opp *opp;
 -	unsigned long opp_volt;
 -	int ret = 0;
 -
@@ -890,11 +900,9 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -		return PTR_ERR(opp);
 -	opp_volt = dev_pm_opp_get_voltage(opp);
 -	dev_pm_opp_put(opp);
-+	int ret;
- 
+-
 -	rockchip_monitor_volt_adjust_lock(rknpu_dev->mdev_info);
-+	mutex_init(&rknpu_dev->dvfs_lock);
- 
+-
 -	ret = dev_pm_opp_set_rate(dev, *freq);
 -	if (!ret) {
 -		rknpu_dev->current_freq = *freq;
@@ -904,11 +912,8 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -		rknpu_dev->current_volt = opp_volt;
 -		LOG_DEV_DEBUG(dev, "set rknpu freq: %lu, volt: %lu\n",
 -			      rknpu_dev->current_freq, rknpu_dev->current_volt);
-+	if (!of_find_property(dev->of_node, "operating-points-v2", NULL)) {
-+		LOG_DEV_INFO(dev, "no OPP table, running at a fixed rate\n");
-+		return -EOPNOTSUPP;
- 	}
- 
+-	}
+-
 -	rockchip_monitor_volt_adjust_unlock(rknpu_dev->mdev_info);
 -
 -	return ret;
@@ -921,23 +926,59 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
 -
 -	if (!rknpu_dev->model_data)
--		return 0;
--
++	if (!rknpu_dev->devfreq)
+ 		return 0;
+ 
 -	return rockchip_ipa_get_static_power(rknpu_dev->model_data, voltage);
 -}
-+	ret = devm_pm_opp_set_clkname(dev, "clk_npu");
++	ret = devfreq_suspend_device(rknpu_dev->devfreq);
 +	if (ret) {
-+		LOG_DEV_ERROR(dev, "failed to set opp clkname: %d\n", ret);
++		int resume_ret;
++
++		/*
++		 * devfreq_suspend_device() raises suspend_count before it runs
++		 * the governor or applies suspend_freq, and leaves it raised if
++		 * either fails. Balance it here, or devfreq stays logically
++		 * suspended for the rest of the device's life.
++		 */
++		resume_ret = devfreq_resume_device(rknpu_dev->devfreq);
++		if (resume_ret)
++			LOG_DEV_ERROR(dev,
++				      "failed to roll back devfreq suspend: %d\n",
++				      resume_ret);
++
 +		return ret;
 +	}
++
++	/*
++	 * BL31 owns the NPU PVTPLL and it does not survive the power domain
++	 * going down: coming back up still set to a PVTPLL rate wedges the
++	 * SoC on the first job after the transition. Drop to a rate the CRU
++	 * can produce on its own while the domain is still powered, and let
++	 * the resume path put the real rate back. The vendor driver does the
++	 * same thing, and rk3528 expresses it upstream as an opp-suspend.
++	 */
++	ret = npu_clks_get(rknpu_dev);
++	if (!ret) {
++		ret = clk_set_rate(rknpu_dev->clks[0].clk, POWER_DOWN_FREQ);
++		npu_clks_put(rknpu_dev);
++	}
++	if (ret) {
++		/*
++		 * A failed runtime suspend must not leave devfreq suspended
++		 * while the PM core goes on treating the device as active.
++		 */
++		LOG_DEV_ERROR(dev, "failed to park npu rate: %d\n", ret);
++		devfreq_resume_device(rknpu_dev->devfreq);
++		return ret;
++	}
++
++	rknpu_dev->current_freq = POWER_DOWN_FREQ;
  
 -static struct devfreq_cooling_power npu_cooling_power = {
 -	.get_static_power = &npu_get_static_power,
 -};
-+	if (of_find_property(dev->of_node, "rknpu-supply", NULL)) {
-+		/* NULL-terminated: the OPP core counts with while (*temp++) */
-+		const char *const reg_names[] = { "rknpu", NULL };
- 
+-
 -int rknpu_devfreq_init(struct rknpu_device *rknpu_dev)
 -{
 -	struct device *dev = rknpu_dev->dev;
@@ -961,61 +1002,45 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -		if (IS_ERR(opp_table)) {
 -			dev_pm_opp_put_regulators(reg_table);
 -			return PTR_ERR(opp_table);
-+		ret = devm_pm_opp_set_regulators(dev, reg_names);
-+		if (ret) {
-+			LOG_DEV_ERROR(dev, "failed to set opp regulator: %d\n",
-+				      ret);
-+			return ret;
- 		}
+-		}
 -	} else {
 -		reg_table = dev_pm_opp_set_regulators(dev, reg_names, 1);
 -		if (IS_ERR(reg_table))
 -			return PTR_ERR(reg_table);
- 	}
- 
+-	}
+-
 -	rockchip_get_opp_data(rockchip_npu_of_match, &rknpu_dev->opp_info);
 -	ret = rockchip_init_opp_table(dev, &rknpu_dev->opp_info, "npu_leakage",
 -				      "rknpu");
-+	ret = devm_pm_opp_of_add_table(dev);
- 	if (ret) {
+-	if (ret) {
 -		LOG_DEV_ERROR(dev, "failed to init_opp_table\n");
-+		LOG_DEV_ERROR(dev, "failed to add opp table: %d\n", ret);
- 		return ret;
- 	}
- 
- 	rknpu_dev->current_freq = clk_get_rate(rknpu_dev->clks[0].clk);
+-		return ret;
+-	}
 -
- 	opp = devfreq_recommended_opp(dev, &rknpu_dev->current_freq, 0);
+-	rknpu_dev->current_freq = clk_get_rate(rknpu_dev->clks[0].clk);
+-
+-	opp = devfreq_recommended_opp(dev, &rknpu_dev->current_freq, 0);
 -	if (IS_ERR(opp)) {
 -		ret = PTR_ERR(opp);
 -		goto err_remove_table;
 -	}
-+	if (IS_ERR(opp))
-+		return PTR_ERR(opp);
- 	dev_pm_opp_put(opp);
+-	dev_pm_opp_put(opp);
 -	dp->initial_freq = rknpu_dev->current_freq;
- 
+-
 -	ret = devfreq_add_governor(&devfreq_rknpu_ondemand);
 -	if (ret) {
 -		LOG_DEV_ERROR(dev, "failed to add rknpu_ondemand governor\n");
 -		goto err_remove_table;
 -	}
-+	dp->initial_freq = rknpu_dev->current_freq;
-+	rknpu_dev->ondemand_freq = rknpu_dev->current_freq;
- 
+-
 -	rknpu_dev->devfreq = devm_devfreq_add_device(dev, dp, "rknpu_ondemand",
 -						     (void *)rknpu_dev);
-+	rknpu_dev->devfreq = devm_devfreq_add_device(dev, dp,
-+						     DEVFREQ_GOV_USERSPACE, NULL);
- 	if (IS_ERR(rknpu_dev->devfreq)) {
+-	if (IS_ERR(rknpu_dev->devfreq)) {
 -		LOG_DEV_ERROR(dev, "failed to add devfreq\n");
- 		ret = PTR_ERR(rknpu_dev->devfreq);
+-		ret = PTR_ERR(rknpu_dev->devfreq);
 -		goto err_remove_governor;
-+		rknpu_dev->devfreq = NULL;
-+		LOG_DEV_ERROR(dev, "failed to add devfreq device: %d\n", ret);
-+		return ret;
- 	}
- 
+-	}
+-
 -	npu_mdevp.data = rknpu_dev->devfreq;
 -	npu_mdevp.opp_info = &rknpu_dev->opp_info;
 -	rknpu_dev->mdev_info =
@@ -1024,33 +1049,19 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -		LOG_DEV_DEBUG(dev, "without system monitor\n");
 -		rknpu_dev->mdev_info = NULL;
 -		npu_mdevp.is_checked = true;
-+	devm_devfreq_register_opp_notifier(dev, rknpu_dev->devfreq);
-+
-+	/*
-+	 * The upstream npu-thermal zone has only a critical trip, so without a
-+	 * cooling device there is nothing between sustained load and a reset.
-+	 */
-+	rknpu_dev->devfreq_cooling =
-+		of_devfreq_cooling_register(dev->of_node, rknpu_dev->devfreq);
-+	if (IS_ERR(rknpu_dev->devfreq_cooling)) {
-+		LOG_DEV_ERROR(dev, "no devfreq cooling: %ld\n",
-+			      PTR_ERR(rknpu_dev->devfreq_cooling));
-+		rknpu_dev->devfreq_cooling = NULL;
- 	}
+-	}
 -	rknpu_dev->current_freq = clk_get_rate(rknpu_dev->clks[0].clk);
 -	rknpu_dev->ondemand_freq = rknpu_dev->current_freq;
 -	rknpu_dev->current_volt = regulator_get_voltage(rknpu_dev->vdd);
- 
+-
 -	rknpu_dev->devfreq->previous_freq = rknpu_dev->current_freq;
 -	if (rknpu_dev->devfreq->suspend_freq)
 -		rknpu_dev->devfreq->resume_freq = rknpu_dev->current_freq;
- 	rknpu_dev->devfreq->last_status.current_frequency =
- 		rknpu_dev->current_freq;
+-	rknpu_dev->devfreq->last_status.current_frequency =
+-		rknpu_dev->current_freq;
 -	rknpu_dev->devfreq->last_status.total_time = 1;
 -	rknpu_dev->devfreq->last_status.busy_time = 1;
-+	if (rknpu_dev->vdd)
-+		rknpu_dev->current_volt = regulator_get_voltage(rknpu_dev->vdd);
- 
+-
 -	of_property_read_u32(dev->of_node, "dynamic-power-coefficient",
 -			     (u32 *)&npu_cooling_power.dyn_power_coeff);
 -	rknpu_dev->model_data =
@@ -1071,13 +1082,10 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -		dev->of_node, rknpu_dev->devfreq, &npu_cooling_power);
 -	if (IS_ERR_OR_NULL(rknpu_dev->devfreq_cooling))
 -		LOG_DEV_ERROR(dev, "failed to register cooling device\n");
-+	LOG_DEV_INFO(dev, "devfreq ready, current rate %lu Hz\n",
-+		     rknpu_dev->current_freq);
- 
+-
 -out:
  	return 0;
-+}
- 
+-
 -err_remove_governor:
 -	devfreq_remove_governor(&devfreq_rknpu_ondemand);
 -err_remove_table:
@@ -1090,65 +1098,24 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -	rknpu_dev->devfreq = NULL;
 -
 -	return ret;
-+void rknpu_devfreq_remove(struct rknpu_device *rknpu_dev)
-+{
-+	if (rknpu_dev->devfreq_cooling)
-+		devfreq_cooling_unregister(rknpu_dev->devfreq_cooling);
  }
 -EXPORT_SYMBOL(rknpu_devfreq_init);
  
- int rknpu_devfreq_runtime_suspend(struct device *dev)
- {
- 	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
+-int rknpu_devfreq_runtime_suspend(struct device *dev)
+-{
+-	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
 -	struct rockchip_opp_info *opp_info = &rknpu_dev->opp_info;
-+	int ret;
-+
-+	/*
-+	 * Parking is not optional and devfreq never coming up is not a reason
-+	 * to skip it: without it the PVTPLL rate outlives the power domain and
-+	 * wedges the SoC on the next job. Only the bookkeeping below is
-+	 * conditional.
-+	 */
-+	if (!rknpu_dev->devfreq)
-+		return npu_devfreq_park(dev);
-+
-+	ret = devfreq_suspend_device(rknpu_dev->devfreq);
-+	if (ret) {
-+		int resume_ret;
-+
-+		/*
-+		 * devfreq_suspend_device() raises suspend_count before it runs
-+		 * the governor or applies suspend_freq, and leaves it raised if
-+		 * either fails. Balance it here, or devfreq stays logically
-+		 * suspended for the rest of the device's life.
-+		 */
-+		resume_ret = devfreq_resume_device(rknpu_dev->devfreq);
-+		if (resume_ret)
-+			LOG_DEV_ERROR(dev,
-+				      "failed to roll back devfreq suspend: %d\n",
-+				      resume_ret);
-+
-+		return ret;
-+	}
- 
+-
 -	if (opp_info->scmi_clk) {
 -		if (clk_set_rate(opp_info->scmi_clk, POWER_DOWN_FREQ))
 -			LOG_DEV_ERROR(dev, "failed to restore clk rate\n");
-+	ret = npu_devfreq_park(dev);
-+	if (ret) {
-+		/*
-+		 * A failed runtime suspend must not leave devfreq suspended
-+		 * while the PM core goes on treating the device as active.
-+		 */
-+		devfreq_resume_device(rknpu_dev->devfreq);
-+		return ret;
- 	}
+-	}
 -	opp_info->current_rm = UINT_MAX;
- 
- 	return 0;
- }
+-
+-	return 0;
+-}
 -EXPORT_SYMBOL(rknpu_devfreq_runtime_suspend);
- 
+-
  int rknpu_devfreq_runtime_resume(struct device *dev)
  {
  	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
@@ -1160,6 +1127,10 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		return 0;
  
 -	ret = clk_bulk_prepare_enable(opp_info->num_clks, opp_info->clks);
+-	if (ret) {
+-		LOG_DEV_INFO(dev, "failed to enable opp clks\n");
+-		return ret;
+-	}
 +	/*
 +	 * A resume that did not come through rknpu_power_on() has no clocks or
 +	 * domains up, so leave the rate pending for the next real power-on
@@ -1173,13 +1144,17 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	 * would leave the PM core with an active device at a stale rate.
 +	 */
 +	ret = npu_clks_get(rknpu_dev);
- 	if (ret) {
--		LOG_DEV_INFO(dev, "failed to enable opp clks\n");
++	if (ret) {
 +		LOG_DEV_ERROR(dev, "failed to enable clks on resume: %d\n", ret);
- 		return ret;
- 	}
++		return ret;
++	}
 +	ret = npu_devfreq_apply_pending(dev);
 +	npu_clks_put(rknpu_dev);
++
++	if (ret) {
++		LOG_DEV_ERROR(dev, "failed to restore npu rate: %d\n", ret);
++		return ret;
++	}
  
 -	if (opp_info->data && opp_info->data->set_read_margin)
 -		opp_info->data->set_read_margin(dev, opp_info,
@@ -1187,16 +1162,13 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -	if (opp_info->scmi_clk) {
 -		if (clk_set_rate(opp_info->scmi_clk, rknpu_dev->current_freq))
 -			LOG_DEV_ERROR(dev, "failed to set power down rate\n");
-+	if (ret) {
-+		LOG_DEV_ERROR(dev, "failed to restore npu rate: %d\n", ret);
-+		return ret;
- 	}
- 
--	clk_bulk_disable_unprepare(opp_info->num_clks, opp_info->clks);
+-	}
 +	return devfreq_resume_device(rknpu_dev->devfreq);
  
+-	clk_bulk_disable_unprepare(opp_info->num_clks, opp_info->clks);
+-
 -	return ret;
--}
+ }
 -EXPORT_SYMBOL(rknpu_devfreq_runtime_resume);
 -#endif
 -
@@ -1213,39 +1185,5 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -#else
 -	dev_pm_opp_of_remove_table(rknpu_dev->dev);
 -#endif
- }
+-}
 -EXPORT_SYMBOL(rknpu_devfreq_remove);
---- a/include/rknpu_drv.h
-+++ b/include/rknpu_drv.h
-@@ -145,6 +145,21 @@
- 	struct rockchip_opp_info opp_info;
- 	unsigned long current_freq;
- 	unsigned long current_volt;
-+	/*
-+	 * Serialises every rate change. The OPP call and the clk_set_rate
-+	 * after it have to be one step, or a request arriving between them
-+	 * leaves the rail set for one point and the clock at another.
-+	 */
-+	struct mutex dvfs_lock;
-+	/*
-+	 * True only between rknpu_power_on() bringing the clocks and power
-+	 * domains up and rknpu_power_off() taking them down. Runtime PM
-+	 * reporting RPM_ACTIVE is not the same thing, and the SCMI rate
-+	 * path has to know the difference or it writes into a gated APB.
-+	 */
-+	bool hw_powered;
-+	/* Bounds the power-off retry so a persistent failure cannot spin. */
-+	unsigned int power_off_retries;
- 	int bypass_irq_handler;
- 	int bypass_soft_reset;
- 	bool soft_reseting;
---- a/include/rknpu_devfreq.h
-+++ b/include/rknpu_devfreq.h
-@@ -14,6 +14,7 @@
- void rknpu_devfreq_remove(struct rknpu_device *rknpu_dev);
- int rknpu_devfreq_runtime_suspend(struct device *dev);
- int rknpu_devfreq_runtime_resume(struct device *dev);
-+int rknpu_devfreq_sync_rate(struct device *dev);
- #else
- static inline int rknpu_devfreq_init(struct rknpu_device *rknpu_dev)
- {

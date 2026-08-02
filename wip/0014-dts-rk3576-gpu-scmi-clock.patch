@@ -1,0 +1,72 @@
+dts: rk3576: clock the GPU from SCMI so the top OPPs are reachable
+
+The GPU OPP table lists 700, 800, 900 and 950 MHz, but panfrost drives
+CLK_GPU, a divider off GPLL/CPLL/AUPLL/SPLL/LPLL. None of those produce
+those rates, so the clock framework rounds down and the hardware silently
+runs slower than the OPP says. Measured on an ArmSoM Sige5:
+
+  requested   actual
+    300 MHz   297 MHz
+    400 MHz   396 MHz
+    500 MHz   500 MHz
+    600 MHz   594 MHz
+    700 MHz   594 MHz
+    800 MHz   786 MHz
+    900 MHz   786 MHz
+    950 MHz   786 MHz
+
+So the top three OPPs all deliver 786 MHz, and devfreq, the energy model
+and the thermal governor all believe the GPU is at 950 MHz while it runs
+17% slower. Rates above the PVTPLL threshold are only reachable through
+SCMI: BL31 owns the GPU PVTPLL and switches between the normal PLL and
+PVTPLL on an SCMI rate request.
+
+Make SCMI_CLK_GPU the clock panfrost scales. PCLK_GPU_ROOT comes along as
+"bus" so panfrost keeps it enabled: BL31 programs PVTPLL through registers
+in the GPU block reached over that APB clock, and it does not enable the
+clock itself. The rk3528 GPU binding uses the same SCMI-as-core pattern.
+
+Mark the 300 MHz OPP opp-suspend so the normal PLL is selected before the
+GPU is runtime suspended, as rk3528 does - suspending while on PVTPLL
+hangs the SoC.
+
+Drop the 950 MHz OPP. Table 3-2 of the RK3576 datasheet (rev 1.5) gives a
+900 MHz maximum for the GPU, against 950 MHz for the NPU. The rate was
+unreachable over the CRU, so this series would be the first time it could
+actually be applied.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/arch/arm64/boot/dts/rockchip/rk3576.dtsi
++++ b/arch/arm64/boot/dts/rockchip/rk3576.dtsi
+@@ -350,6 +350,7 @@
+ 		opp-300000000 {
+ 			opp-hz = /bits/ 64 <300000000>;
+ 			opp-microvolt = <700000 700000 850000>;
++			opp-suspend;
+ 		};
+ 
+ 		opp-400000000 {
+@@ -380,11 +381,6 @@
+ 		opp-900000000 {
+ 			opp-hz = /bits/ 64 <900000000>;
+ 			opp-microvolt = <825000 825000 850000>;
+-		};
+-
+-		opp-950000000 {
+-			opp-hz = /bits/ 64 <950000000>;
+-			opp-microvolt = <850000 850000 850000>;
+ 		};
+ 	};
+ 
+@@ -1270,8 +1266,8 @@
+ 			reg = <0x0 0x27800000 0x0 0x20000>;
+ 			assigned-clocks = <&scmi_clk SCMI_CLK_GPU>;
+ 			assigned-clock-rates = <198000000>;
+-			clocks = <&cru CLK_GPU>;
+-			clock-names = "core";
++			clocks = <&scmi_clk SCMI_CLK_GPU>, <&cru PCLK_GPU_ROOT>;
++			clock-names = "core", "bus";
+ 			dynamic-power-coefficient = <1625>;
+ 			interrupts = <GIC_SPI 347 IRQ_TYPE_LEVEL_HIGH>,
+ 				     <GIC_SPI 348 IRQ_TYPE_LEVEL_HIGH>,

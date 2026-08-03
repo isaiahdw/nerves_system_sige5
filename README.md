@@ -119,7 +119,7 @@ Verified on a Sige5 v1.2, 2026-08-01.
 | microSD boot | Untested | Boot ROM path; the same image should work for bring-up/recovery |
 | Bluetooth | No | uart4 is deliberately disabled in the mainline dts; needs a serdev node + bring-up |
 | HDMI display + console | Yes | VOP + dw-hdmi-qp, framebuffer console verified on a display. No GL/EGL userspace yet (see GPU row) |
-| GPU (Mali G52 MC3) | Yes | Kernel panfrost + Mesa (OpenGL ES 3.1, EGL/GBM, no X11/Wayland); kmscube runs vsync-locked at 60 fps on HDMI. Mesa is built without the LLVM draw module and the orphaned libLLVM is pruned from the image (see external.mk and post-build.sh), so the GL stack costs ~18 MB |
+| GPU (Mali G52 MC3) | Yes | Kernel panfrost + Mesa (OpenGL ES 3.1, EGL/GBM, no X11/Wayland); kmscube runs vsync-locked at 60 fps on HDMI. devfreq drives 300-900 MHz off BL31's PVTPLL over SCMI (see GPU). Mesa is built without the LLVM draw module and the orphaned libLLVM is pruned from the image (see external.mk and post-build.sh), so the GL stack costs ~18 MB |
 | M.2 NVMe (PCIe 2.1) | Untested | pcie0 + NVMe drivers built in; no drive was fitted during bring-up |
 | USB | Yes | 2x Type-C (one PD power input only, one USB 2.0 OTG/maskrom) + USB3 host; verified with a CDC-ACM device (Zigbee coordinator) through the onboard hub. SuperSpeed not yet exercised |
 | Audio | Yes | HDMI audio + onboard analog ES8388, both register as ALSA cards; playback not yet exercised |
@@ -313,6 +313,64 @@ down 700 → 600 → 500 → 400 → 300 MHz while the floor remains installed a
   acquisition and dropped when the device suspends.
 - **`rknn_server`.** Not packaged; RKNN-toolkit remote profiling is
   unavailable.
+
+## GPU
+
+panfrost drives the Mali-G52 through the mainline OPP core at 300-900 MHz.
+The rate comes from BL31's PVTPLL over SCMI rather than the CRU, because the
+CRU dividers off GPLL/CPLL/AUPLL/SPLL/LPLL cannot produce the upper rates.
+
+- **Three clocks.** SCMI `CLK_GPU` carries the rate, `PCLK_GPU_ROOT` and CRU
+  `CLK_GPU` reach the registers BL31 programs PVTPLL through. BL31 does not
+  enable the latter two itself, and nothing else claims the gate, so without
+  naming it here the clock framework disables it as unused during boot.
+- **Rate accuracy.** Every OPP is delivered exactly. Over the CRU the top
+  three all collapse onto 786 MHz:
+
+  | Requested | CRU | SCMI |
+  | --- | --- | --- |
+  | 300-600 MHz | 297-594 MHz | exact |
+  | 700 MHz | 594 MHz | 700 MHz |
+  | 800 MHz | 786 MHz | 800 MHz |
+  | 900 MHz | 786 MHz | 900 MHz |
+
+- **Runtime PM.** A rate request only reaches PVTPLL with the power domain
+  up, so the clock is parked at 200 MHz through the OPP core before suspend
+  and the requested rate reapplied on resume. Requests arriving while the
+  domain is down are recorded and applied on the way back up.
+- **Per-chip selection.** An OTP cell picks the OPP set: 900 MHz on the
+  RK3576, 800 MHz on the S, J and M parts, with the J and M carrying their
+  own voltages. Unreadable OTP falls back to a restricted table.
+- **950 MHz.** Dropped. BL31's rate table has no 950 MHz entry and table 3-2
+  of the datasheet (rev 1.5) gives 900 MHz as the GPU maximum.
+
+### Benchmarks
+
+`glmark2-es2-drm` off-screen through GBM, `--frame-end=finish`, 1920x1080,
+`userspace` governor pinned at each rate. Scene is a fragment-bound loop
+(`fragment-steps=256`):
+
+| Frequency | FPS | vs 300 MHz |
+| --- | --- | --- |
+| 300 MHz | 20.0 | 1.00x |
+| 400 MHz | 24.0 | 1.20x |
+| 500 MHz | 30.0 | 1.50x |
+| 600 MHz | 36.0 | 1.80x |
+| 700 MHz | 37.0 | 1.85x |
+| 800 MHz | 37.0 | 1.85x |
+| 900 MHz | 38.0 | 1.90x |
+
+Throughput tracks the clock to 600 MHz and then flattens. Seven scenes
+covering fragment, ALU, vertex, texture and two real workloads all return
+1.02-1.06x from 600 to 900 MHz, so the ceiling is shared rather than
+per-scene - neither DDR nor the fabric scales with `CLK_GPU`. Against what
+the CRU delivers, exact rates are worth 3.8% at the 700 MHz OPP and 2.7% at
+the top; the remaining clock headroom does not convert on this SoC.
+
+Sustained load at 900 MHz holds 38.0 FPS with no falloff and peaks at
+82 C against a 115 C critical trip, unchanged with eight CPU workers
+alongside. `stress-ng --gpu 8` completes 153 bogo ops/s, 132 with
+`--cpu 8` added, and 200 frequency changes during a run produce no errors.
 
 ## Debug UART
 

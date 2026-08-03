@@ -1,0 +1,152 @@
+devfreq: measure load over the sampling window
+
+npu_devfreq_get_dev_status() reported the busy time of the previous whole
+second, latched by the 1 Hz load timer, against a constant total. Two reads
+inside the same second returned the same sample, so a governor polling
+faster than 1 Hz acted repeatedly on stale data, and work starting now was
+invisible until the next tick - up to a second later.
+
+Keep a cumulative busy count per core that the timer adds to rather than
+resets, and report the difference since the last sample over the interval
+that actually elapsed, which is the contract panfrost uses. A job still
+running is counted up to the moment of the read, so a core busy throughout
+a short window reads as busy rather than idle.
+
+This does not change behaviour on its own: the governor at probe is still
+userspace, which does not poll. polling_ms is set so that selecting a
+polling governor at runtime is the only write needed.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/rknpu_devfreq.c
++++ b/rknpu_devfreq.c
+@@ -25,6 +25,7 @@
+ 
+ #include "rknpu_drv.h"
+ #include "rknpu_devfreq.h"
++#include "rknpu_job.h"
+ 
+ #define POWER_DOWN_FREQ 200000000
+ 
+@@ -475,29 +476,52 @@
+ }
+ EXPORT_SYMBOL(rknpu_devfreq_sync_rate);
+ 
++/*
++ * Busy time accrued on one core up to now: what the 1 Hz timer has latched,
++ * plus what has accrued since, plus the part of a running job that has not
++ * been accounted yet. Monotonic, so the difference between two reads is the
++ * busy time between them. Caller holds irq_lock.
++ */
++static ktime_t npu_core_busy_cum(struct rknpu_subcore_data *sd, ktime_t now)
++{
++	ktime_t cum = ktime_add(sd->timer.busy_cum, sd->timer.busy_time);
++
++	if (sd->job)
++		cum = ktime_add(cum, ktime_sub(now, sd->job->hw_recoder_time));
++
++	return cum;
++}
++
+ static int npu_devfreq_get_dev_status(struct device *dev,
+ 				      struct devfreq_dev_status *stat)
+ {
+ 	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
+ 	unsigned long irqflags;
+-	ktime_t busy = 0;
++	ktime_t now, busy = 0;
+ 	int i;
+ 
+ 	/*
+-	 * Report the busiest core, so the governor scales up when any one is
+-	 * saturated. irq_lock guards the accumulator against a torn read.
++	 * Report the busiest core over the window since the last sample, so
++	 * the governor acts on the load it is about to decide about rather
++	 * than on the previous whole second.
+ 	 */
+ 	spin_lock_irqsave(&rknpu_dev->irq_lock, irqflags);
++	now = ktime_get();
+ 	for (i = 0; i < rknpu_dev->config->num_irqs; i++) {
+-		ktime_t t = rknpu_dev->subcore_datas[i].timer.total_busy_time;
+-
+-		if (ktime_compare(t, busy) > 0)
+-			busy = t;
+-	}
++		struct rknpu_subcore_data *sd = &rknpu_dev->subcore_datas[i];
++		ktime_t cum = npu_core_busy_cum(sd, now);
++		ktime_t delta = ktime_sub(cum, sd->timer.devfreq_prev);
++
++		sd->timer.devfreq_prev = cum;
++		if (ktime_compare(delta, busy) > 0)
++			busy = delta;
++	}
++	stat->total_time = (unsigned long)ktime_to_us(
++		ktime_sub(now, rknpu_dev->devfreq_last_sample));
++	rknpu_dev->devfreq_last_sample = now;
+ 	spin_unlock_irqrestore(&rknpu_dev->irq_lock, irqflags);
+ 
+ 	stat->busy_time = (unsigned long)ktime_to_us(busy);
+-	stat->total_time = RKNPU_LOAD_INTERVAL / 1000;
+ 	if (stat->busy_time > stat->total_time)
+ 		stat->busy_time = stat->total_time;
+ 	stat->current_frequency = rknpu_dev->current_freq;
+@@ -516,12 +540,12 @@
+ 
+ static struct devfreq_dev_profile npu_devfreq_profile = {
+ 	/*
+-	 * No automatic polling at probe: the device comes up on the
+-	 * userspace governor so nothing changes the NPU rate until
+-	 * something asks for it. Switch to simple_ondemand at runtime
+-	 * (echo simple_ondemand > .../governor) for load-based scaling.
++	 * The device comes up on the userspace governor, so nothing changes
++	 * the NPU rate until something asks for it and this interval goes
++	 * unused. It is set so that selecting a polling governor at runtime
++	 * (echo simple_ondemand > .../governor) is all that is needed.
+ 	 */
+-	.polling_ms = 0,
++	.polling_ms = 50,
+ 	.target = npu_devfreq_target,
+ 	.get_dev_status = npu_devfreq_get_dev_status,
+ 	.get_cur_freq = npu_devfreq_get_cur_freq,
+@@ -654,6 +678,7 @@
+ 	dp->initial_freq = rknpu_dev->current_freq;
+ 	rknpu_dev->ondemand_freq = rknpu_dev->current_freq;
+ 
++	rknpu_dev->devfreq_last_sample = ktime_get();
+ 	rknpu_dev->devfreq = devm_devfreq_add_device(dev, dp,
+ 						     DEVFREQ_GOV_USERSPACE, NULL);
+ 	if (IS_ERR(rknpu_dev->devfreq)) {
+--- a/rknpu_drv.c
++++ b/rknpu_drv.c
+@@ -821,6 +821,9 @@
+ 			job->hw_recoder_time = now;
+ 		}
+ 
++		subcore_data->timer.busy_cum =
++			ktime_add(subcore_data->timer.busy_cum,
++				  subcore_data->timer.busy_time);
+ 		subcore_data->timer.total_busy_time =
+ 			subcore_data->timer.busy_time;
+ 		subcore_data->timer.busy_time = 0;
+--- a/include/rknpu_drv.h
++++ b/include/rknpu_drv.h
+@@ -103,6 +103,10 @@
+ struct rknpu_timer {
+ 	ktime_t busy_time;
+ 	ktime_t total_busy_time;
++	/* Busy time the 1 Hz timer has latched, never reset. */
++	ktime_t busy_cum;
++	/* What the cumulative count read at the last devfreq sample. */
++	ktime_t devfreq_prev;
+ };
+ 
+ struct rknpu_subcore_data {
+@@ -156,6 +160,8 @@
+ 	struct rockchip_opp_info opp_info;
+ 	unsigned long current_freq;
+ 	unsigned long current_volt;
++	/* When devfreq last sampled the load, for the elapsed window. */
++	ktime_t devfreq_last_sample;
+ 	/*
+ 	 * Serialises every rate change. The OPP call and the clk_set_rate
+ 	 * after it have to be one step, or a request arriving between them

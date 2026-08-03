@@ -16,7 +16,7 @@ Signed-off-by: Jiaxing Hu <huhuvmb88@outlook.com>
 diff --git a/drivers/iommu/rockchip-iommu.c b/drivers/iommu/rockchip-iommu.c
 --- a/drivers/iommu/rockchip-iommu.c
 +++ b/drivers/iommu/rockchip-iommu.c
-@@ -1202,6 +1202,37 @@
+@@ -1202,6 +1202,48 @@
  	return 0;
  }
  
@@ -42,7 +42,18 @@ diff --git a/drivers/iommu/rockchip-iommu.c b/drivers/iommu/rockchip-iommu.c
 +		if (WARN_ON_ONCE(ret < 0))
 +			continue;
 +		if (ret) {
-+			WARN_ON(clk_bulk_enable(iommu->num_clocks, iommu->clocks));
++			int cret = clk_bulk_enable(iommu->num_clocks,
++						   iommu->clocks);
++
++			/*
++			 * The registers are behind these clocks, so a failed
++			 * enable means the command below would go nowhere and
++			 * the disable after it would unbalance the count.
++			 */
++			if (WARN_ON(cret)) {
++				pm_runtime_put(iommu->dev);
++				continue;
++			}
 +			rk_iommu_command(iommu, RK_MMU_CMD_ZAP_CACHE);
 +			clk_bulk_disable(iommu->num_clocks, iommu->clocks);
 +			pm_runtime_put(iommu->dev);

@@ -2,7 +2,7 @@ rknpu_drv.c: mainline API updates, version-guarded: hrtimer_setup,
 nvmem_cell_read_u8, void platform remove, string MODULE_IMPORT_NS,
 drm_driver .date/.gem_prime_mmap/.prime_* member removals.
 
-Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 diff --git a/rknpu_drv.c b/rknpu_drv.c
 index 4090344..9610926 100644

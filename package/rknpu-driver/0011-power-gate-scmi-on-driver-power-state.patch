@@ -1,0 +1,152 @@
+Make the SCMI rate path depend on driver power, not runtime PM
+
+RPM_ACTIVE says the PM core resumed the device. It does not say the NPU
+is reachable. Writing "on" to power/control resumes it without
+rknpu_power_on() ever running, so no clock bulk and no power domains -
+and the resume callback's own clock reference is released as soon as it
+returns. From there runtime PM reports active with PCLK_NPUTOP_ROOT
+gated, and the next devfreq target, from simple_ondemand polling or a
+userspace frequency write, asks BL31 to reprogram PVTPLL through a dead
+APB and hangs the CPU:
+
+  echo on > /sys/devices/platform/soc/27700000.npu/power/control
+
+reboots the board. An earlier version of this series survived that write
+once and was reported as safe; it is not, and it is not reliably fatal
+either, which is how it got past the first test.
+
+Track the real state instead. hw_powered is set once rknpu_power_on()
+has the clocks and domains up, and cleared in rknpu_power_off() at the
+point teardown becomes unavoidable - after the checks that can still bail
+out. Both the resume callback and npu_devfreq_target() now require it,
+and leave the rate pending when it is clear, which the next genuine
+power-on applies.
+
+Two more things power-off's new error returns exposed:
+
+rknpu_probe() called rknpu_power_off() and then zeroed power_refcount
+whatever happened. A failure there leaves the regulators, clocks and
+domains referenced while the count says nothing holds them, so the next
+power-on enables them a second time. Only zero it when the power-off
+succeeded.
+
+rknpu_power_put_delay() calls straight back into rknpu_power_put() when
+the configured delay is zero, which debugfs allows. Since power-off can
+now answer -EBUSY against an in-flight rate change, and put() retries
+through put_delay(), the two would recurse into each other for as long as
+the transition lasted. Retries go through the workqueue.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/rknpu_drv.c
++++ b/rknpu_drv.c
+@@ -326,6 +326,40 @@
+ static int rknpu_power_on(struct rknpu_device *rknpu_dev);
+ static int rknpu_power_off(struct rknpu_device *rknpu_dev);
+ 
++/* Floor for the debugfs-settable delay: zero would busy-loop the workqueue. */
++#define RKNPU_POWER_OFF_RETRY_MIN_MS 20
++#define RKNPU_POWER_OFF_RETRY_LIMIT 10
++
++/*
++ * Re-arm the power-off worker after a power-off that could not run. Always
++ * asynchronous: rknpu_power_put_delay() calls straight back into
++ * rknpu_power_put() when the configured delay is zero, and with power-off
++ * now able to return -EBUSY against an in-flight rate change the two would
++ * recurse into each other until one of them won.
++ */
++static void rknpu_power_off_retry(struct rknpu_device *rknpu_dev)
++{
++	unsigned int delay = rknpu_dev->power_put_delay;
++
++	/* Absent early in probe and once remove has quiesced it. */
++	if (!rknpu_dev->power_off_wq)
++		return;
++
++	if (++rknpu_dev->power_off_retries > RKNPU_POWER_OFF_RETRY_LIMIT) {
++		LOG_DEV_ERROR(
++			rknpu_dev->dev,
++			"giving up on powering the npu down after %d attempts\n",
++			RKNPU_POWER_OFF_RETRY_LIMIT);
++		return;
++	}
++
++	if (delay < RKNPU_POWER_OFF_RETRY_MIN_MS)
++		delay = RKNPU_POWER_OFF_RETRY_MIN_MS;
++
++	queue_delayed_work(rknpu_dev->power_off_wq, &rknpu_dev->power_off_work,
++			   msecs_to_jiffies(delay));
++}
++
+ static void rknpu_power_off_delay_work(struct work_struct *power_off_work)
+ {
+ 	int ret = 0;
+@@ -341,7 +375,7 @@
+ 	mutex_unlock(&rknpu_dev->power_lock);
+ 
+ 	if (ret)
+-		rknpu_power_put_delay(rknpu_dev);
++		rknpu_power_off_retry(rknpu_dev);
+ }
+ 
+ int rknpu_power_get(struct rknpu_device *rknpu_dev)
+@@ -369,7 +403,7 @@
+ 	mutex_unlock(&rknpu_dev->power_lock);
+ 
+ 	if (ret)
+-		rknpu_power_put_delay(rknpu_dev);
++		rknpu_power_off_retry(rknpu_dev);
+ 
+ 	return ret;
+ }
+@@ -1001,7 +1035,19 @@
+ 			}
+ 		}
+ 	}
++	/* Clocks and domains are up: the SCMI path is safe from here. */
++	WRITE_ONCE(rknpu_dev->hw_powered, true);
++
+ 	ret = pm_runtime_get_sync(dev);
++	if (ret >= 0) {
++		/*
++		 * No resume callback runs when the device was already active -
++		 * which is what writing "on" to power/control leaves behind -
++		 * so nothing else would apply a rate deferred while the gate
++		 * was shut.
++		 */
++		rknpu_devfreq_sync_rate(dev);
++	}
+ 	if (ret < 0) {
+ 		LOG_DEV_ERROR(dev,
+ 			      "failed to get pm runtime for rknpu, ret: %d\n",
+@@ -1073,6 +1119,12 @@
+ 	pm_runtime_put_sync(dev);
+ #endif
+ 
++	/*
++	 * Committed to tearing down now; everything above could still bail
++	 * out and leave the hardware up.
++	 */
++	WRITE_ONCE(rknpu_dev->hw_powered, false);
++
+ 	if (rknpu_dev->multiple_domains) {
+ #ifndef FPGA_PLATFORM
+ 		/*
+@@ -1566,8 +1618,15 @@
+ 	if (rknpu_dev->iommu_en)
+ 		rknpu_iommu_init_domain(rknpu_dev);
+ 
+-	rknpu_power_off(rknpu_dev);
+-	atomic_set(&rknpu_dev->power_refcount, 0);
++	/*
++	 * A failed power-off leaves the regulators, clocks and domains still
++	 * referenced. Zeroing the count regardless would tell the next
++	 * power-on to enable them a second time.
++	 */
++	if (rknpu_power_off(rknpu_dev))
++		LOG_DEV_WARN(dev, "failed to power off after probe\n");
++	else
++		atomic_set(&rknpu_dev->power_refcount, 0);
+ 	atomic_set(&rknpu_dev->cmdline_power_refcount, 0);
+ 	atomic_set(&rknpu_dev->iommu_domain_refcount, 0);
+ 

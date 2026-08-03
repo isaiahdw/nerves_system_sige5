@@ -1,0 +1,80 @@
+Do not tear down clocks and rails when runtime suspend failed
+
+rknpu_power_off() discards what pm_runtime_put_sync() returns, then
+unconditionally disables the clock bulk and both regulators and reports
+success. Before this series the suspend callback could not really fail,
+so that was academic. Patch 0008 gives it two failure modes it can
+report - it takes clock references and restores the pending SCMI rate -
+and a failure there leaves the PM core treating the device as active.
+Cutting its clocks and rail out from under it invites exactly the
+unpowered-register access the rest of this series exists to avoid, and
+returning 0 tells rknpu_power_put() to leave power_refcount at zero
+while the hardware is still on.
+
+Check it and bail out with the error, matching what the iommu path
+already does a few lines further down. The reference has to be taken
+back by hand: pm_runtime_put_sync() decrements whether or not the
+callback succeeds, so without that a retry underflows the usage count.
+
+Also scope the `val` declaration to the branch that still uses it.
+Patch 0007 compiled out the readx_poll_timeout() that read it, leaving
+an unused variable on mainline builds.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/rknpu_drv.c
++++ b/rknpu_drv.c
+@@ -1025,12 +1025,53 @@
+ 
+ #ifndef FPGA_PLATFORM
+ 	int ret;
++#if KERNEL_VERSION(6, 0, 0) > LINUX_VERSION_CODE
+ 	bool val;
++#endif
+ 
+ 	rknpu_devfreq_lock(rknpu_dev);
+ #endif
+ 
++#ifndef FPGA_PLATFORM
++	/*
++	 * Shut the SCMI gate first. Doing it after the suspended check below
++	 * leaves a window where a forced resume - power/control=on - runs the
++	 * resume callback with hw_powered still true, and it programs a rate
++	 * while the teardown underneath it takes the clocks and domains away.
++	 * Every path out of here that leaves the hardware up puts it back.
++	 */
++	WRITE_ONCE(rknpu_dev->hw_powered, false);
++
++	ret = pm_runtime_put_sync(dev);
++	if (ret < 0) {
++		/*
++		 * The reference is dropped whether or not the suspend
++		 * callback succeeded, so take it back: the caller restores
++		 * power_refcount and will come through here again.
++		 */
++		WRITE_ONCE(rknpu_dev->hw_powered, true);
++		pm_runtime_get_noresume(dev);
++		LOG_DEV_ERROR(dev, "failed to suspend npu: %d\n", ret);
++		rknpu_devfreq_unlock(rknpu_dev);
++		return ret;
++	}
++	/*
++	 * Zero only means no error. __pm_runtime_idle() returns 0 without
++	 * suspending anything when the usage count did not reach zero, which
++	 * is what happens while npu_devfreq_target() holds its reference
++	 * across a rate change. Continuing here would drop the domains and
++	 * clocks underneath an in-flight SCMI transition. Hand the reference
++	 * back and let the caller retry once devfreq is done.
++	 */
++	if (!pm_runtime_status_suspended(dev)) {
++		WRITE_ONCE(rknpu_dev->hw_powered, true);
++		pm_runtime_get_noresume(dev);
++		rknpu_devfreq_unlock(rknpu_dev);
++		return -EBUSY;
++	}
++#else
+ 	pm_runtime_put_sync(dev);
++#endif
+ 
+ 	if (rknpu_dev->multiple_domains) {
+ #ifndef FPGA_PLATFORM

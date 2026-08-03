@@ -1,0 +1,45 @@
+dts: rk3576: armsom-sige5: reserve OP-TEE's secure DRAM
+
+Rockchip's BL32 loads at the address in rkbin's RKTRUST/RK3576TRUST.ini and
+publishes no memory reservation, so Linux is free to allocate over the secure
+world. Reserve it.
+
+Only apply this together with a bootloader built WITH_BL32=1. A kernel that
+reserves DRAM for a secure world that is not there just loses the memory, and
+a BL32 without the reservation crashes the board.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
++++ b/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
+@@ -1221,3 +1221,30 @@
+ 		};
+ 	};
+ };
++
++/*
++ * OP-TEE's secure DRAM. Rockchip's BL32 loads at the address given by
++ * [BL32_OPTION] in rkbin's RKTRUST/RK3576TRUST.ini and publishes no
++ * reservation of its own, so without this Linux allocates straight over the
++ * secure world and the board dies the moment either one touches it.
++ *
++ * Only meaningful with a BL32 in the boot image (WITH_BL32=1, see
++ * scripts/build-uboot.sh). Harmless without one, beyond losing the memory.
++ *
++ * The 32 MB size is a conservative guess taken from what OP-TEE reserves for
++ * TZDRAM elsewhere; confirm it against OP-TEE's own boot log before trusting
++ * it. Do not take the address from upstream optee_os: its rk3576 flavor puts
++ * TZDRAM at 0x70000000, which has nothing to do with where this blob loads.
++ */
++/ {
++	reserved-memory {
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		optee@8400000 {
++			reg = <0x0 0x08400000 0x0 0x02000000>;
++			no-map;
++		};
++	};
++};

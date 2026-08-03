@@ -1,0 +1,4 @@
+# Patch files are unified diffs: a context line for a blank source line is a
+# single space, and for an indented one a space followed by a tab. Both look
+# like whitespace errors and neither can be "fixed" without breaking the patch.
+*.patch -whitespace

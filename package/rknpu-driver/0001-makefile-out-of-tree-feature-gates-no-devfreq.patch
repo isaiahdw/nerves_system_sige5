@@ -1,7 +1,7 @@
 Out-of-tree build: define the feature gates the C code expects, drop the
 devfreq object (vendor-only OPP/monitor APIs) and -Werror.
 
-Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 diff --git a/Makefile b/Makefile
 index d73563d..bdcb555 100644

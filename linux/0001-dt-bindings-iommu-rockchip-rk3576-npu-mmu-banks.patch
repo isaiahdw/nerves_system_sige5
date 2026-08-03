@@ -1,0 +1,107 @@
+dt-bindings: iommu: rockchip: describe the RK3576 NPU MMU
+
+The binding allows two register ranges, two clocks and one power domain,
+which every Rockchip IOMMU satisfied until the RK3576 NPU MMU. That one
+has four ranges - a pair per NPU core - with each pair inside its own
+core's power domain, and the extra clocks those banks and the command
+buffer need. dtc accepts the node as written; dtbs_check does not.
+
+Give it its own compatible rather than widening rockchip,rk3576-iommu,
+which the two-bank VOP MMU on the same SoC also uses. The NPU MMU is then
+constrained to exactly four ranges, five clocks and two domains, and
+everything else keeps the original limits.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/Documentation/devicetree/bindings/iommu/rockchip,iommu.yaml
++++ b/Documentation/devicetree/bindings/iommu/rockchip,iommu.yaml
+@@ -26,6 +26,7 @@
+       - items:
+           - enum:
+               - rockchip,rk3576-iommu
++              - rockchip,rk3576-npu-iommu
+               - rockchip,rk3588-iommu
+           - const: rockchip,rk3568-iommu
+ 
+@@ -33,6 +34,8 @@
+     items:
+       - description: configuration registers for MMU instance 0
+       - description: configuration registers for MMU instance 1
++      - description: configuration registers for MMU instance 2
++      - description: configuration registers for MMU instance 3
+     minItems: 1
+ 
+   interrupts:
+@@ -45,17 +48,26 @@
+     items:
+       - description: Core clock
+       - description: Interface clock
++      - description: Core clock for the second bank pair
++      - description: Command buffer core clock
++      - description: Command buffer interface clock
++    minItems: 2
+ 
+   clock-names:
+     items:
+       - const: aclk
+       - const: iface
++      - const: aclk1
++      - const: aclk_cbuf
++      - const: hclk_cbuf
++    minItems: 2
+ 
+   "#iommu-cells":
+     const: 0
+ 
+   power-domains:
+-    maxItems: 1
++    minItems: 1
++    maxItems: 2
+ 
+   rockchip,disable-mmu-reset:
+     $ref: /schemas/types.yaml#/definitions/flag
+@@ -64,6 +76,44 @@
+       Some mmu instances may produce unexpected results
+       when the reset operation is used.
+ 
++allOf:
++  # The RK3576 NPU MMU is the only one with more than one bank pair: four
++  # register ranges, a pair per NPU core, each pair in that core's own power
++  # domain, with the extra clocks those banks and the command buffer need.
++  # Everything else, including the two-bank RK3576 VOP MMU, keeps the original
++  # limits.
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: rockchip,rk3576-npu-iommu
++    then:
++      properties:
++        reg:
++          minItems: 4
++          maxItems: 4
++        clocks:
++          minItems: 5
++          maxItems: 5
++        clock-names:
++          minItems: 5
++          maxItems: 5
++        power-domains:
++          minItems: 2
++          maxItems: 2
++      required:
++        - power-domains
++    else:
++      properties:
++        reg:
++          maxItems: 2
++        clocks:
++          maxItems: 2
++        clock-names:
++          maxItems: 2
++        power-domains:
++          maxItems: 1
++
+ required:
+   - compatible
+   - reg

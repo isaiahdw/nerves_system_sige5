@@ -7,7 +7,7 @@ first, that access hangs the interconnect. Our mainline stub made the
 poll pass instantly, removing the protection. Mirror the driver's own
 FPGA fallback: a 20 ms settle after the main device suspends.
 
-Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/rknpu_drv.c
 +++ b/rknpu_drv.c

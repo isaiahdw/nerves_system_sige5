@@ -4,7 +4,7 @@ runtime-PM stubs return 0 so runtime suspend/resume still succeeds.
 Without an IOMMU rockchip_iommu_is_enabled() reports disabled, putting
 the driver in CMA/contiguous buffer mode.
 
-Signed-off-by: Isaiah Peng <isaiahdw@gmail.com>
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 diff --git a/include/rknpu_devfreq.h b/include/rknpu_devfreq.h
 index c5fa9b2..b1759bf 100644
@@ -41,12 +41,14 @@ new file mode 100644
 index 0000000..b75d8ba
 --- /dev/null
 +++ b/include/soc/rockchip/rockchip_iommu.h
-@@ -0,0 +1,17 @@
+@@ -0,0 +1,19 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +/*
-+ * Mainline compat stub for the vendor kernel's rockchip_iommu.h.
-+ * The NPU runs without an IOMMU on this system (CMA/contiguous buffers),
-+ * so the vendor helper always reports the IOMMU as disabled.
++ * Mainline compat stub for the vendor kernel's rockchip_iommu.h, which
++ * has no upstream counterpart. The NPU does use an IOMMU here, through
++ * mainline's rockchip-iommu; what is missing is only the vendor's
++ * out-of-band "is it enabled" query, so the stub reports disabled and
++ * patch 0007 replaces its one caller with a fixed settle instead.
 + */
 +#ifndef __SOC_ROCKCHIP_IOMMU_COMPAT_H
 +#define __SOC_ROCKCHIP_IOMMU_COMPAT_H

@@ -9,13 +9,18 @@ what was excluded, and what is still open.
 
 - The rate labels are wrong on the SCMI path. A 300 MHz OPP runs at 430 MHz;
   a 900 MHz OPP runs at 821 MHz.
-- 700 MHz and 800 MHz are the same operating point. They write byte-identical
-  PVTPLL state and both measure 802 MHz. At least one of those two entries in
-  the firmware table is wrong.
+- 700 MHz and 800 MHz share a ring length and both measure 802 MHz. They are
+  duplicate clock configurations but distinct OPPs, since the vendor pairs
+  that one length with two voltages deliberately.
+- The 802 MHz reading is the BSP's own silicon speed score. It puts this die
+  at voltage grade L5, whose 900 MHz voltage is 825 mV - the value mainline
+  already ships, by coincidence rather than measurement.
 - Peak GPU is 821 MHz over SCMI against 787 MHz over the CRU, a real +4.3%.
   The intermediate OPPs run 29-45% faster than the CRU path.
-- Nothing in the Linux integration is at fault. The rail tracks each OPP and
-  BL31 programs the ring length its table specifies.
+- Linux requests the intended nominal OPP, supplies the programmed rail
+  voltage, and BL31 writes the table's corresponding ring length. The
+  measured-rate discrepancy originates below that interface. That is not the
+  same as the series being correct - see "What Linux is missing".
 - 950 MHz, which mainline's DTS lists, does not exist in the firmware rate
   table at all.
 
@@ -136,20 +141,55 @@ Each of these was a working hypothesis, tested and dropped:
 | A divider taking the difference | `GCK_DIV` reads 0 |
 | Measurement error | The GPU cycle counter and the PVTPLL's own counter agree within 1 MHz; the cycle counter tracks CRU divider registers within 0.7% |
 
-A PVTPLL is closed-loop against voltage and temperature, so insensitivity to
-both is the device behaving correctly rather than an anomaly.
+The output moved very little over the voltage and temperature ranges tested.
+Whether that is an internal correction loop, some other mechanism, or simply
+a stable oscillator is not established here.
 
-## What is wrong
+## What the 800 MHz reading actually means
 
-**The table contradicts itself.** 700 and 800 MHz write byte-identical
-PVTPLL state - `GCK_LEN` reads 0x54 for both, every other register in the
-block is identical - and both measure 802 MHz. The only difference in the
-system is 50 mV of rail, worth 0.13 MHz. They are one operating point, so
-both entries cannot be correct.
+`GCK_CNT_AVG` is not only a diagnostic counter. The BSP uses it as the
+silicon speed score: it requests 800 MHz at 750 mV, reads offset 0x54, and
+maps the result onto eleven voltage grades.
 
-That matters beyond the one entry: a table that is inconsistent on its own
-terms cannot serve as the reference against which this die is judged
-deviant.
+```
+rockchip,pvtm-freq   = <800000>;      /* measure at an 800 MHz request */
+rockchip,pvtm-volt   = <750000>;      /* at 750 mV                     */
+rockchip,pvtm-offset = <0x54>;        /* read GCK_CNT_AVG              */
+        785     804     5             /* a score of 785-804 is grade L5 */
+```
+
+At that reference condition - ring length 21, 750 mV - this die reads 802,
+which is grade **L5**. The BSP's L5 voltage for the 900 MHz OPP is
+`opp-microvolt-L5 = <825000 825000 875000>`, which is exactly what mainline's
+DTS supplies. So 825 mV at 900 MHz is the correct grade voltage for this
+particular die, arrived at by coincidence rather than by measurement.
+
+This reframes two earlier readings of the data:
+
+- **700 and 800 MHz are not a contradiction.** They share a ring length, but
+  an OPP is a frequency *and* a voltage, and the BSP knowingly pairs one
+  length with two voltages. They are duplicate clock configurations, not
+  duplicate operating points, and there is no basis here for calling either
+  entry erroneous.
+- **821 MHz at length 20 is plausibly expected for an L5 die**, not evidence
+  of a calibration step that failed to run. The BSP measures the oscillator
+  to choose a safe voltage; it does not force the output to equal the label.
+
+## What is unprogrammed
+
+Of the registers TF-A defines, `clk_gpu_set_rate()` writes only `GCK_LEN`,
+`GCK_CAL_CNT` and `GCK_CFG`. These are defined upstream, written by no code
+path, and read zero here:
+
+```
+RING_EN (0x00), RING0..RING3_LENGTH (0x04-0x10), GCK_DIV (0x28),
+GCK_REF_VAL (0x30), GCK_CFG_VAL (0x34), GCK_THR (0x38),
+GFREE_CON (0x3c), ADC_CFG (0x40)
+```
+
+`GCK_DIV` at zero rules out a hidden divider. The rest being zero shows only
+that TF-A does not write them; without register documentation it says nothing
+about what hardware paths exist. `VERSION` reads 0x20230710.
 
 **Most of the block is never programmed.** Of the registers TF-A defines,
 `clk_gpu_set_rate()` writes only `GCK_LEN`, `GCK_CAL_CNT` and `GCK_CFG`.
@@ -225,20 +265,35 @@ against a 115 C critical trip, unchanged with eight CPU workers alongside.
 
 ## Open
 
-- Which of the 700 and 800 MHz entries is wrong, and whether the 900 MHz
-  entry is characterised for production silicon.
-- Whether 821 MHz at length 20 is this die, or a calibration step the open
-  implementation never performs. `GCK_REF_VAL` and `GCK_THR` sitting at zero
-  is consistent with the second, but that is not established.
+- Whether 821 MHz at length 20 is normal for an L5 die or evidence of
+  something missing below Linux.
+- Whether the ring-length table is characterised for production silicon.
 
-Both need a second RK3576 board running Rockchip's own image, forced to 700,
-800 and 900 MHz with the same registers dumped, and the rkbin version
-recorded. One board cannot separate "this die" from "this table".
+The next test is not a second board. Run the 6.1 BSP on *this* board and
+capture `pvtm=`, `pvtm-volt-sel=`, `GCK_LEN`, `GCK_CNT_AVG` and the exact
+rkbin version. That isolates the Linux stack against a known-good one on
+identical silicon and firmware. A second board changes silicon, firmware and
+kernel at once.
+
+## What Linux is missing
+
+The port does not reproduce the BSP's per-die voltage qualification. The BSP
+measures the oscillator at its reference point, derives a grade L0-L10, and
+selects the matching `opp-microvolt-Lx` for every OPP. This series carries one
+fixed voltage per OPP and never measures the grade.
+
+Those fixed values are not the conservative choice they are documented to be.
+At 900 MHz the DTS supplies 825 mV where the BSP fallback for base RK3576 is
+875 mV; the 825 mV figure is the L5 value, which suits this die and is not
+safe to assume for arbitrary silicon. Either the PVTM selection needs
+implementing, or the DTS should carry the BSP fallback voltages.
 
 ## Consequences for the device tree
 
-- **The 700 MHz OPP should go.** It is the 800 MHz operating point supplied
-  62.5 mV below what the vendor qualifies for the rate it actually produces.
+- **The 700 MHz OPP should stay for now.** It shares a ring length with
+  800 MHz but is a distinct operating point at a lower voltage, which is the
+  pairing the vendor ships. Removing it needs a same-board BSP comparison or
+  characterisation across dies, neither of which has been done.
 - **950 MHz is not merely unreachable, it does not exist.** The firmware
   rate table stops at 900 MHz and the lookup is exact, so a 950 MHz request
   returns `SCMI_INVALID_PARAMETERS`. On the CRU path it silently delivers

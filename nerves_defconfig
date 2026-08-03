@@ -96,6 +96,13 @@ BR2_PACKAGE_MESA3D_GBM=y
 BR2_PACKAGE_MESA3D_OPENGL_EGL=y
 BR2_PACKAGE_MESA3D_OPENGL_ES=y
 BR2_PACKAGE_KMSCUBE=y
+# glmark2 measures GPU frequency scaling: its drm-glesv2 flavor renders
+# off-screen through GBM, so a scene can be made fragment-bound and its
+# frame rate read without a display in the loop. stress-ng's --gpu class
+# runs many contexts at once, which exercises the runtime-PM/DVFS seam
+# that a single-context benchmark does not.
+BR2_PACKAGE_GLMARK2=y
+BR2_PACKAGE_STRESS_NG=y
 # Input: eudev (dynamic /dev) and libinput, the input layer DRM/KMS UI
 # stacks read USB keyboards/mice/touchscreens through. No UI toolkit ships
 # in the system — bring your own (a Flutter embedder, LVGL, Slint, Qt, ...)

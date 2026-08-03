@@ -1,32 +1,62 @@
-drm/panfrost: select the OPPs for the RK3576 variant
+dts: rk3576: clock the GPU from SCMI, with per-variant OPPs
 
-The RK3576 GPU OPP table is written for the plain part, whose top rate is
-900 MHz. The RK3576S, J and M stop at 800 MHz, and the J and M want more
-voltage at every point than the base part does. Applying this table
-unchanged overvolts nothing but does offer those parts a rate they are not
-rated for.
+The GPU OPP table lists 700, 800, 900 and 950 MHz, but panfrost drives
+CLK_GPU, a divider off GPLL/CPLL/AUPLL/SPLL/LPLL. None of those produce
+those rates, so the clock framework rounds down and the hardware silently
+runs slower than the OPP says. Measured on an ArmSoM Sige5, 700 MHz runs
+at
+594 and 800, 900 and 950 all collapse onto 786.
 
-Which part this is comes from specification_serial_number in OTP. Panfrost
-already has a speed-bin hook, but it passes the cell's value straight to
-dev_pm_opp_set_supported_hw(), and Rockchip's cell holds a part number
-rather than a bitmask, so the generic path reads it as a nonsense mask.
-Give panfrost_compatible a read_speedbin callback for that case and
-translate there, matching the vendor's rockchip_get_soc_info().
+Rates above the PVTPLL threshold are only reachable through SCMI: BL31
+owns
+the GPU PVTPLL and switches between the normal PLL and PVTPLL on an SCMI
+rate
+request. Make SCMI_CLK_GPU the clock panfrost scales, with PCLK_GPU_ROOT
+as
+"bus" and CRU CLK_GPU as "gate". BL31 programs PVTPLL through registers in
+the GPU block reached over those two and does not enable them itself;
+without
+the gate named here nothing claims it, so the clock framework disables it
+as
+unused during boot and the first rate request wedges the CPU.
 
-The cell keeps the binding's "speed-bin" consumer name: it is the cell that
-selects the speed bin, and how its contents are encoded is a property of
-the SoC, which the per-compatible callback already knows.
+The per-variant OPP selection lands in the same commit rather than a later
+one. The S, J and M parts stop at 800 MHz, so any commit that reaches the
+upper rates without the restriction in place would offer them a rate they
+are
+not rated for. Panfrost's generic speed-bin path passes the nvmem value
+straight to dev_pm_opp_set_supported_hw(), but Rockchip's cell holds a
+part
+number, so a per-compatible callback translates it. An unreadable cell
+selects
+a restricted table rather than the base part's, because the failure mode
+of
+guessing is a rate and a voltage the silicon was not qualified for.
 
-An unreadable cell selects a restricted table rather than the base part's,
-because the failure mode of guessing is a rate and a voltage the silicon
-was not qualified for. The OPP core disables every OPP carrying
-opp-supported-hw until supported_hw is set, so this has to run on the
-failure path too.
+specification-serial-number@8 moves from the Sige5 board dts up into
+rk3576.dtsi next to the other OTP data cells: the GPU node lives in the
+SoC
+dtsi, so a label defined only by one board's dts would not resolve when
+any
+other RK3576 board is built.
 
-Move specification-serial-number@8 from the Sige5 board dts up into
-rk3576.dtsi, next to the other OTP data cells. The GPU node lives in the
-SoC dtsi, so a label defined only by one board's dts would not resolve when
-any other RK3576 board is built.
+The base part's voltages become the highest the vendor lists for each
+rate.
+The vendor picks one of eleven per-OPP voltages from a runtime PVTPLL
+measurement, which is not reimplemented here, so the table has to be safe
+for
+the slowest silicon rather than tuned to one die.
+
+Drop the 950 MHz OPP. BL31's rate table has no 950 MHz entry, so the
+request
+is rejected outright, and table 3-2 of the datasheet (rev 1.5) gives 900
+MHz
+as the GPU maximum.
+
+The driver parks the clock explicitly before the power domain goes down,
+so
+there is no opp-suspend entry here: it would only overwrite the rate the
+driver is tracking, and the vendor kernel does not use one on this SoC.
 
 Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
@@ -58,7 +88,15 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
 --- a/drivers/gpu/drm/panfrost/panfrost_devfreq.c
 +++ b/drivers/gpu/drm/panfrost/panfrost_devfreq.c
-@@ -183,11 +183,84 @@
+@@ -4,6 +4,7 @@
+ #include <linux/clk.h>
+ #include <linux/devfreq.h>
+ #include <linux/devfreq_cooling.h>
++#include <linux/clk.h>
+ #include <linux/nvmem-consumer.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_opp.h>
+@@ -182,11 +183,90 @@
  	.get_dev_status = panfrost_devfreq_get_dev_status,
  };
  
@@ -81,8 +119,14 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 + * which also want their own voltages. The speed-bin cell points at OTP's
 + * specification_serial_number, which holds a part number rather than a ready
 + * made opp-supported-hw value, so it is translated here instead of being
-+ * passed through. The second version cell is the speed grade, left open
-+ * because the device tree carries the slowest silicon's voltage at each point.
++ * passed through.
++ *
++ * The second version cell is the speed grade and is left open. The vendor
++ * measures the GPU PVTPLL's own rate counter at a reference point and picks
++ * one of eleven per-OPP voltages from the result; that is not reimplemented
++ * here. The device tree carries the highest voltage the vendor lists for each
++ * rate instead, which is safe on any part at the cost of some efficiency on
++ * fast silicon.
 + *
 + * customer_demand, which the vendor also folds in as bin 4, is not read: for
 + * this GPU bin 4 selects the same OPPs as bin 0.
@@ -91,7 +135,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 + * carrying opp-supported-hw unless supported_hw has been set.
 + */
 +int panfrost_rk3576_speedbin(struct device *dev)
- {
++{
 +	u32 versions[2];
 +	int bin;
 +	u8 spec;
@@ -133,7 +177,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +}
 +
 +static int panfrost_read_speedbin(struct panfrost_device *pfdev)
-+{
+ {
 +	struct device *dev = &pfdev->pdev->dev;
  	u32 val;
  	int ret;
@@ -144,7 +188,22 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	ret = nvmem_cell_read_variable_le_u32(dev, "speed-bin", &val);
  	if (ret) {
  		/*
-@@ -228,7 +301,7 @@
+@@ -218,14 +298,6 @@
+ 	struct panfrost_devfreq *pfdevfreq = &pfdev->pfdevfreq;
+ 	unsigned long freq = ULONG_MAX;
+ 
+-	/*
+-	 * The runtime PM callbacks take this lock whether or not devfreq comes
+-	 * up, and several paths below return early - panfrost runs without
+-	 * devfreq when the OPP table is missing - so initialise it first.
+-	 */
+-	mutex_init(&pfdevfreq->transition_lock);
+-	pfdevfreq->hw_available = true;
+-
+ 	if (pfdev->comp->num_supplies > 1) {
+ 		/*
+ 		 * GPUs with more than 1 supply require platform-specific handling:
+@@ -235,7 +307,7 @@
  		return 0;
  	}
  
@@ -153,6 +212,21 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	if (ret)
  		return ret;
  
+@@ -259,11 +331,13 @@
+ 	pfdevfreq->opp_of_table_added = true;
+ 
+ 	spin_lock_init(&pfdevfreq->lock);
++	mutex_init(&pfdevfreq->transition_lock);
++	pfdevfreq->hw_available = true;
++	pfdevfreq->requested_frequency = cur_freq;
+ 
+ 	panfrost_devfreq_reset(pfdevfreq);
+ 
+ 	cur_freq = clk_get_rate(pfdev->clock);
+-	pfdevfreq->requested_frequency = cur_freq;
+ 
+ 	opp = devfreq_recommended_opp(dev, &cur_freq, 0);
+ 	if (IS_ERR(opp))
 --- a/drivers/gpu/drm/panfrost/panfrost_drv.c
 +++ b/drivers/gpu/drm/panfrost/panfrost_drv.c
 @@ -20,6 +20,7 @@
@@ -173,152 +247,165 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  static const struct of_device_id dt_match[] = {
 --- a/arch/arm64/boot/dts/rockchip/rk3576.dtsi
 +++ b/arch/arm64/boot/dts/rockchip/rk3576.dtsi
-@@ -348,39 +348,125 @@
+@@ -348,43 +348,124 @@
  		compatible = "operating-points-v2";
  
  		opp-300000000 {
 +			opp-supported-hw = <0xf9 0xffff>;
  			opp-hz = /bits/ 64 <300000000>;
- 			opp-microvolt = <700000 700000 850000>;
+-			opp-microvolt = <700000 700000 850000>;
++			opp-microvolt = <712500 712500 875000>;
  		};
  
  		opp-400000000 {
 +			opp-supported-hw = <0xf9 0xffff>;
  			opp-hz = /bits/ 64 <400000000>;
- 			opp-microvolt = <700000 700000 850000>;
+-			opp-microvolt = <700000 700000 850000>;
++			opp-microvolt = <712500 712500 875000>;
  		};
  
  		opp-500000000 {
 +			opp-supported-hw = <0xf9 0xffff>;
  			opp-hz = /bits/ 64 <500000000>;
- 			opp-microvolt = <700000 700000 850000>;
+-			opp-microvolt = <700000 700000 850000>;
++			opp-microvolt = <712500 712500 875000>;
  		};
  
  		opp-600000000 {
 +			opp-supported-hw = <0xf9 0xffff>;
  			opp-hz = /bits/ 64 <600000000>;
- 			opp-microvolt = <700000 700000 850000>;
+-			opp-microvolt = <700000 700000 850000>;
++			opp-microvolt = <712500 712500 875000>;
  		};
  
  		opp-700000000 {
 +			opp-supported-hw = <0xf9 0xffff>;
  			opp-hz = /bits/ 64 <700000000>;
- 			opp-microvolt = <725000 725000 850000>;
+-			opp-microvolt = <725000 725000 850000>;
++			opp-microvolt = <750000 750000 875000>;
  		};
  
  		opp-800000000 {
 +			opp-supported-hw = <0xf1 0xffff>;
  			opp-hz = /bits/ 64 <800000000>;
- 			opp-microvolt = <775000 775000 850000>;
+-			opp-microvolt = <775000 775000 850000>;
++			opp-microvolt = <812500 812500 875000>;
  		};
  
  		opp-900000000 {
 +			opp-supported-hw = <0xf1 0xffff>;
  			opp-hz = /bits/ 64 <900000000>;
- 			opp-microvolt = <825000 825000 850000>;
-+		};
-+
-+		/* The RK3576S GPU stops at 800 MHz and wants more voltage. */
-+		opp-s-800000000 {
+-			opp-microvolt = <825000 825000 850000>;
++			opp-microvolt = <875000 875000 875000>;
+ 		};
+ 
+-		opp-950000000 {
+-			opp-hz = /bits/ 64 <950000000>;
++		/* RK3576S, opp-supported-hw 0x08: stops at 800 MHz, more voltage. */
++		opp-800000000-8 {
 +			opp-supported-hw = <0x08 0xffff>;
 +			opp-hz = /bits/ 64 <800000000>;
 +			opp-microvolt = <837500 837500 850000>;
 +		};
 +
-+		/* The RK3576J and RK3576M share a table, also to 800 MHz. */
-+		opp-j-m-300000000 {
++		/* RK3576J and RK3576M, opp-supported-hw 0x06: also to 800 MHz. */
++		opp-300000000-6 {
 +			opp-supported-hw = <0x06 0xffff>;
 +			opp-hz = /bits/ 64 <300000000>;
 +			opp-microvolt = <750000 750000 850000>;
 +		};
 +
-+		opp-j-m-400000000 {
++		opp-400000000-6 {
 +			opp-supported-hw = <0x06 0xffff>;
 +			opp-hz = /bits/ 64 <400000000>;
 +			opp-microvolt = <750000 750000 850000>;
 +		};
 +
-+		opp-j-m-500000000 {
++		opp-500000000-6 {
 +			opp-supported-hw = <0x06 0xffff>;
 +			opp-hz = /bits/ 64 <500000000>;
 +			opp-microvolt = <750000 750000 850000>;
 +		};
 +
-+		opp-j-m-600000000 {
++		opp-600000000-6 {
 +			opp-supported-hw = <0x06 0xffff>;
 +			opp-hz = /bits/ 64 <600000000>;
 +			opp-microvolt = <750000 750000 850000>;
 +		};
 +
-+		opp-j-m-700000000 {
++		opp-700000000-6 {
 +			opp-supported-hw = <0x06 0xffff>;
 +			opp-hz = /bits/ 64 <700000000>;
 +			opp-microvolt = <750000 750000 850000>;
 +		};
 +
-+		opp-j-m-800000000 {
++		opp-800000000-6 {
 +			opp-supported-hw = <0x06 0xffff>;
 +			opp-hz = /bits/ 64 <800000000>;
-+			opp-microvolt = <850000 850000 850000>;
- 		};
+ 			opp-microvolt = <850000 850000 850000>;
++		};
 +
 +		/*
-+		 * Selected when the part cannot be identified: the rates every
-+		 * variant supports, at the highest voltage any of them asks
-+		 * for.
++		 * opp-supported-hw 0x100, selected when the part cannot be
++		 * identified: the rates every variant supports, at the highest
++		 * voltage any of them asks for.
 +		 */
-+		opp-unknown-300000000 {
++		opp-300000000-256 {
 +			opp-supported-hw = <0x100 0xffff>;
 +			opp-hz = /bits/ 64 <300000000>;
 +			opp-microvolt = <750000 750000 850000>;
 +		};
 +
-+		opp-unknown-400000000 {
++		opp-400000000-256 {
 +			opp-supported-hw = <0x100 0xffff>;
 +			opp-hz = /bits/ 64 <400000000>;
 +			opp-microvolt = <750000 750000 850000>;
 +		};
 +
-+		opp-unknown-500000000 {
++		opp-500000000-256 {
 +			opp-supported-hw = <0x100 0xffff>;
 +			opp-hz = /bits/ 64 <500000000>;
 +			opp-microvolt = <750000 750000 850000>;
 +		};
 +
-+		opp-unknown-600000000 {
++		opp-600000000-256 {
 +			opp-supported-hw = <0x100 0xffff>;
 +			opp-hz = /bits/ 64 <600000000>;
 +			opp-microvolt = <750000 750000 850000>;
 +		};
 +
-+		opp-unknown-700000000 {
++		opp-700000000-256 {
 +			opp-supported-hw = <0x100 0xffff>;
 +			opp-hz = /bits/ 64 <700000000>;
 +			opp-microvolt = <750000 750000 850000>;
-+		};
+ 		};
  	};
  
- 	display_subsystem: display-subsystem {
-@@ -1268,6 +1354,8 @@
- 			clocks = <&scmi_clk SCMI_CLK_GPU>, <&cru PCLK_GPU_ROOT>,
- 				 <&cru CLK_GPU>;
- 			clock-names = "core", "bus", "gate";
+@@ -1270,8 +1351,11 @@
+ 			reg = <0x0 0x27800000 0x0 0x20000>;
+ 			assigned-clocks = <&scmi_clk SCMI_CLK_GPU>;
+ 			assigned-clock-rates = <198000000>;
+-			clocks = <&cru CLK_GPU>;
+-			clock-names = "core";
++			clocks = <&scmi_clk SCMI_CLK_GPU>, <&cru PCLK_GPU_ROOT>,
++				 <&cru CLK_GPU>;
++			clock-names = "core", "bus", "gate";
 +			nvmem-cells = <&specification_serial_number>;
 +			nvmem-cell-names = "speed-bin";
  			dynamic-power-coefficient = <1625>;
  			interrupts = <GIC_SPI 347 IRQ_TYPE_LEVEL_HIGH>,
  				     <GIC_SPI 348 IRQ_TYPE_LEVEL_HIGH>,
-@@ -1943,6 +2031,10 @@
- 			otp_cpu_version: cpu-version@5 {
+@@ -1948,6 +2032,10 @@
  				reg = <0x05 0x1>;
  				bits = <3 3>;
-+			};
+ 			};
 +			specification_serial_number: specification-serial-number@8 {
 +				reg = <0x08 0x1>;
 +				bits = <0 5>;
- 			};
++			};
  			otp_id: id@a {
  				reg = <0x0a 0x10>;
+ 			};
 --- a/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
 +++ b/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
 @@ -1098,18 +1098,6 @@

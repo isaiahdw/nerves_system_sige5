@@ -126,10 +126,10 @@ Verified on a Sige5 v1.2, 2026-08-01.
 | Watchdog | Yes | dw-wdt enabled by the board patch; armed by `nerves_heart`, NOWAYOUT |
 | RTC | Yes | HYM8563; keeps time with a battery on the board connector |
 | CPU frequency scaling | Yes | schedutil via SCMI; A53 cluster to 2.016 GHz, A72 cluster to 2.208 GHz |
-| Thermal | Yes | tsadc zones with cpufreq cooling; the NPU zone gets a passive trip and devfreq cooling from `linux/0002` |
+| Thermal | Yes | tsadc zones with cpufreq cooling; the NPU zone gets a passive trip and devfreq cooling from `linux/0011` |
 | LEDs | Yes | Green heartbeat + red status + mmc activity triggers |
 | Hardware RNG | Yes | /dev/hwrng feeds the kernel entropy pool |
-| ADC (SARADC) | Yes | Enabled by `linux/0005` (upstream leaves it disabled); header ADC inputs, vref from vcca_1v8_s0 |
+| ADC (SARADC) | Yes | Enabled by `linux/0013` (upstream leaves it disabled); header ADC inputs, vref from vcca_1v8_s0 |
 | CAN | No | RK3576 CAN-FD has no mainline driver or dts nodes |
 | GPIO/I2C/SPI/UART header | Expected | Via [Circuits.*](https://elixir-circuits.github.io/) |
 | NPU (6 TOPS) | Yes | Vendor rknpu driver built out-of-tree against the mainline kernel (`package/rknpu-driver`) + librknnrt 2.3.2. IOMMU-backed pageable buffers (no CMA cap), devfreq across 300-900 MHz. Both cores usable together. Verified with single, chained and dual-core int8 models and an LLM; models are built on a host with rknn-toolkit2 |
@@ -186,16 +186,25 @@ the inactive slot only and revert automatically unless validated.
 ## Kernel
 
 Mainline LTS from kernel.org (6.18.40) with the upstream
-`rk3576-armsom-sige5` device tree and fourteen patches, each commented
-inline: board fixups (`linux/0001`: mmc aliases so the eMMC is
-`/dev/mmcblk0`, watchdog enable), SARADC (`0005`), the vendor RKNPU node
-with its OPP table and thermal trip (`0002`), power-domain fixes the NPU
-needs on mainline (`0003`/`0004`), and the NPU MMU work - the iommu node
-itself (`0009`) plus six rockchip-iommu fixes it depends on (`0006`,
-`0007`, `0008`, `0010`, `0012`, `0013`) and the binding update describing
-its extra banks (`0011`), and a binding for the NPU OPP table's
-read-margin properties (`0014`). Configuration is the arm64
-`defconfig` plus `linux/nerves.config`, documented inline.
+`rk3576-armsom-sige5` device tree and nineteen patches, each commented
+inline.
+
+NPU and board (`0001`-`0014`): bindings for the NPU MMU and the RKNPU OPP
+table (`0001`, `0002`), six rockchip-iommu fixes the NPU MMU depends on
+(`0004`-`0009`), a per-domain power-on settle delay (`0003`), board fixups
+(`0010`: mmc aliases so the eMMC is `/dev/mmcblk0`, watchdog enable), the
+RKNPU node with its OPP table and thermal trip (`0011`), RKNN clocks held
+across NPU power transitions (`0012`), SARADC (`0013`), and the NPU MMU
+node itself (`0014`).
+
+GPU (`0015`-`0019`): a binding conditional requiring the RK3576 clock trio
+(`0015`), a devfreq fix so the monitor does not start on a suspended device
+(`0016`), the clocks BL31 needs held by panfrost (`0017`), DVFS coordinated
+with runtime PM (`0018`), and the SCMI clock with its per-variant OPP
+selection (`0019`).
+
+Configuration is the arm64 `defconfig` plus `linux/nerves.config`,
+documented inline.
 
 ## NPU
 
@@ -211,7 +220,7 @@ NPU MMU driven by mainline's rockchip-iommu. Both cores are usable, and
   different cores reach 381 inferences/s against 145 for one core alone.
 - **Frequency scaling.** devfreq drives 300-900 MHz through the mainline OPP
   core. The clock comes from BL31's PVTPLL over SCMI, which only works while
-  `PCLK_NPUTOP_ROOT` is held; mainline gates it, so `linux/0002` claims it.
+  `PCLK_NPUTOP_ROOT` is held; mainline gates it, so `linux/0011` claims it.
 - **Per-chip selection.** An OTP cell picks the OPP set for the part, so an
   RK3576S gets its 500 MHz ceiling and the J and M parts their higher
   voltages. Unreadable OTP falls back to a restricted table rather than the
@@ -382,8 +391,9 @@ CRU dividers off GPLL/CPLL/AUPLL/SPLL/LPLL cannot produce the upper rates.
   Reaching 900 MHz on this die would need a ring of about 16; the shortest
   the table offers is 20.
 
-  The ring length BL31 programs can be read back, which separates firmware
-  behaviour from silicon. Each OPP under load, rail sampled alongside:
+  The ring length BL31 programs can be read back with a debugfs reader
+  (not carried in this series; see the investigation notes). Each OPP under
+  load, rail sampled alongside:
 
   | Requested | Ring length | PVTPLL `cnt_avg` | Cycle counter | Rail |
   | --- | --- | --- | --- | --- |

@@ -47,8 +47,13 @@ holds.
 **The PVTPLL block's own counter.** `GCK_CNT_AVG` at offset 0x54 of the GPU
 PVTPLL syscon reports an averaged measurement in MHz. This is the register
 the vendor kernel reads in `rockchip_pvtpll_get_rate()`. It is not reachable
-from userspace - `/dev/mem` returns `EFAULT` under `STRICT_DEVMEM` - so
-`linux/0021` adds a debugfs reader.
+from userspace - `/dev/mem` returns `EFAULT` under `STRICT_DEVMEM` - so it
+needs a debugfs reader in panfrost. One was used for this investigation and
+deliberately not carried in the series: it leaked a runtime-PM reference per
+read, and being registered on the common panfrost debugfs list it would have
+mapped an RK3576 physical address on every other panfrost SoC. Anything
+revived from it needs both fixed, plus the block obtained from a described
+resource rather than a hardcoded address.
 
 Three traps cost time here:
 
@@ -305,8 +310,9 @@ implementing, or the DTS should carry the BSP fallback voltages.
 
 ## Reproducing
 
-`linux/0021` adds `/sys/kernel/debug/dri/27800000.gpu/pvtpll`, which dumps
-the block and refuses unless the GPU is already awake -
+The reader adds `/sys/kernel/debug/dri/27800000.gpu/pvtpll`, dumping the
+block and refusing unless the GPU is already awake -
 `pm_runtime_get_if_in_use()` - because touching it with the power domain down
 hangs the CPU. Read it while a load runs; poll, because the guard also
-refuses during a runtime-PM transition.
+refuses during a runtime-PM transition. It must release the reference and the
+mapping on the success path, and be gated on the RK3576 compatible.

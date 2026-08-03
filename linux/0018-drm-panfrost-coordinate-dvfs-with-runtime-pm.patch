@@ -1,0 +1,407 @@
+drm/panfrost: coordinate DVFS with runtime PM
+
+A firmware-owned core clock can only be changed while the GPU power domain
+is up. Firmware programming hardware in a domain that is down aborts, and
+on RK3576 that arrives as an SError and takes the machine with it:
+
+  SError Interrupt on CPU0, code 0x00000000bf000000
+  Kernel panic - not syncing: Asynchronous SError Interrupt
+  pc : smc_send_message+0x14c/0x160
+    panfrost_devfreq_target [panfrost]
+    dev_pm_opp_set_rate / clk_set_rate / scmi_clk_set_rate
+    smc_send_message
+
+Suspending devfreq stops the governor, but the userspace governor's
+set_freq reaches panfrost_devfreq_target() straight from sysfs, so a
+process able to write that file could panic the machine. Serialise
+transitions on a mutex against an explicit availability flag, and record a
+request that arrives while the hardware is away so resume can apply it.
+Runtime PM status cannot serve as that flag: the core reports SUSPENDING
+before the domain is down and RESUMING before it is back, so a check built
+on it would defer devfreq's own suspend transition and leave the GPU
+powering down on the firmware PLL.
+
+Park and mark-unavailable happen under one lock, as do restore, reset and
+becoming available again, because a request landing midway would otherwise
+be recorded as deferred and never replayed. A deferred request returns
+success rather than an error: devfreq only advances its own bookkeeping on
+success, so an error leaves it retrying every poll for as long as the
+device stays idle. Requested and applied rates are tracked separately -
+devfreq holds the requested policy, current_frequency records what the
+hardware is running.
+
+The parking rate is per-SoC driver data, hung off a rockchip,rk3576-mali
+match that the DTS and binding already carry. It goes through
+dev_pm_opp_set_rate() rather than clk_set_rate() even though 200 MHz is
+below the lowest OPP: the OPP core rounds to the ceiling OPP for voltage
+while programming the clock to exactly that rate, and records it in
+current_rate_single_clk. A raw clk_set_rate() leaves that bookkeeping at
+the pre-park OPP, so restoring the same OPP afterwards compares equal,
+returns early, and the clock never comes back up.
+
+While here, propagate the devfreq_suspend_device() failure that runtime
+suspend was discarding. Its suspend_count is incremented before anything
+that can fail and is never unwound, so the error path balances it rather
+than leaving devfreq suspended for good.
+
+Measured on an ArmSoM Sige5, reading scmi_clk_gpu from debugfs rather than
+devfreq's cur_freq, which is only previous_freq here since panfrost
+declares no get_cur_freq:
+
+  requested   300  400  500  600  700  800  900 MHz
+  actual      300  400  500  600  700  800  900 MHz
+
+  300 -> suspend -> resume:  300, park 200, 300
+  900 -> suspend -> resume:  900, park 200, 900
+
+  100 forced suspend/resume cycles under a writer alternating 300 and 900:
+  100/100 parked correctly, no SError, no warnings.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/drivers/gpu/drm/panfrost/panfrost_device.c	2026-08-02 22:26:08.644438503 +0000
++++ b/drivers/gpu/drm/panfrost/panfrost_device.c	2026-08-02 22:26:08.660461378 +0000
+@@ -456,11 +456,45 @@
+ 		}
+ 	}
+ 
+-	panfrost_device_reset(pfdev);
+-	panfrost_devfreq_resume(pfdev);
++	/*
++	 * The domain and helper clocks are back. Put the rate right before any
++	 * register access, then declare the hardware reachable and let the
++	 * governor run again.
++	 */
++	/*
++	 * One locked region: a request arriving between the restore and the
++	 * device becoming available would otherwise be recorded as deferred
++	 * and then never replayed.
++	 */
++	panfrost_devfreq_transition_lock(pfdev);
++	ret = panfrost_devfreq_restore(pfdev);
++	if (!ret) {
++		panfrost_device_reset(pfdev);
++		panfrost_devfreq_set_available(pfdev, true);
++	}
++	panfrost_devfreq_transition_unlock(pfdev);
++	if (ret)
++		goto err_restore;
++
++	ret = panfrost_devfreq_resume(pfdev);
++	if (ret) {
++		panfrost_devfreq_transition_lock(pfdev);
++		panfrost_devfreq_set_available(pfdev, false);
++		panfrost_devfreq_transition_unlock(pfdev);
++		goto err_restore;
++	}
+ 
+ 	return 0;
+ 
++err_restore:
++	if (pfdev->comp->pm_features & BIT(GPU_PM_RT)) {
++		if (pfdev->bus_clock)
++			clk_disable(pfdev->bus_clock);
++		clk_disable(pfdev->clock);
++		reset_control_assert(pfdev->rstc);
++	}
++	return ret;
++
+ err_bus_clk:
+ 	if (pfdev->comp->pm_features & BIT(GPU_PM_RT))
+ 		clk_disable(pfdev->clock);
+@@ -473,11 +507,30 @@
+ static int panfrost_device_runtime_suspend(struct device *dev)
+ {
+ 	struct panfrost_device *pfdev = dev_get_drvdata(dev);
++	int ret;
+ 
+ 	if (!panfrost_job_is_idle(pfdev))
+ 		return -EBUSY;
+ 
+-	panfrost_devfreq_suspend(pfdev);
++	/*
++	 * Order matters while the domain is still up: stop the governor, let
++	 * it apply any suspend OPP, park the firmware-owned clock off PVTPLL,
++	 * and only then declare the hardware unreachable.
++	 */
++	ret = panfrost_devfreq_suspend(pfdev);
++	if (ret)
++		return ret;
++
++	panfrost_devfreq_transition_lock(pfdev);
++	ret = panfrost_devfreq_park(pfdev);
++	if (!ret)
++		panfrost_devfreq_set_available(pfdev, false);
++	panfrost_devfreq_transition_unlock(pfdev);
++	if (ret) {
++		panfrost_devfreq_resume(pfdev);
++		return ret;
++	}
++
+ 	panfrost_job_suspend_irq(pfdev);
+ 	panfrost_mmu_suspend_irq(pfdev);
+ 	panfrost_gpu_suspend_irq(pfdev);
+--- a/drivers/gpu/drm/panfrost/panfrost_device.h	2026-08-02 22:26:08.644320962 +0000
++++ b/drivers/gpu/drm/panfrost/panfrost_device.h	2026-08-02 22:26:08.660246837 +0000
+@@ -109,6 +109,13 @@
+ 
+ 	/* GPU configuration quirks */
+ 	u8 gpu_quirks;
++
++	/*
++	 * Rate to leave the core clock at before the power domain goes down,
++	 * for parts where that clock is owned by firmware. Zero means it can
++	 * be left where it is.
++	 */
++	unsigned long park_rate;
+ };
+ 
+ /**
+--- a/drivers/gpu/drm/panfrost/panfrost_devfreq.c	2026-08-02 22:26:08.624069628 +0000
++++ b/drivers/gpu/drm/panfrost/panfrost_devfreq.c	2026-08-02 22:26:08.660395503 +0000
+@@ -4,6 +4,7 @@
+ #include <linux/clk.h>
+ #include <linux/devfreq.h>
+ #include <linux/devfreq_cooling.h>
++#include <linux/clk.h>
+ #include <linux/nvmem-consumer.h>
+ #include <linux/platform_device.h>
+ #include <linux/pm_opp.h>
+@@ -30,6 +31,7 @@
+ 				   u32 flags)
+ {
+ 	struct panfrost_device *pfdev = dev_get_drvdata(dev);
++	struct panfrost_devfreq *pfdevfreq = &pfdev->pfdevfreq;
+ 	struct dev_pm_opp *opp;
+ 	int err;
+ 
+@@ -38,13 +40,105 @@
+ 		return PTR_ERR(opp);
+ 	dev_pm_opp_put(opp);
+ 
++	/*
++	 * A rate change reaches the hardware through firmware, which programs
++	 * registers inside the GPU power domain. Reaching them with the domain
++	 * down aborts, so a request that arrives while the hardware is away is
++	 * recorded and reported as retryable rather than being applied. The
++	 * userspace governor's set_freq lands here straight from sysfs, so the
++	 * check cannot live in a governor.
++	 */
++	mutex_lock(&pfdevfreq->transition_lock);
++	pfdevfreq->requested_frequency = *freq;
++	if (!pfdevfreq->hw_available) {
++		/*
++		 * Accepted for deferred application: resume programs it once
++		 * the domain is back. Reporting an error instead would leave
++		 * devfreq retrying every poll forever, since it only advances
++		 * its own bookkeeping on success. current_frequency is left
++		 * alone - it records what the hardware is actually running.
++		 */
++		mutex_unlock(&pfdevfreq->transition_lock);
++		return 0;
++	}
++
+ 	err = dev_pm_opp_set_rate(dev, *freq);
+ 	if (!err)
+-		pfdev->pfdevfreq.current_frequency = *freq;
++		pfdevfreq->current_frequency = *freq;
++	mutex_unlock(&pfdevfreq->transition_lock);
++
++	return err;
++}
++
++/*
++ * Leave the firmware-owned clock somewhere safe before the domain goes down.
++ * Caller must still have the domain up. Not an OPP: the parking rate is below
++ * the lowest one the table offers.
++ */
++int panfrost_devfreq_park(struct panfrost_device *pfdev)
++{
++	struct panfrost_devfreq *pfdevfreq = &pfdev->pfdevfreq;
++	unsigned long rate = pfdev->comp->park_rate;
++	int err;
++
++	if (!pfdevfreq->devfreq || !rate)
++		return 0;
++
++	/*
++	 * Through the OPP core rather than clk_set_rate(), even though the
++	 * parking rate is below the lowest OPP. The core rounds to the
++	 * ceiling OPP for voltage and other resources but programs the clock
++	 * to exactly this rate, and records it in current_rate_single_clk.
++	 * A raw clk_set_rate() would leave that bookkeeping at the old OPP,
++	 * and the restore afterwards would then match it and be skipped
++	 * entirely - the clock would never come back up.
++	 */
++	err = dev_pm_opp_set_rate(&pfdev->pdev->dev, rate);
++	if (err)
++		dev_err(&pfdev->pdev->dev, "failed to park at %lu Hz: %d\n",
++			rate, err);
++	else
++		pfdevfreq->current_frequency = rate;
++
++	return err;
++}
++
++/* Put back whatever devfreq last asked for, once the domain is up again. */
++int panfrost_devfreq_restore(struct panfrost_device *pfdev)
++{
++	struct panfrost_devfreq *pfdevfreq = &pfdev->pfdevfreq;
++	unsigned long freq = pfdevfreq->requested_frequency;
++	int err;
++
++	if (!pfdevfreq->devfreq || !freq || freq == pfdevfreq->current_frequency)
++		return 0;
++
++	err = dev_pm_opp_set_rate(&pfdev->pdev->dev, freq);
++	if (err)
++		dev_err(&pfdev->pdev->dev, "failed to restore %lu Hz: %d\n",
++			freq, err);
++	else
++		pfdevfreq->current_frequency = freq;
+ 
+ 	return err;
+ }
+ 
++void panfrost_devfreq_transition_lock(struct panfrost_device *pfdev)
++{
++	mutex_lock(&pfdev->pfdevfreq.transition_lock);
++}
++
++void panfrost_devfreq_transition_unlock(struct panfrost_device *pfdev)
++{
++	mutex_unlock(&pfdev->pfdevfreq.transition_lock);
++}
++
++/* Caller holds transition_lock. */
++void panfrost_devfreq_set_available(struct panfrost_device *pfdev, bool avail)
++{
++	pfdev->pfdevfreq.hw_available = avail;
++}
++
+ static void panfrost_devfreq_reset(struct panfrost_devfreq *pfdevfreq)
+ {
+ 	pfdevfreq->busy_time = 0;
+@@ -158,6 +252,9 @@
+ 	pfdevfreq->opp_of_table_added = true;
+ 
+ 	spin_lock_init(&pfdevfreq->lock);
++	mutex_init(&pfdevfreq->transition_lock);
++	pfdevfreq->hw_available = true;
++	pfdevfreq->requested_frequency = cur_freq;
+ 
+ 	panfrost_devfreq_reset(pfdevfreq);
+ 
+@@ -231,26 +328,39 @@
+ 	}
+ }
+ 
+-void panfrost_devfreq_resume(struct panfrost_device *pfdev)
++int panfrost_devfreq_resume(struct panfrost_device *pfdev)
+ {
+ 	struct panfrost_devfreq *pfdevfreq = &pfdev->pfdevfreq;
+ 
+ 	if (!pfdevfreq->devfreq)
+-		return;
++		return 0;
+ 
+ 	panfrost_devfreq_reset(pfdevfreq);
+ 
+-	devfreq_resume_device(pfdevfreq->devfreq);
++	return devfreq_resume_device(pfdevfreq->devfreq);
+ }
+ 
+-void panfrost_devfreq_suspend(struct panfrost_device *pfdev)
++int panfrost_devfreq_suspend(struct panfrost_device *pfdev)
+ {
+ 	struct panfrost_devfreq *pfdevfreq = &pfdev->pfdevfreq;
++	int err;
+ 
+ 	if (!pfdevfreq->devfreq)
+-		return;
++		return 0;
++
++	err = devfreq_suspend_device(pfdevfreq->devfreq);
++	if (err) {
++		/*
++		 * suspend_count is incremented before anything that can fail
++		 * and is not unwound, so balance it here or devfreq stays
++		 * suspended for good.
++		 */
++		devfreq_resume_device(pfdevfreq->devfreq);
++		dev_err(&pfdev->pdev->dev, "failed to suspend devfreq: %d\n",
++			err);
++	}
+ 
+-	devfreq_suspend_device(pfdevfreq->devfreq);
++	return err;
+ }
+ 
+ void panfrost_devfreq_record_busy(struct panfrost_devfreq *pfdevfreq)
+--- a/drivers/gpu/drm/panfrost/panfrost_devfreq.h	2026-08-02 22:26:08.624506670 +0000
++++ b/drivers/gpu/drm/panfrost/panfrost_devfreq.h	2026-08-02 22:26:08.660316170 +0000
+@@ -19,7 +19,18 @@
+ 	struct devfreq_simple_ondemand_data gov_data;
+ 	bool opp_of_table_added;
+ 
++	/* Last rate actually programmed into the hardware. */
+ 	unsigned long current_frequency;
++	/* Last rate devfreq asked for, applied or not. */
++	unsigned long requested_frequency;
++	/*
++	 * Serialises a transition against runtime PM, and records whether the
++	 * hardware can be reached at all. Runtime PM status is not usable for
++	 * this: it reports SUSPENDING before the domain is down and RESUMING
++	 * before it is back.
++	 */
++	struct mutex transition_lock;
++	bool hw_available;
+ 	unsigned long fast_rate;
+ 
+ 	ktime_t busy_time;
+@@ -36,8 +47,13 @@
+ int panfrost_devfreq_init(struct panfrost_device *pfdev);
+ void panfrost_devfreq_fini(struct panfrost_device *pfdev);
+ 
+-void panfrost_devfreq_resume(struct panfrost_device *pfdev);
+-void panfrost_devfreq_suspend(struct panfrost_device *pfdev);
++int panfrost_devfreq_resume(struct panfrost_device *pfdev);
++int panfrost_devfreq_suspend(struct panfrost_device *pfdev);
++int panfrost_devfreq_park(struct panfrost_device *pfdev);
++int panfrost_devfreq_restore(struct panfrost_device *pfdev);
++void panfrost_devfreq_set_available(struct panfrost_device *pfdev, bool avail);
++void panfrost_devfreq_transition_lock(struct panfrost_device *pfdev);
++void panfrost_devfreq_transition_unlock(struct panfrost_device *pfdev);
+ 
+ void panfrost_devfreq_record_busy(struct panfrost_devfreq *devfreq);
+ void panfrost_devfreq_record_idle(struct panfrost_devfreq *devfreq);
+--- a/drivers/gpu/drm/panfrost/panfrost_drv.c	2026-08-02 22:26:08.624910920 +0000
++++ b/drivers/gpu/drm/panfrost/panfrost_drv.c	2026-08-02 22:26:08.660574045 +0000
+@@ -929,6 +929,19 @@
+ 	.gpu_quirks = BIT(GPU_QUIRK_FORCE_AARCH64_PGTABLE),
+ };
+ 
++static const struct panfrost_compatible rk3576_data = {
++	.num_supplies = ARRAY_SIZE(default_supplies) - 1,
++	.supply_names = default_supplies,
++	.num_pm_domains = 1,
++	/*
++	 * BL31 owns this GPU's PVTPLL and reaches it over the GPU block's gate
++	 * and bus clocks, so a rate request only works with the domain up.
++	 * 200 MHz is the rate the vendor kernel leaves the clock at before
++	 * powering the domain down, and is below the lowest OPP.
++	 */
++	.park_rate = 200000000,
++};
++
+ static const struct of_device_id dt_match[] = {
+ 	/* Set first to probe before the generic compatibles */
+ 	{ .compatible = "amlogic,meson-gxm-mali",
+@@ -944,6 +957,7 @@
+ 	{ .compatible = "arm,mali-t830", .data = &default_data, },
+ 	{ .compatible = "arm,mali-t860", .data = &default_data, },
+ 	{ .compatible = "arm,mali-t880", .data = &default_data, },
++	{ .compatible = "rockchip,rk3576-mali", .data = &rk3576_data, },
+ 	{ .compatible = "arm,mali-bifrost", .data = &default_data, },
+ 	{ .compatible = "arm,mali-valhall-jm", .data = &default_data, },
+ 	{ .compatible = "mediatek,mt8183-mali", .data = &mediatek_mt8183_data },

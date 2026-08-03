@@ -1,0 +1,91 @@
+drm/panfrost: expose the RK3576 GPU PVTPLL block in debugfs
+
+DIAGNOSTIC - not for merge.
+
+BL31 answers a rate query with the rate it was last asked for
+(clk_scmi_gpu_get_rate returns sys_clk_info.gpu_rate), so neither the clock
+framework nor devfreq can show what it programmed. Read the PVTPLL block
+instead: GCK_LEN carries the ring length, and GCK_CNT_AVG is the block's own
+averaged measurement of the resulting frequency in MHz - the register the
+vendor kernel reads for exactly this.
+
+Guarded with pm_runtime_get_if_in_use(): the block is reached over the GPU's
+own clocks, and touching it with the power domain down is what hangs the CPU.
+
+--- a/drivers/gpu/drm/panfrost/panfrost_drv.c
++++ b/drivers/gpu/drm/panfrost/panfrost_drv.c
+@@ -674,9 +674,74 @@
+ 
+ 	return 0;
+ }
++
++/*
++ * BL31 owns the GPU clock and answers a rate query with the rate it was last
++ * asked for, so the only way to see what it actually programmed is to read
++ * the PVTPLL block it writes. GCK_LEN carries the ring length; GCK_CNT_AVG is
++ * the block's own averaged measurement of the resulting frequency, in MHz,
++ * which is the register the vendor kernel reads for the same purpose.
++ *
++ * Offsets are from the RK3576 PVTPLL block; the base is the gpu_pvtpll
++ * syscon.
++ */
++#define RK3576_GPU_PVTPLL_BASE		0x27268000
++#define RK3576_GPU_PVTPLL_SIZE		0x100
++#define RK3576_PVTPLL_GCK_CFG		0x20
++#define RK3576_PVTPLL_GCK_LEN		0x24
++#define RK3576_PVTPLL_GCK_CNT		0x50
++#define RK3576_PVTPLL_GCK_CNT_AVG	0x54
++#define RK3576_PVTPLL_GCK_STATE		0x5c
+ 
++static int panfrost_pvtpll_show(struct seq_file *m, void *data)
++{
++	struct drm_info_node *node = m->private;
++	struct panfrost_device *pfdev = dev_get_drvdata(node->minor->dev->dev);
++	void __iomem *pvt;
++	u32 cfg, len, cnt, avg, state;
++
++	/*
++	 * This block is reached over the GPU's own clocks. Touching it with
++	 * the domain down is what hangs the CPU, so only look when something
++	 * else is already keeping the GPU awake.
++	 */
++	if (pm_runtime_get_if_in_use(&pfdev->pdev->dev) <= 0) {
++		seq_puts(m, "gpu idle - run a load and read this again\n");
++		return 0;
++	}
++
++	pvt = ioremap(RK3576_GPU_PVTPLL_BASE, RK3576_GPU_PVTPLL_SIZE);
++	if (!pvt) {
++		pm_runtime_put(&pfdev->pdev->dev);
++		return -ENOMEM;
++	}
++
++	cfg = readl(pvt + RK3576_PVTPLL_GCK_CFG);
++	len = readl(pvt + RK3576_PVTPLL_GCK_LEN);
++	cnt = readl(pvt + RK3576_PVTPLL_GCK_CNT);
++	avg = readl(pvt + RK3576_PVTPLL_GCK_CNT_AVG);
++	state = readl(pvt + RK3576_PVTPLL_GCK_STATE);
++
++	iounmap(pvt);
++	pm_runtime_put(&pfdev->pdev->dev);
++
++	seq_printf(m, "cfg           0x%08x\n", cfg);
++	seq_printf(m, "len           0x%08x\n", len);
++	seq_printf(m, "  ring_sel    %u\n", (len >> 10) & 0x3);
++	seq_printf(m, "  length      %u\n", (len >> 2) & 0x7f);
++	seq_printf(m, "  length_frac %u\n", len & 0x3);
++	seq_printf(m, "cnt           %u\n", cnt);
++	seq_printf(m, "cnt_avg       %u MHz\n", avg);
++	seq_printf(m, "state         0x%08x\n", state);
++	seq_printf(m, "opp requested %lu Hz\n",
++		   pfdev->pfdevfreq.current_frequency);
++
++	return 0;
++}
++
+ static struct drm_info_list panthor_debugfs_list[] = {
+ 	{"gems", panthor_gems_show, 0, NULL},
++	{"pvtpll", panfrost_pvtpll_show, 0, NULL},
+ };
+ 
+ static int panthor_gems_debugfs_init(struct drm_minor *minor)

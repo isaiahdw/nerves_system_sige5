@@ -382,12 +382,30 @@ CRU dividers off GPLL/CPLL/AUPLL/SPLL/LPLL cannot produce the upper rates.
   Reaching 900 MHz on this die would need a ring of about 16; the shortest
   the table offers is 20.
 
-  Voltage is not the missing variable. Sampling the rail, the die
-  temperature and the delivered rate together inside one measurement window
-  gives 62.5 mV between the 700 and 800 MHz OPPs - which share ring length
-  21 - for a frequency difference of 0.13 MHz, and 50 mV at length 20 for
-  0.9 MHz. That is the loop doing its job: a PVTPLL is closed-loop
-  specifically so the rate holds steady against voltage and temperature.
+  The ring length BL31 programs can be read back, which separates firmware
+  behaviour from silicon. Each OPP under load, rail sampled alongside:
+
+  | Requested | Ring length | PVTPLL `cnt_avg` | Cycle counter | Rail |
+  | --- | --- | --- | --- | --- |
+  | 300 MHz | 63 | 430 MHz | 429.7 MHz | 700 mV |
+  | 400 MHz | 48 | 510 MHz | 509.6 MHz | 700 mV |
+  | 500 MHz | 32 | 645 MHz | 645.4 MHz | 700 mV |
+  | 600 MHz | 23 | 772 MHz | 772.3 MHz | 700 mV |
+  | 700 MHz | 21 | 802 MHz | 801.6 MHz | 725 mV |
+  | 800 MHz | 21 | 801 MHz | 801.5 MHz | 775 mV |
+  | 900 MHz | 20 | 820 MHz | 820.6 MHz | 825 mV |
+
+  The lengths are the ones upstream TF-A lists, so the shipped rkbin BL31
+  carries the same table. `cnt_avg` is the PVTPLL's own averaged
+  measurement - the register the vendor kernel reads for this - and it
+  agrees with panfrost's GPU cycle counter within 1 MHz at every point.
+
+  Nothing in the integration is at fault: the rail tracks each OPP and BL31
+  programs the length the table specifies. Rockchip's table asserts length
+  20 is 900 MHz; on this die length 20 oscillates at 820 MHz, at 825 mV and
+  equally at the vendor's 875 mV. A PVTPLL is closed-loop against voltage
+  and temperature, so it holds that rate - which is why 50 mV moves it
+  0.9 MHz and a 20 C swing moves it 0.05%.
 
   Three consequences. 900 MHz is not reachable: length 20 is the shortest
   ring in the table, and it delivers 821 MHz even at 875 mV, the vendor's

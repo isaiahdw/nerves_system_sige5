@@ -166,6 +166,34 @@ the reference and threshold a closed loop would work against - being
 unprogrammed means whatever correction they configure is not happening.
 `VERSION` reads 0x20230710.
 
+## Not caused by the NPU work
+
+The NPU series drives its own SCMI clock and PVTPLL, writes NPU_GRF, and
+patches the shared pmdomain and rockchip-iommu drivers, so it is a fair
+suspect. It is not the cause:
+
+- No NPU patch touches a GPU register, the GPU clock or the GPU PVTPLL. The
+  only occurrences of "gpu" are comments citing panfrost as precedent, and
+  the read-margin patch writes NPU_GRF alone.
+- Of the kernel-core patches, which no amount of unloading reverses, the
+  pmdomain settle delay is 0 for the GPU domain - only `nputop`, `npu0` and
+  `npu1` take 15 us - and the iommu patches contain no GPU reference at all.
+- A build carrying the whole NPU series and none of the GPU series drives the
+  GPU over the CRU and delivers exactly what its divider registers say:
+  297, 500, 594 and 786 MHz, matching the cycle counter within 0.7%.
+- `rmmod rknpu` leaves the ring length and `GCK_CNT_AVG` unchanged, 21/802
+  and 20/820-821.
+
+The discrepancy appears only when the GPU is driven from SCMI, which is where
+the firmware's ring-length table is consulted.
+
+Worth following up separately: `package/rknpu-driver/0011`'s own commit
+message records that the NPU's SCMI clock reports a CRU-derived rate rather
+than its PVTPLL rate. The NPU has its own PVTPLL block at 0x27270000 and its
+own length table, so the NPU frequencies in this repo's benchmarks may carry
+the same kind of label error. Reading that block would say whether the skew
+is specific to the GPU table or systemic on this die.
+
 ## What performance this is worth
 
 `glmark2-es2-drm` off-screen through GBM at 1920x1080, `--frame-end=finish`,

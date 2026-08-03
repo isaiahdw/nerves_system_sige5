@@ -324,13 +324,14 @@ CRU dividers off GPLL/CPLL/AUPLL/SPLL/LPLL cannot produce the upper rates.
   `CLK_GPU` reach the registers BL31 programs PVTPLL through. BL31 does not
   enable the latter two itself, and nothing else claims the gate, so without
   naming it here the clock framework disables it as unused during boot.
-- **Rate accuracy — unresolved.** Over the CRU the top three OPPs all
-  collapse onto 786 MHz. Over SCMI the clock framework reports each rate
-  exactly, but that is the SCMI provider's cached request, not a round trip
-  to the hardware. Panfrost's GPU cycle counter, read through fdinfo with
-  `profiling=1`, gives the rate the shader cores actually run at:
+- **Rate accuracy — the OPP rates are nominal.** Over the CRU the top three
+  OPPs all collapse onto 786 MHz. Over SCMI, BL31 accepts and reports back
+  every rate exactly; the clock carries `CLK_GET_RATE_NOCACHE`, so that is a
+  real `CLOCK_RATE_GET` round trip and not a cached value. It still is not
+  what the shader cores run at. Panfrost's GPU cycle counter, read through
+  fdinfo with `profiling=1`, gives that:
 
-  | Requested | `clk_summary` | Cycle counter |
+  | Requested | BL31 reports | Cycle counter |
   | --- | --- | --- |
   | 300 MHz | 300 MHz | 430 MHz |
   | 400 MHz | 400 MHz | 510 MHz |
@@ -341,11 +342,17 @@ CRU dividers off GPLL/CPLL/AUPLL/SPLL/LPLL cannot produce the upper rates.
   | 900 MHz | 900 MHz | 821 MHz |
 
   Frame rate divided by the counter's rate is constant to within 2% across
-  the whole range, so throughput follows the real clock exactly and the
-  hardware saturates near 820 MHz. Whether BL31 rounds requests onto a
-  coarse PVTPLL rate table, or the PVTPLL's frequency simply tracks the
-  voltage and temperature it is given, is not yet established. Until it is,
-  the OPP voltages do not correspond to the rates actually being run.
+  the range, so throughput follows the real clock exactly and the ceiling is
+  ~821 MHz rather than 900. 700 and 800 MHz land on the same rate, so the
+  achievable set is quantised, and it is stable rather than drifting: pinned
+  at 900 MHz from 53.6 to 57.3 C the measured rate moved 0.05%. The vendor
+  calibrates this PVTPLL at 800 MHz and 750 mV, which is where the
+  achievable points cluster.
+
+  Two consequences. Against the CRU's 786 MHz the SCMI path is worth 4.5% of
+  clock, not the 14.5% the OPP numbers imply. And the table's rate/voltage
+  pairing does not hold: the 300 MHz OPP supplies 700 mV while the GPU runs
+  430 MHz, against the 712.5 mV the vendor gives for that range.
 
 - **Runtime PM.** A rate request only reaches PVTPLL with the power domain
   up, so the clock is parked at 200 MHz through the OPP core before suspend

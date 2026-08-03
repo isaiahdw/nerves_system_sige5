@@ -349,10 +349,35 @@ CRU dividers off GPLL/CPLL/AUPLL/SPLL/LPLL cannot produce the upper rates.
   calibrates this PVTPLL at 800 MHz and 750 mV, which is where the
   achievable points cluster.
 
-  Two consequences. Against the CRU's 786 MHz the SCMI path is worth 4.5% of
-  clock, not the 14.5% the OPP numbers imply. And the table's rate/voltage
-  pairing does not hold: the 300 MHz OPP supplies 700 mV while the GPU runs
-  430 MHz, against the 712.5 mV the vendor gives for that range.
+  The mechanism is in BL31. TF-A carries RK3576 upstream, and its GPU table
+  (`plat/rockchip/rk3576/scmi/rk3576_clk.c`) maps each rate to a PVTPLL ring
+  oscillator length:
+
+  | Requested | Ring length | Delivered here |
+  | --- | --- | --- |
+  | 900 MHz | 20 | 822 MHz |
+  | 800 MHz | 21 | 803 MHz |
+  | 700 MHz | 21 | 803 MHz |
+  | 600 MHz | 23 | 775 MHz |
+  | 500 MHz | 32 | 650 MHz |
+  | 400 MHz | 48 | 513 MHz |
+  | 300 MHz | 63 | 433 MHz |
+  | 200 MHz | 0 | GPLL/6 = 198 MHz |
+
+  `clk_gpu_set_rate()` writes the length, switches the mux and returns; it
+  never reads back what the ring produced. The rate names are therefore
+  labels on a ring length, and what that length oscillates at is a property
+  of the individual die. PVTPLL is closed-loop against voltage and
+  temperature - which is why the delivered rate here moves 0.1% for 50 mV
+  and 0.05% across a 20 C swing - so these figures are stable, but they are
+  stable *per chip* and should not be assumed for another board.
+
+  Three consequences. 900 MHz is not reachable: length 20 is the shortest
+  ring in the table, so ~822 MHz is the ceiling this interface can ask for.
+  Against the CRU's 786 MHz the SCMI path is worth 4.5%, not the 14.5% the
+  OPP numbers imply. And the 700 MHz OPP is actively harmful - it shares
+  ring length 21 with the 800 MHz entry, so it delivers the same 803 MHz
+  while supplying the lower voltage meant for 700.
 
 - **Runtime PM.** A rate request only reaches PVTPLL with the power domain
   up, so the clock is parked at 200 MHz through the OPP core before suspend

@@ -382,12 +382,20 @@ CRU dividers off GPLL/CPLL/AUPLL/SPLL/LPLL cannot produce the upper rates.
   Reaching 900 MHz on this die would need a ring of about 16; the shortest
   the table offers is 20.
 
+  Voltage is not the missing variable. Sampling the rail, the die
+  temperature and the delivered rate together inside one measurement window
+  gives 62.5 mV between the 700 and 800 MHz OPPs - which share ring length
+  21 - for a frequency difference of 0.13 MHz, and 50 mV at length 20 for
+  0.9 MHz. That is the loop doing its job: a PVTPLL is closed-loop
+  specifically so the rate holds steady against voltage and temperature.
+
   Three consequences. 900 MHz is not reachable: length 20 is the shortest
-  ring in the table, so ~822 MHz is the ceiling this interface can ask for.
-  Against the CRU's 786 MHz the SCMI path is worth 4.5%, not the 14.5% the
-  OPP numbers imply. And the 700 MHz OPP is actively harmful - it shares
-  ring length 21 with the 800 MHz entry, so it delivers the same 803 MHz
-  while supplying the lower voltage meant for 700.
+  ring in the table, and it delivers 821 MHz even at 875 mV, the vendor's
+  own 900 MHz voltage. Against the CRU's 786 MHz the SCMI path is worth
+  4.5%, not the 14.5% the OPP numbers imply. And the 700 MHz OPP is not a
+  separate operating point at all - same ring length as 800 MHz, same 801
+  MHz delivered, 62.5 mV lower. It is the same silicon behaviour at less
+  than the voltage Rockchip qualifies for that rate.
 
 - **Runtime PM.** A rate request only reaches PVTPLL with the power domain
   up, so the clock is parked at 200 MHz through the OPP core before suspend

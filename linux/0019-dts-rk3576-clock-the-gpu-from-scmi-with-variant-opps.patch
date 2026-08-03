@@ -60,43 +60,9 @@ driver is tracking, and the vendor kernel does not use one on this SoC.
 
 Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
---- a/drivers/gpu/drm/panfrost/panfrost_device.h
-+++ b/drivers/gpu/drm/panfrost/panfrost_device.h
-@@ -103,6 +103,12 @@
- 
- 	/* Vendor implementation quirks callback */
- 	void (*vendor_quirk)(struct panfrost_device *pfdev);
-+
-+	/*
-+	 * Replaces the generic speed-bin read. Only needed where the OTP holds
-+	 * something other than a ready-made opp-supported-hw value.
-+	 */
-+	int (*read_speedbin)(struct device *dev);
- 
- 	/* Allowed PM features */
- 	u8 pm_features;
---- a/drivers/gpu/drm/panfrost/panfrost_devfreq.h
-+++ b/drivers/gpu/drm/panfrost/panfrost_devfreq.h
-@@ -44,6 +44,8 @@
- 	spinlock_t lock;
- };
- 
-+int panfrost_rk3576_speedbin(struct device *dev);
-+
- int panfrost_devfreq_init(struct panfrost_device *pfdev);
- void panfrost_devfreq_fini(struct panfrost_device *pfdev);
- 
 --- a/drivers/gpu/drm/panfrost/panfrost_devfreq.c
 +++ b/drivers/gpu/drm/panfrost/panfrost_devfreq.c
-@@ -4,6 +4,7 @@
- #include <linux/clk.h>
- #include <linux/devfreq.h>
- #include <linux/devfreq_cooling.h>
-+#include <linux/clk.h>
- #include <linux/nvmem-consumer.h>
- #include <linux/platform_device.h>
- #include <linux/pm_opp.h>
-@@ -182,11 +183,90 @@
+@@ -182,11 +182,90 @@
  	.get_dev_status = panfrost_devfreq_get_dev_status,
  };
  
@@ -135,7 +101,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 + * carrying opp-supported-hw unless supported_hw has been set.
 + */
 +int panfrost_rk3576_speedbin(struct device *dev)
-+{
+ {
 +	u32 versions[2];
 +	int bin;
 +	u8 spec;
@@ -177,7 +143,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +}
 +
 +static int panfrost_read_speedbin(struct panfrost_device *pfdev)
- {
++{
 +	struct device *dev = &pfdev->pdev->dev;
  	u32 val;
  	int ret;
@@ -188,22 +154,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	ret = nvmem_cell_read_variable_le_u32(dev, "speed-bin", &val);
  	if (ret) {
  		/*
-@@ -218,14 +298,6 @@
- 	struct panfrost_devfreq *pfdevfreq = &pfdev->pfdevfreq;
- 	unsigned long freq = ULONG_MAX;
- 
--	/*
--	 * The runtime PM callbacks take this lock whether or not devfreq comes
--	 * up, and several paths below return early - panfrost runs without
--	 * devfreq when the OPP table is missing - so initialise it first.
--	 */
--	mutex_init(&pfdevfreq->transition_lock);
--	pfdevfreq->hw_available = true;
--
- 	if (pfdev->comp->num_supplies > 1) {
- 		/*
- 		 * GPUs with more than 1 supply require platform-specific handling:
-@@ -235,7 +307,7 @@
+@@ -235,7 +314,7 @@
  		return 0;
  	}
  
@@ -212,21 +163,32 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	if (ret)
  		return ret;
  
-@@ -259,11 +331,13 @@
- 	pfdevfreq->opp_of_table_added = true;
+--- a/drivers/gpu/drm/panfrost/panfrost_devfreq.h
++++ b/drivers/gpu/drm/panfrost/panfrost_devfreq.h
+@@ -44,6 +44,8 @@
+ 	spinlock_t lock;
+ };
  
- 	spin_lock_init(&pfdevfreq->lock);
-+	mutex_init(&pfdevfreq->transition_lock);
-+	pfdevfreq->hw_available = true;
-+	pfdevfreq->requested_frequency = cur_freq;
++int panfrost_rk3576_speedbin(struct device *dev);
++
+ int panfrost_devfreq_init(struct panfrost_device *pfdev);
+ void panfrost_devfreq_fini(struct panfrost_device *pfdev);
  
- 	panfrost_devfreq_reset(pfdevfreq);
+--- a/drivers/gpu/drm/panfrost/panfrost_device.h
++++ b/drivers/gpu/drm/panfrost/panfrost_device.h
+@@ -103,6 +103,12 @@
  
- 	cur_freq = clk_get_rate(pfdev->clock);
--	pfdevfreq->requested_frequency = cur_freq;
+ 	/* Vendor implementation quirks callback */
+ 	void (*vendor_quirk)(struct panfrost_device *pfdev);
++
++	/*
++	 * Replaces the generic speed-bin read. Only needed where the OTP holds
++	 * something other than a ready-made opp-supported-hw value.
++	 */
++	int (*read_speedbin)(struct device *dev);
  
- 	opp = devfreq_recommended_opp(dev, &cur_freq, 0);
- 	if (IS_ERR(opp))
+ 	/* Allowed PM features */
+ 	u8 pm_features;
 --- a/drivers/gpu/drm/panfrost/panfrost_drv.c
 +++ b/drivers/gpu/drm/panfrost/panfrost_drv.c
 @@ -20,6 +20,7 @@

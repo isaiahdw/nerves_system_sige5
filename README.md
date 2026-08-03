@@ -272,7 +272,7 @@ Cold-submit figures are 11 samples each with `runtime_status` verified
 Utilisation alone cannot drive this device: the busiest core measures about
 50% at full load and the highest rate and about 64% at the lowest, never
 reaching the 85% `simple_ondemand` needs to hold a rate. With the floor
-cleared it settles at 300 MHz. `0015` exposes the raw counters at
+cleared it settles at 300 MHz. `package/rknpu-driver/0015` exposes the raw counters at
 `/sys/kernel/debug/rknpu/dvfs`.
 
 The floor is held until the device powers down, so the rate stays at maximum
@@ -376,10 +376,9 @@ CRU dividers off GPLL/CPLL/AUPLL/SPLL/LPLL cannot produce the upper rates.
   `clk_gpu_set_rate()` writes the length, switches the mux and returns; it
   never reads back what the ring produced. The rate names are therefore
   labels on a ring length, and what that length oscillates at is a property
-  of the individual die. PVTPLL is closed-loop against voltage and
-  temperature - which is why the delivered rate here moves 0.1% for 50 mV
-  and 0.05% across a 20 C swing - so these figures are stable, but they are
-  stable *per chip* and should not be assumed for another board.
+  of the individual die. The delivered rate moves 0.1% for 50 mV and 0.05%
+  across a 20 C swing, so these figures are stable - but stable *per chip*,
+  and should not be assumed for another board.
 
   The boot chain runs rkbin's BL31, not a TF-A build, so that source is
   evidence about the firmware's design rather than the binary in use. It
@@ -410,12 +409,12 @@ CRU dividers off GPLL/CPLL/AUPLL/SPLL/LPLL cannot produce the upper rates.
   measurement - the register the vendor kernel reads for this - and it
   agrees with panfrost's GPU cycle counter within 1 MHz at every point.
 
-  Nothing in the integration is at fault: the rail tracks each OPP and BL31
-  programs the length the table specifies. The table itself is the problem,
-  and it is inconsistent on its own terms. 700 and 800 MHz produce byte
-  identical programming - `GCK_LEN` reads 0x54 for both - so they are one
-  operating point separated only by 50 mV of rail, which moves the ring
-  0.13 MHz. Both entries cannot be right.
+  The rail tracks each OPP and BL31 programs the length the table specifies,
+  so the discrepancy originates below that interface. 700 and 800 MHz share
+  ring length 21 - `GCK_LEN` reads 0x54 for both - and differ only by 50 mV
+  of rail, worth 0.13 MHz. That is the pairing the vendor ships: an OPP is a
+  frequency and a voltage, so they are duplicate clock configurations rather
+  than duplicate operating points.
 
   Reading the whole block shows why that is hard to explain as ordinary part
   variation. Of the registers in it, BL31 writes only `GCK_LEN`,

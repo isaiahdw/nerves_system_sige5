@@ -284,7 +284,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  void panfrost_devfreq_record_idle(struct panfrost_devfreq *devfreq);
 --- a/drivers/gpu/drm/panfrost/panfrost_device.c
 +++ b/drivers/gpu/drm/panfrost/panfrost_device.c
-@@ -456,11 +456,45 @@
+@@ -456,11 +456,54 @@
  		}
  	}
  
@@ -312,7 +312,16 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
 +	ret = panfrost_devfreq_resume(pfdev);
 +	if (ret) {
++		/*
++		 * The rate is already back on PVTPLL. Returning an error from a
++		 * runtime resume makes genpd drop the domain, so park the clock
++		 * while it is still up - otherwise the firmware's PVTPLL state
++		 * outlives the power domain, which is what the park exists to
++		 * prevent.
++		 */
 +		panfrost_devfreq_transition_lock(pfdev);
++		if (panfrost_devfreq_park(pfdev))
++			dev_warn(dev, "could not park the clock after a failed resume\n");
 +		panfrost_devfreq_set_available(pfdev, false);
 +		panfrost_devfreq_transition_unlock(pfdev);
 +		goto err_restore;
@@ -332,7 +341,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  err_bus_clk:
  	if (pfdev->comp->pm_features & BIT(GPU_PM_RT))
  		clk_disable(pfdev->clock);
-@@ -473,11 +507,30 @@
+@@ -473,11 +516,31 @@
  static int panfrost_device_runtime_suspend(struct device *dev)
  {
  	struct panfrost_device *pfdev = dev_get_drvdata(dev);
@@ -357,7 +366,8 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +		panfrost_devfreq_set_available(pfdev, false);
 +	panfrost_devfreq_transition_unlock(pfdev);
 +	if (ret) {
-+		panfrost_devfreq_resume(pfdev);
++		if (panfrost_devfreq_resume(pfdev))
++			dev_warn(dev, "could not restart devfreq after a failed park\n");
 +		return ret;
 +	}
 +

@@ -196,20 +196,6 @@ GFREE_CON (0x3c), ADC_CFG (0x40)
 that TF-A does not write them; without register documentation it says nothing
 about what hardware paths exist. `VERSION` reads 0x20230710.
 
-**Most of the block is never programmed.** Of the registers TF-A defines,
-`clk_gpu_set_rate()` writes only `GCK_LEN`, `GCK_CAL_CNT` and `GCK_CFG`.
-These are defined upstream, written by no code path, and read zero here:
-
-```
-RING_EN (0x00), RING0..RING3_LENGTH (0x04-0x10), GCK_DIV (0x28),
-GCK_REF_VAL (0x30), GCK_CFG_VAL (0x34), GCK_THR (0x38),
-GFREE_CON (0x3c), ADC_CFG (0x40)
-```
-
-`GCK_DIV` at zero rules out a hidden divider. `GCK_REF_VAL` and `GCK_THR` -
-the reference and threshold a closed loop would work against - being
-unprogrammed means whatever correction they configure is not happening.
-`VERSION` reads 0x20230710.
 
 ## Not caused by the NPU work
 
@@ -288,10 +274,12 @@ selects the matching `opp-microvolt-Lx` for every OPP. This series carries one
 fixed voltage per OPP and never measures the grade.
 
 Those fixed values are not the conservative choice they are documented to be.
-At 900 MHz the DTS supplies 825 mV where the BSP fallback for base RK3576 is
-875 mV; the 825 mV figure is the L5 value, which suits this die and is not
-safe to assume for arbitrary silicon. Either the PVTM selection needs
-implementing, or the DTS should carry the BSP fallback voltages.
+The DTS now carries the highest voltage the vendor lists for each rate -
+712.5 mV to 600, 750 at 700, 812.5 at 800 and 875 at 900 - so it covers the
+slowest silicon rather than only this die. It previously carried 825 mV at
+900 MHz, which is the L5 value and happened to suit this part. Implementing
+the grade selection would recover the efficiency that costs on fast silicon;
+it would not change the delivered rate.
 
 ## Consequences for the device tree
 

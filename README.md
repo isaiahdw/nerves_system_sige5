@@ -401,11 +401,26 @@ CRU dividers off GPLL/CPLL/AUPLL/SPLL/LPLL cannot produce the upper rates.
   agrees with panfrost's GPU cycle counter within 1 MHz at every point.
 
   Nothing in the integration is at fault: the rail tracks each OPP and BL31
-  programs the length the table specifies. Rockchip's table asserts length
-  20 is 900 MHz; on this die length 20 oscillates at 820 MHz, at 825 mV and
-  equally at the vendor's 875 mV. A PVTPLL is closed-loop against voltage
-  and temperature, so it holds that rate - which is why 50 mV moves it
-  0.9 MHz and a 20 C swing moves it 0.05%.
+  programs the length the table specifies. The table itself is the problem,
+  and it is inconsistent on its own terms. 700 and 800 MHz produce byte
+  identical programming - `GCK_LEN` reads 0x54 for both - so they are one
+  operating point separated only by 50 mV of rail, which moves the ring
+  0.13 MHz. Both entries cannot be right.
+
+  Reading the whole block shows why that is hard to explain as ordinary part
+  variation. Of the registers in it, BL31 writes only `GCK_LEN`,
+  `GCK_CAL_CNT` and `GCK_CFG`. `RING_EN`, `RING0`-`RING3_LENGTH`, `GCK_DIV`,
+  `GCK_REF_VAL`, `GCK_CFG_VAL`, `GCK_THR`, `GFREE_CON` and `ADC_CFG` are
+  defined in the upstream source and never written by any path, and all of
+  them read zero here. `GCK_DIV` at zero rules out a divider taking the
+  difference, but `GCK_REF_VAL` and `GCK_THR` - the reference and threshold
+  a closed loop would work against - are simply unprogrammed.
+
+  So length 20 measures 821 MHz on this die, at 825 mV and equally at the
+  vendor's 875 mV, and the block's own counter agrees with the GPU cycle
+  counter. Whether that is this die, or a calibration step the open
+  implementation never performs, is not established here. Settling it needs
+  a second RK3576 board running Rockchip's own image for comparison.
 
   Three consequences. 900 MHz is not reachable: length 20 is the shortest
   ring in the table, and it delivers 821 MHz even at 875 mV, the vendor's

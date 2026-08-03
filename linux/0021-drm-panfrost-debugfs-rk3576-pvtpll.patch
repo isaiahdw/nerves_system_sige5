@@ -14,7 +14,7 @@ own clocks, and touching it with the power domain down is what hangs the CPU.
 
 --- a/drivers/gpu/drm/panfrost/panfrost_drv.c
 +++ b/drivers/gpu/drm/panfrost/panfrost_drv.c
-@@ -674,9 +674,74 @@
+@@ -674,9 +674,92 @@
  
  	return 0;
  }
@@ -42,7 +42,8 @@ own clocks, and touching it with the power domain down is what hangs the CPU.
 +	struct drm_info_node *node = m->private;
 +	struct panfrost_device *pfdev = dev_get_drvdata(node->minor->dev->dev);
 +	void __iomem *pvt;
-+	u32 cfg, len, cnt, avg, state;
++	u32 len;
++	int off;
 +
 +	/*
 +	 * This block is reached over the GPU's own clocks. Touching it with
@@ -60,25 +61,42 @@ own clocks, and touching it with the power domain down is what hangs the CPU.
 +		return -ENOMEM;
 +	}
 +
-+	cfg = readl(pvt + RK3576_PVTPLL_GCK_CFG);
-+	len = readl(pvt + RK3576_PVTPLL_GCK_LEN);
-+	cnt = readl(pvt + RK3576_PVTPLL_GCK_CNT);
-+	avg = readl(pvt + RK3576_PVTPLL_GCK_CNT_AVG);
-+	state = readl(pvt + RK3576_PVTPLL_GCK_STATE);
-+
-+	iounmap(pvt);
-+	pm_runtime_put(&pfdev->pdev->dev);
-+
-+	seq_printf(m, "cfg           0x%08x\n", cfg);
-+	seq_printf(m, "len           0x%08x\n", len);
-+	seq_printf(m, "  ring_sel    %u\n", (len >> 10) & 0x3);
-+	seq_printf(m, "  length      %u\n", (len >> 2) & 0x7f);
-+	seq_printf(m, "  length_frac %u\n", len & 0x3);
-+	seq_printf(m, "cnt           %u\n", cnt);
-+	seq_printf(m, "cnt_avg       %u MHz\n", avg);
-+	seq_printf(m, "state         0x%08x\n", state);
 +	seq_printf(m, "opp requested %lu Hz\n",
 +		   pfdev->pfdevfreq.current_frequency);
++	seq_puts(m, "offset  value       note\n");
++
++	for (off = 0; off <= 0x74; off += 4) {
++		u32 v = readl(pvt + off);
++		const char *note = "";
++
++		switch (off) {
++		case 0x00: note = "RING_EN        (TF-A never writes)"; break;
++		case 0x04: note = "RING0_LENGTH   (TF-A never writes)"; break;
++		case 0x08: note = "RING1_LENGTH   (TF-A never writes)"; break;
++		case 0x0c: note = "RING2_LENGTH   (TF-A never writes)"; break;
++		case 0x10: note = "RING3_LENGTH   (TF-A never writes)"; break;
++		case 0x20: note = "GCK_CFG"; break;
++		case 0x24: note = "GCK_LEN        <- written per OPP"; break;
++		case 0x28: note = "GCK_DIV        (TF-A never writes)"; break;
++		case 0x2c: note = "GCK_CAL_CNT"; break;
++		case 0x30: note = "GCK_REF_VAL    (TF-A never writes)"; break;
++		case 0x34: note = "GCK_CFG_VAL    (TF-A never writes)"; break;
++		case 0x38: note = "GCK_THR        (TF-A never writes)"; break;
++		case 0x3c: note = "GFREE_CON      (TF-A never writes)"; break;
++		case 0x40: note = "ADC_CFG        (TF-A never writes)"; break;
++		case 0x50: note = "GCK_CNT"; break;
++		case 0x54: note = "GCK_CNT_AVG    measured MHz"; break;
++		case 0x5c: note = "GCK_STATE"; break;
++		case 0x60: note = "ADC_CNT"; break;
++		case 0x68: note = "ADC_CNT_AVG"; break;
++		case 0x70: note = "VERSION"; break;
++		}
++		seq_printf(m, "0x%02x    0x%08x  %s\n", off, v, note);
++	}
++
++	len = readl(pvt + RK3576_PVTPLL_GCK_LEN);
++	seq_printf(m, "decoded: ring_sel %u  length %u  frac %u\n",
++		   (len >> 10) & 0x3, (len >> 2) & 0x7f, len & 0x3);
 +
 +	return 0;
 +}

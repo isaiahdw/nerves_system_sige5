@@ -372,6 +372,16 @@ CRU dividers off GPLL/CPLL/AUPLL/SPLL/LPLL cannot produce the upper rates.
   and 0.05% across a 20 C swing - so these figures are stable, but they are
   stable *per chip* and should not be assumed for another board.
 
+  The boot chain runs rkbin's BL31, not a TF-A build, so that source is
+  evidence about the firmware's design rather than the binary in use. It
+  holds up as a prediction: a ring oscillator's period should be linear in
+  its stage count, and fitting the measured rates against those lengths
+  gives `period = 0.0256*N + 0.710 ns` with a worst-case error of 0.71%
+  across all six points. 700 and 800 MHz share length 21 and measure
+  identically, which is what put the table on the trail to begin with.
+  Reaching 900 MHz on this die would need a ring of about 16; the shortest
+  the table offers is 20.
+
   Three consequences. 900 MHz is not reachable: length 20 is the shortest
   ring in the table, so ~822 MHz is the ceiling this interface can ask for.
   Against the CRU's 786 MHz the SCMI path is worth 4.5%, not the 14.5% the

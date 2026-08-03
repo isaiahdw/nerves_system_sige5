@@ -324,15 +324,28 @@ CRU dividers off GPLL/CPLL/AUPLL/SPLL/LPLL cannot produce the upper rates.
   `CLK_GPU` reach the registers BL31 programs PVTPLL through. BL31 does not
   enable the latter two itself, and nothing else claims the gate, so without
   naming it here the clock framework disables it as unused during boot.
-- **Rate accuracy.** Every OPP is delivered exactly. Over the CRU the top
-  three all collapse onto 786 MHz:
+- **Rate accuracy — unresolved.** Over the CRU the top three OPPs all
+  collapse onto 786 MHz. Over SCMI the clock framework reports each rate
+  exactly, but that is the SCMI provider's cached request, not a round trip
+  to the hardware. Panfrost's GPU cycle counter, read through fdinfo with
+  `profiling=1`, gives the rate the shader cores actually run at:
 
-  | Requested | CRU | SCMI |
+  | Requested | `clk_summary` | Cycle counter |
   | --- | --- | --- |
-  | 300-600 MHz | 297-594 MHz | exact |
-  | 700 MHz | 594 MHz | 700 MHz |
-  | 800 MHz | 786 MHz | 800 MHz |
-  | 900 MHz | 786 MHz | 900 MHz |
+  | 300 MHz | 300 MHz | 430 MHz |
+  | 400 MHz | 400 MHz | 510 MHz |
+  | 500 MHz | 500 MHz | 646 MHz |
+  | 600 MHz | 600 MHz | 772 MHz |
+  | 700 MHz | 700 MHz | 802 MHz |
+  | 800 MHz | 800 MHz | 802 MHz |
+  | 900 MHz | 900 MHz | 821 MHz |
+
+  Frame rate divided by the counter's rate is constant to within 2% across
+  the whole range, so throughput follows the real clock exactly and the
+  hardware saturates near 820 MHz. Whether BL31 rounds requests onto a
+  coarse PVTPLL rate table, or the PVTPLL's frequency simply tracks the
+  voltage and temperature it is given, is not yet established. Until it is,
+  the OPP voltages do not correspond to the rates actually being run.
 
 - **Runtime PM.** A rate request only reaches PVTPLL with the power domain
   up, so the clock is parked at 200 MHz through the OPP core before suspend
@@ -360,12 +373,13 @@ CRU dividers off GPLL/CPLL/AUPLL/SPLL/LPLL cannot produce the upper rates.
 | 800 MHz | 37.0 | 1.85x |
 | 900 MHz | 38.0 | 1.90x |
 
-Throughput tracks the clock to 600 MHz and then flattens. Seven scenes
-covering fragment, ALU, vertex, texture and two real workloads all return
-1.02-1.06x from 600 to 900 MHz, so the ceiling is shared rather than
-per-scene - neither DDR nor the fabric scales with `CLK_GPU`. Against what
-the CRU delivers, exact rates are worth 3.8% at the 700 MHz OPP and 2.7% at
-the top; the remaining clock headroom does not convert on this SoC.
+Throughput tracks the requested rate to 600 MHz and then flattens. Seven
+scenes covering fragment, ALU, vertex, texture and two real workloads all
+return 1.02-1.06x from 600 to 900 MHz. That is not a workload ceiling: the
+cycle counter shows the real clock saturating near 820 MHz, and frame rate
+per actual cycle is constant, so the GPU is doing the same work per cycle
+throughout and simply stops receiving more cycles. Against what the CRU
+delivers the measured gain is 3.8% at the 700 MHz OPP and 2.7% at the top.
 
 Sustained load at 900 MHz holds 38.0 FPS with no falloff and peaks at
 82 C against a 115 C critical trip, unchanged with eight CPU workers

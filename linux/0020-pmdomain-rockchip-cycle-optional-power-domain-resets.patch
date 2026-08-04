@@ -1,0 +1,81 @@
+pmdomain/rockchip: cycle optional power-domain resets on power-on
+
+Some Rockchip domains come out of power-on with their bus interface in an
+undefined state. On the RK3576 NPU this shows up as a hang on the first
+access after a cold power-on; the vendor kernel cycles the domain's resets
+at that point and that clears it.
+
+Take the domain node's resets if it has any, and pulse them between
+releasing idle and restoring QoS. The resets are optional, so domains that
+declare none behave exactly as before.
+
+Ported from Jiaxing Hu's RFC v4 3/6 posted to linux-rockchip, which builds
+on the per-domain settle delay already carried here as patch 0003 by the
+same author. Only the include hunk needed adjusting; this tree's include
+block differs from the one the series was generated against.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/drivers/pmdomain/rockchip/pm-domains.c
++++ b/drivers/pmdomain/rockchip/pm-domains.c
+@@ -18,6 +18,7 @@
+ #include <linux/of_address.h>
+ #include <linux/of_clk.h>
+ #include <linux/clk.h>
++#include <linux/reset.h>
+ #include <linux/regmap.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/mfd/syscon.h>
+@@ -101,6 +102,7 @@
+ 	struct clk_bulk_data *clks;
+ 	struct device_node *node;
+ 	struct regulator *supply;
++	struct reset_control *resets;
+ };
+ 
+ struct rockchip_pmu {
+@@ -653,6 +655,13 @@
+ 		if (pd->info->delay_us)
+ 			udelay(pd->info->delay_us);
+ 
++		/* Optional: some domains need their resets cycled after power-on. */
++		if (pd->resets) {
++			reset_control_assert(pd->resets);
++			udelay(10);
++			reset_control_deassert(pd->resets);
++		}
++
+ 		rockchip_pmu_restore_qos(pd);
+ 	}
+ 
+@@ -823,6 +832,14 @@
+ 	if (error)
+ 		goto err_put_clocks;
+ 
++	pd->resets = of_reset_control_array_get_optional_exclusive(node);
++	if (IS_ERR(pd->resets)) {
++		error = PTR_ERR(pd->resets);
++		dev_err(pmu->dev, "%pOFn: failed to get resets: %d\n", node, error);
++		pd->resets = NULL;
++		goto err_unprepare_clocks;
++	}
++
+ 	pd->num_qos = of_count_phandle_with_args(node, "pm_qos",
+ 						 NULL);
+ 
+@@ -893,6 +910,7 @@
+ 	clk_bulk_unprepare(pd->num_clks, pd->clks);
+ err_put_clocks:
+ 	clk_bulk_put(pd->num_clks, pd->clks);
++	reset_control_put(pd->resets);
+ 	return error;
+ }
+ 
+@@ -911,6 +929,7 @@
+ 
+ 	clk_bulk_unprepare(pd->num_clks, pd->clks);
+ 	clk_bulk_put(pd->num_clks, pd->clks);
++	reset_control_put(pd->resets);
+ 
+ 	/* protect the zeroing of pm->num_clks */
+ 	mutex_lock(&pd->pmu->mutex);

@@ -163,11 +163,22 @@ rockchip,pvtm-offset = <0x54>;        /* read GCK_CNT_AVG              */
         785     804     5             /* a score of 785-804 is grade L5 */
 ```
 
-At that reference condition - ring length 21, 750 mV - this die reads 802,
-which is grade **L5**. The BSP's L5 voltage for the 900 MHz OPP is
-`opp-microvolt-L5 = <825000 825000 875000>`, which is exactly what mainline's
-DTS supplies. So 825 mV at 900 MHz is the correct grade voltage for this
-particular die, arrived at by coincidence rather than by measurement.
+At that reference condition - ring length 21, 750 mV - this die reads 802.
+
+> **Correction.** The grade below was derived from a table of eleven grades
+> whose `785 804 5` bucket would make 802 an L5 part. That table does not
+> govern the RK3576 GPU. Read from a running vendor kernel, `gpu-opp-table`
+> defines five grades and its buckets are `0-800 L0, 801-820 L1, 821-840 L2,
+> 841-860 L3, 861+ L4`, which puts 802 at **L1**. The measurement is unaffected;
+> only the grade changes. The vendor defines no L1 override at 900 MHz, so the
+> base 825000 applies to this die - the same voltage the paragraph below reaches,
+> for a different reason. See `rk3576-vendor-opp-tables.md`.
+
+Superseded reading: this die reads 802, which is grade **L5**. The BSP's L5
+voltage for the 900 MHz OPP is `opp-microvolt-L5 = <825000 825000 875000>`,
+which is exactly what mainline's DTS supplies. So 825 mV at 900 MHz is the
+correct grade voltage for this particular die, arrived at by coincidence rather
+than by measurement.
 
 This reframes two earlier readings of the data:
 
@@ -195,6 +206,43 @@ GFREE_CON (0x3c), ADC_CFG (0x40)
 `GCK_DIV` at zero rules out a hidden divider. The rest being zero shows only
 that TF-A does not write them; without register documentation it says nothing
 about what hardware paths exist. `VERSION` reads 0x20230710.
+
+### The OTP is unprogrammed too, and BL31 wanted it
+
+Rockchip's own firmware changelog (`doc/release/RK3576_EN.md` in rkbin) records
+this against **BL31 v1.05**, 2024-04-24:
+
+```
+2. Add otp init.
+3. Increase pvtpll length for middle frequencies.
+4. Adjust pvtpll table by otp opp info.
+```
+
+So the PVTPLL rate table is not a fixed constant: BL31 **adjusts it per die from
+the OTP `opp-info` cells**. The vendor device tree names those cells -
+`cpub-opp-info@30`, `cpul-opp-info@36`, `npu-opp-info@42`, `gpu-opp-info@48`,
+`logic-opp-info@4e`, six bytes each.
+
+Read from this board, every one of them is **zero**. The same OTP makes the
+vendor kernel log `Failed to get leakage` on all four domains.
+
+That gives a coherent account of the measurements in this document: the
+mechanism meant to align delivered rates with their labels has no data to work
+from on this die, so BL31 falls back to an unadjusted default table and the
+rates land where they land (300 -> 430, 600 -> 772, 900 -> 821).
+
+Treat this as a **hypothesis, not a result**. BL31's table cannot be read back,
+only one board was available, and unprogrammed `opp-info` may simply be normal
+for this part or production run. What it does establish is that the delivered
+rates measured here may be specific to a die with blank `opp-info`, and a
+properly fused part could track its labels more closely.
+
+Note the scope: this affects only the SCMI path. The CRU collapse (700 -> 594,
+800/900/950 -> 786) is divider arithmetic, independent of OTP, and was
+reproduced on the vendor BSP kernel at 786.4 MHz.
+
+The GPU cycle counter this document relies on for measurement is itself a BL31
+feature, enabled in v1.02 - well before the v1.24 in use here.
 
 
 ## Not caused by the NPU work

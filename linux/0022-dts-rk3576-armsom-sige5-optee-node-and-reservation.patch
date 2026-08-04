@@ -1,0 +1,72 @@
+dts: rk3576-armsom-sige5: describe the secure world
+
+Adds the two nodes Linux needs to talk to OP-TEE: the linaro,optee-tz
+firmware node the tee driver binds to, and a reservation covering the
+memory the secure world owns.
+
+The address is 0x48400000. RKTRUST/RK3576TRUST.ini gives 0x08400000 for
+[BL32_OPTION] ADDR, but that is an offset - Rockchip's fit_args.sh adds
+CONFIG_SYS_SDRAM_BASE to any TEE address below the DRAM base, and RK3576's
+base is 0x40000000.
+
+The size is published nowhere, so it comes from OP-TEE itself, which prints
+its layout as it starts:
+
+  I/TC: OP-TEE version: 3.13.0-1034-g500b55c8a, fwver: v1.08
+  I/TC: OP-TEE memory size: TEEOS 0x200000 TA 0xc00000 SHM 0x200000
+
+0x200000 + 0xc00000 + 0x200000 = 0xe00000, 14 MB.
+
+Both nodes are harmless in the default build, which ships no BL32: the SMC
+goes unanswered so the driver does not register, and the reservation costs
+14 MB of 8 GB. Without the reservation Linux is free to allocate over the
+secure world - it happened to survive one boot here, which is luck rather
+than a guarantee.
+
+Claude-Session: https://claude.ai/code/session_01PBGQqVfXFDyZYA6aV3X3Qq
+
+--- a/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
++++ b/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
+@@ -1314,6 +1314,42 @@
+ 			#iommu-cells = <0>;
+ 			power-domains = <&power RK3576_PD_NPU0>,
+ 					<&power RK3576_PD_NPU1>;
++		};
++	};
++};
++
++/*
++ * Secure world. Only present when the bootloader carries BL32; a build
++ * without it leaves the SMC unanswered and the driver simply does not
++ * register, so the node is harmless either way.
++ *
++ * The region is Rockchip's rk3576_bl32 blob, loaded by SPL at
++ * 0x48400000 - the 0x8400000 from RKTRUST/RK3576TRUST.ini is an offset,
++ * and fit_args.sh adds CONFIG_SYS_SDRAM_BASE (0x40000000) to it. Its
++ * size is not published anywhere; OP-TEE reports its own layout at
++ * startup:
++ *
++ *   I/TC: OP-TEE memory size: TEEOS 0x200000 TA 0xc00000 SHM 0x200000
++ *
++ * which is 14 MB in total. Without this reservation Linux is free to
++ * allocate over it.
++ */
++&{/} {
++	firmware {
++		optee {
++			compatible = "linaro,optee-tz";
++			method = "smc";
+ 		};
+ 	};
++
++	reserved-memory {
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		optee@48400000 {
++			reg = <0x0 0x48400000 0x0 0xe00000>;
++			no-map;
++		};
++	};
+ };

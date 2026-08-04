@@ -1,0 +1,197 @@
+From 7867bf5a8e2d14a28ffd95b28bb1bf7ef75e54b2 Mon Sep 17 00:00:00 2001
+From: Isaiah <isaiahdw@gmail.com>
+Date: Tue, 4 Aug 2026 16:01:29 -0700
+Subject: [PATCH] plat-rockchip: rk3576: seed the PRNG from the hardware TRNG
+
+Without a platform hw_get_random_bytes(), rk3576 falls back to OP-TEE's weak
+default seeding, which the comment on it describes as "an easily predictable
+timestamp value ... not suitable for a secure environment". Every key the
+secure world derives inherits that, so a TRNG failure is treated as fatal
+rather than degrading quietly.
+
+Drives RKRNG, the block the vendor and mainline device trees both carry as
+rng@2a410000. The register sequence matches the mainline rockchip-rng driver's
+rk3576 path and was checked against hardware from the U-Boot prompt first:
+requesting through CTRL raises TRNG_RDY in STATE and yields 32 fresh bytes at
+DATA0, differing on every request.
+
+This is the non-secure instance. A secure one exists - the CRU defines both
+HCLK_TRNG_NS and HCLK_TRNG_S - but no public source gives its base and a wrong
+MMIO base external-aborts rather than failing gracefully. Seeding runs during
+core init, before any normal-world software beyond TF-A and U-Boot SPL, which
+bounds what sharing the block exposes.
+
+Follows the rk3588 plat_init_soft_prng() added in commit for that platform,
+with a larger seed: RKRNG has no published SP 800-90B assessment to size it
+from, so 64 bytes gives 256 bits even at 4 bits/byte.
+---
+ core/arch/arm/plat-rockchip/platform_config.h |  15 +++
+ core/arch/arm/plat-rockchip/platform_rk3576.c | 107 ++++++++++++++++++
+ 2 files changed, 122 insertions(+)
+
+diff --git a/core/arch/arm/plat-rockchip/platform_config.h b/core/arch/arm/plat-rockchip/platform_config.h
+index ce4c091..b7f8b38 100644
+--- a/core/arch/arm/plat-rockchip/platform_config.h
++++ b/core/arch/arm/plat-rockchip/platform_config.h
+@@ -216,6 +216,21 @@
+ #define OTP_S_BASE		0x2a480000
+ #define OTP_S_SIZE		SIZE_K(64)
+ 
++/*
++ * RKRNG, the non-secure instance. A secure one exists - the CRU has both
++ * HCLK_TRNG_NS and HCLK_TRNG_S - but no public source gives its base, and a
++ * wrong MMIO base external-aborts and resets the board rather than failing
++ * gracefully. This one is in the vendor and mainline device trees as
++ * rng@2a410000, so it is the address that can be confirmed.
++ *
++ * Only read while seeding, during OP-TEE core init, which is before any
++ * normal-world software beyond TF-A and U-Boot SPL is running. That bounds
++ * the exposure of sharing the block, and has to be revisited before a key
++ * derived from it is fused into OTP.
++ */
++#define TRNG_NS_BASE		0x2a410000
++#define TRNG_NS_SIZE		SIZE_K(4)
++
+ /* Word index of the HUK inside the secure OTP. Unverified on RK3576: this is
+  * the RK3588 value, and no Rockchip source seen so far states it for RK3576.
+  * Only ever read here - see platform_rk3576.c - so a wrong index yields a
+diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
+index b54c7ae..7c3503d 100644
+--- a/core/arch/arm/plat-rockchip/platform_rk3576.c
++++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <common.h>
++#include <crypto/crypto.h>
+ #include <drivers/rockchip_otp.h>
+ #include <io.h>
+ #include <kernel/mutex.h>
+@@ -15,6 +16,7 @@
+ #include <stdlib_ext.h>
+ #include <string.h>
+ #include <string_ext.h>
++#include <tee/tee_cryp_utl.h>
+ #include <trace.h>
+ #include <util.h>
+ 
+@@ -27,7 +29,33 @@
+ #define RG_MAP_SECURE(top_mb, base_mb) \
+ 	(((((top_mb) - 1) & 0x7fff) << 16) | ((base_mb) & 0x7fff))
+ 
++/*
++ * RKRNG. Writes to CTRL are hiword-masked: the enable goes in the low half and
++ * the same bit in the high half selects which bits the write applies to.
++ * A request produces RKRNG_READ_LEN bytes at DATA0, flagged by TRNG_RDY in
++ * STATE, which is then cleared by writing the bit back.
++ */
++#define RKRNG_CTRL		0x0010
++#define RKRNG_CTRL_REQ_TRNG	BIT(4)
++#define RKRNG_STATE		0x0014
++#define RKRNG_STATE_TRNG_RDY	BIT(4)
++#define RKRNG_DATA0		0x0050
++#define RKRNG_READ_LEN		32
++
++#define RKRNG_POLL_PERIOD_US	0
++#define RKRNG_POLL_TIMEOUT_US	10000
++
++/*
++ * Seed material for the software PRNG. RK3588 gathers 48 bytes on the strength
++ * of an SP 800-90B assessment putting its TRNG at 6.6556 bits/byte worst case.
++ * RKRNG is a different block and no such assessment is public, so this is a
++ * conservative choice rather than a derived one: 64 bytes yields 256 bits even
++ * at 4 bits/byte.
++ */
++#define TRNG_SEED_LEN		64
++
+ register_phys_mem_pgdir(MEM_AREA_IO_SEC, SYS_SGRF_FW_BASE, SYS_SGRF_FW_SIZE);
++register_phys_mem_pgdir(MEM_AREA_IO_SEC, TRNG_NS_BASE, TRNG_NS_SIZE);
+ 
+ int platform_secure_ddr_region(int rgn, paddr_t st, size_t sz)
+ {
+@@ -55,6 +83,85 @@ int platform_secure_ddr_region(int rgn, paddr_t st, size_t sz)
+ 	return 0;
+ }
+ 
++static struct mutex trng_mutex = MUTEX_INITIALIZER;
++
++TEE_Result hw_get_random_bytes(void *buf, size_t blen)
++{
++	vaddr_t base = (vaddr_t)phys_to_virt_io(TRNG_NS_BASE, TRNG_NS_SIZE);
++	uint8_t block[RKRNG_READ_LEN] = { };
++	TEE_Result res = TEE_SUCCESS;
++	size_t remaining = blen;
++	size_t copy_len = 0;
++	uint32_t val = 0;
++	size_t i = 0;
++
++	if (!base)
++		panic("TRNG_NS base not mapped");
++
++	mutex_lock(&trng_mutex);
++
++	while (remaining > 0) {
++		io_write32(base + RKRNG_CTRL,
++			   SHIFT_U32(RKRNG_CTRL_REQ_TRNG, 16) |
++			   RKRNG_CTRL_REQ_TRNG);
++
++		res = IO_READ32_POLL_TIMEOUT(base + RKRNG_STATE, val,
++					     val & RKRNG_STATE_TRNG_RDY,
++					     RKRNG_POLL_PERIOD_US,
++					     RKRNG_POLL_TIMEOUT_US);
++		if (res) {
++			res = TEE_ERROR_BUSY;
++			goto out;
++		}
++
++		io_write32(base + RKRNG_STATE, RKRNG_STATE_TRNG_RDY);
++
++		for (i = 0; i < RKRNG_READ_LEN; i += sizeof(uint32_t)) {
++			val = io_read32(base + RKRNG_DATA0 + i);
++			memcpy(block + i, &val, sizeof(val));
++		}
++
++		copy_len = MIN(remaining, sizeof(block));
++		memcpy((uint8_t *)buf + (blen - remaining), block, copy_len);
++		remaining -= copy_len;
++	}
++
++out:
++	memzero_explicit(block, sizeof(block));
++	memzero_explicit(&val, sizeof(val));
++	mutex_unlock(&trng_mutex);
++
++	return res;
++}
++
++#ifdef CFG_WITH_SOFTWARE_PRNG
++/*
++ * Without this the weak default seeds the PRNG from a boot timestamp, which
++ * OP-TEE itself describes as easily predictable. Every key the secure world
++ * derives would inherit that, so a TRNG that cannot be read is treated as
++ * fatal rather than quietly degraded.
++ */
++void plat_init_soft_prng(void)
++{
++	uint8_t seed[TRNG_SEED_LEN] = { };
++	TEE_Result res = TEE_SUCCESS;
++
++	res = hw_get_random_bytes(seed, sizeof(seed));
++	if (res) {
++		EMSG("RKRNG unavailable (%#"PRIx32")", res);
++		panic("Refusing to seed the PRNG from a predictable source");
++	}
++
++	res = crypto_rng_init(seed, sizeof(seed));
++	memzero_explicit(seed, sizeof(seed));
++	if (res)
++		panic("Failed to seed the PRNG");
++
++	IMSG("PRNG seeded with %u bytes from the hardware TRNG",
++	     TRNG_SEED_LEN);
++}
++#endif /* CFG_WITH_SOFTWARE_PRNG */
++
+ static struct mutex huk_mutex = MUTEX_INITIALIZER;
+ static struct tee_hw_unique_key *huk;
+ 

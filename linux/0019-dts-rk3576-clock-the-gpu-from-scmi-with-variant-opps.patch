@@ -40,12 +40,17 @@ dtsi, so a label defined only by one board's dts would not resolve when
 any
 other RK3576 board is built.
 
-The base part's voltages become the highest the vendor lists for each
-rate.
-The vendor picks one of eleven per-OPP voltages from a runtime PVTPLL
-measurement, which is not reimplemented here, so the table has to be safe
-for
-the slowest silicon rather than tuned to one die.
+The base part's voltages are left as they are. They already match the
+worst-case column of the vendor's own table, read from a running BSP
+kernel: 700000 up to 600 MHz, 725000 at 700, 775000 at 800 and 825000 at
+900, none of which the vendor exceeds at any grade. The vendor narrows
+these per die, picking one of five sets (L0-L4) from a runtime PVTPLL
+measurement. That is not reimplemented here, so the worst-case column
+stands for every part.
+
+The per-variant entries below keep their own higher voltages. The vendor
+publishes no per-variant GPU table, so there is nothing to check them
+against, and they err upwards.
 
 Drop the 950 MHz OPP. BL31's rate table has no 950 MHz entry, so the
 request
@@ -215,50 +220,43 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		opp-300000000 {
 +			opp-supported-hw = <0xf9 0xffff>;
  			opp-hz = /bits/ 64 <300000000>;
--			opp-microvolt = <700000 700000 850000>;
-+			opp-microvolt = <712500 712500 875000>;
+ 			opp-microvolt = <700000 700000 850000>;
  		};
  
  		opp-400000000 {
 +			opp-supported-hw = <0xf9 0xffff>;
  			opp-hz = /bits/ 64 <400000000>;
--			opp-microvolt = <700000 700000 850000>;
-+			opp-microvolt = <712500 712500 875000>;
+ 			opp-microvolt = <700000 700000 850000>;
  		};
  
  		opp-500000000 {
 +			opp-supported-hw = <0xf9 0xffff>;
  			opp-hz = /bits/ 64 <500000000>;
--			opp-microvolt = <700000 700000 850000>;
-+			opp-microvolt = <712500 712500 875000>;
+ 			opp-microvolt = <700000 700000 850000>;
  		};
  
  		opp-600000000 {
 +			opp-supported-hw = <0xf9 0xffff>;
  			opp-hz = /bits/ 64 <600000000>;
--			opp-microvolt = <700000 700000 850000>;
-+			opp-microvolt = <712500 712500 875000>;
+ 			opp-microvolt = <700000 700000 850000>;
  		};
  
  		opp-700000000 {
 +			opp-supported-hw = <0xf9 0xffff>;
  			opp-hz = /bits/ 64 <700000000>;
--			opp-microvolt = <725000 725000 850000>;
-+			opp-microvolt = <750000 750000 875000>;
+ 			opp-microvolt = <725000 725000 850000>;
  		};
  
  		opp-800000000 {
 +			opp-supported-hw = <0xf1 0xffff>;
  			opp-hz = /bits/ 64 <800000000>;
--			opp-microvolt = <775000 775000 850000>;
-+			opp-microvolt = <812500 812500 875000>;
+ 			opp-microvolt = <775000 775000 850000>;
  		};
  
  		opp-900000000 {
 +			opp-supported-hw = <0xf1 0xffff>;
  			opp-hz = /bits/ 64 <900000000>;
--			opp-microvolt = <825000 825000 850000>;
-+			opp-microvolt = <875000 875000 875000>;
+ 			opp-microvolt = <825000 825000 850000>;
  		};
  
 -		opp-950000000 {

@@ -20,9 +20,24 @@ NPU, HDMI console, watchdog, RTC, and audio devices.
 Everything lives on the soldered eMMC. The RK3576 boot ROM on this board
 (no SPI NOR fitted) loads U-Boot directly from the eMMC at sector 64;
 fwup's factory `complete` task writes the bootloader there as part of the
-disk image, and upgrades never touch it. The boot ROM also boots from the
-microSD slot, so the same fwup image written to an SD card is a
-no-special-tools bring-up and recovery path.
+disk image, and upgrades never touch it.
+
+The boot ROM's order is fixed and not configurable: SPI NOR, then eMMC, then
+microSD, then maskrom. With a valid bootloader on the eMMC the card is never
+reached - verified on this board, where a bootable SD was ignored in favour of
+the eMMC. A card is a bring-up and recovery path only when the eMMC has no
+valid loader at sector 64, which is also what makes maskrom the real recovery
+mechanism here:
+
+```sh
+# board in maskrom, USB-C on the OTG port
+fwup -a -d nerves.img -i firmware.fw -t complete   # raw disk image
+rkdeveloptool db rk3576_spl_loader_v1.09.108.bin
+rkdeveloptool wl 0 nerves.img
+```
+
+That restores a board with a blank or broken eMMC without a card or a running
+system.
 
 ```
 RK3576 boot ROM
@@ -116,7 +131,7 @@ Verified on a Sige5 v1.2, 2026-08-01.
 | OTA updates (`mix upload`) | Yes | Delta updates supported (fwup >= 1.12 on device); validation + automatic revert verified |
 | Ethernet x2 | Yes | gmac0 + gmac1, RTL8211F each. `eth0` verified with DHCP + internet; `eth1` detected but not tested with a cable |
 | WiFi (onboard, board v1.2+) | Yes | BCM43752 (AP6275S) on SDIO via in-kernel brcmfmac; firmware from `package/brcmfmac43752-firmware`. Verified connected with DHCP. v1.0/1.1 boards (RTL8852BS) have no mainline driver |
-| microSD boot | Untested | Boot ROM path; the same image should work for bring-up/recovery |
+| microSD boot | Not reachable with eMMC populated | The boot ROM checks eMMC before microSD and the order is fixed, so a card is only booted when the eMMC has no valid loader. Verified: a bootable card was ignored. Use maskrom for recovery |
 | Bluetooth | No | uart4 is deliberately disabled in the mainline dts; needs a serdev node + bring-up |
 | HDMI display + console | Yes | VOP + dw-hdmi-qp, framebuffer console verified on a display. No GL/EGL userspace yet (see GPU row) |
 | GPU (Mali G52 MC3) | Yes | Kernel panfrost + Mesa (OpenGL ES 3.1, EGL/GBM, no X11/Wayland); kmscube runs vsync-locked at 60 fps on HDMI. devfreq drives 300-900 MHz off BL31's PVTPLL over SCMI (see GPU). Mesa is built without the LLVM draw module and the orphaned libLLVM is pruned from the image (see external.mk and post-build.sh), so the GL stack costs ~18 MB |

@@ -113,19 +113,25 @@ The rest is not built yet. What it needs:
   `RK3576TRUST.ini`'s `0x08400000` and specifically not upstream OP-TEE's
   `0x70000000`. `0x70000000` is inside DRAM; `0x08400000` is not.
 
-  Why Rockchip's ini carries that number is unresolved. The likely explanation
-  is that their loader treats it as an offset from the DRAM base rather than an
-  absolute address - it is the same value RK3588 uses, and RK3588's DRAM starts
-  at 0. Their U-Boot computes the region at runtime (`param_parse_optee_mem()`
-  reading `ATAG_TOS_MEM`) rather than trusting the ini, so the question never
-  arises downstream.
+  **The ini value is an offset, not an address.** Rockchip's own
+  `arch/arm/mach-rockchip/fit_args.sh` says so outright:
 
-  Before trying again, establish where the blob actually expects to run.
-  Rockchip's U-Boot in the vendor SDK is the place to look, since it is what
-  loads this blob successfully. Guessing `0x40200000 + 0x08400000` or reusing
-  upstream's `0x70000000` are both speculation until something confirms which
-  address the binary is linked for - it is raw position-dependent code, not an
-  ELF, so it will only run where it was built to run.
+  ```sh
+  -t)
+          TEE_LOAD_ADDR=$2
+          # Compatible leagcy: Offset
+          if ((TEE_LOAD_ADDR < DRAM_BASE));  then
+                  TEE_LOAD_ADDR="0x"$(echo "obase=16;$((DRAM_BASE+$2))"|bc)
+  ```
+
+  Anything below `DRAM_BASE` gets the base added. With
+  `CONFIG_SYS_SDRAM_BASE = 0x40000000` for RK3576, the real load address is
+
+      0x40000000 + 0x08400000 = 0x48400000
+
+  which is inside RAM. `BL32_ADDR` in `scripts/build-uboot.sh` is now that
+  value. Do not take an `ADDR` out of a Rockchip trust ini literally without
+  checking it against the DRAM base first.
 
 - **Then reserve the memory**, or Linux allocates over OP-TEE's DRAM and
   crashes.

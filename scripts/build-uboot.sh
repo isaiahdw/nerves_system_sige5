@@ -50,7 +50,19 @@ BL31_ELF="bin/rk35/rk3576_bl31_v1.24.elf"
 # publish no reservation, and Linux will otherwise allocate over OP-TEE's
 # DRAM and crash.
 BL32_BIN="bin/rk35/rk3576_bl32_v1.08.bin"
-BL32_ADDR="0x08400000"   # [BL32_OPTION] ADDR in RKTRUST/RK3576TRUST.ini
+# DRAM base (0x40000000, CONFIG_SYS_SDRAM_BASE) plus the 0x8400000 that
+# RKTRUST/RK3576TRUST.ini gives as [BL32_OPTION] ADDR. That value is an
+# offset, not an address: Rockchip's own fit_args.sh adds the base to it,
+#
+#   -t) TEE_LOAD_ADDR=$2
+#       # Compatible leagcy: Offset
+#       if ((TEE_LOAD_ADDR < DRAM_BASE)); then
+#               TEE_LOAD_ADDR="0x"$(echo "obase=16;$((DRAM_BASE+$2))"|bc)
+#
+# Taking it literally puts the blob below the start of RAM - this board's
+# System RAM begins at 0x40200000 - and SPL hangs mid-FIT trying to copy the
+# TEE there, after verifying u-boot, atf-2 and atf-3 and before BL31 runs.
+BL32_ADDR="0x48400000"
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 

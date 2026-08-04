@@ -118,3 +118,95 @@ Reading an unconfirmed index remains the more insidious failure. A read that
 lands on non-zero, non-secret data would be accepted as a key and secure
 storage would appear to work while protecting nothing - `0x008` is a config
 word and `0x1c8` mirrors it, and both would pass any "is it non-zero" check.
+
+## Is the secure OTP actually secret?
+
+Worth establishing before considering putting a key in it. U-Boot runs
+non-secure, after TF-A, so it can be used to ask directly. Reading the OTP_S
+controller from the U-Boot prompt:
+
+    => md.l 0x2a480000 4
+    "Synchronous Abort" handler, esr 0x96000010, far 0x2a480000
+    ... Resetting CPU ...
+
+External abort on the first access - the normal world cannot reach the secure
+OTP controller at all, let alone drive a read sequence. So the region is
+genuinely firewalled and is a legitimate place for per-device key material.
+(`esr 0x96000010` is a data abort, external, on a translation-table-clean
+address; the board resets and comes back normally.)
+
+The normal-world OTP at `0x2a580000` is the opposite: fully readable by any
+process, which is where the chip ID and serial live.
+
+## Writes are permanent and one-way
+
+`rockchip_otp_write_secure()` makes the fuse semantics explicit:
+
+    if (~*value & old_val) { EMSG("OTP_S Program fail"); return TEE_ERROR_GENERIC; }
+    new_val = *value & ~old_val;   /* only 0 -> 1 */
+
+Bits only ever go 0 to 1. A word cannot be rewritten, and a second write at the
+same index only succeeds if the new value's bits are a superset of what is
+already there. There is no erase.
+
+The failure modes of a wrong write, worst first:
+
+- Setting bits in a secure-boot control word. RK3588 keeps
+  `SECURE_BOOT_STATUS` at index `0x8` with an enable pattern of `0x00ff`, and
+  RK3576 has non-zero data at `0x008`. If a stray write turned secure boot on
+  while the RSA hash area is still blank, the boot ROM would require a signed
+  image it has no key to verify. That is unrecoverable - maskrom also requires
+  signed loaders once secure boot is on. This is reasoned from the RK3588
+  layout, not verified on RK3576, and it is the reason not to write at a
+  guessed index.
+- Burning a low-entropy key (below). Permanent, and silent.
+- Burning at an index nothing else uses. Harmless to us, since the same build
+  reads and writes the same index, but it may collide with what Rockchip's own
+  BL32 expects.
+- Writing where bits are already set. Refused by the driver - a safe failure.
+
+## What we do not have: entropy
+
+RK3588's port generates its HUK with `hw_get_random_bytes()`, backed by a
+secure TRNG at `TRNG_S_BASE`. For RK3576:
+
+- there is no `TRNG_S_BASE`, in OP-TEE's `platform_config.h` or in TF-A's
+  `rk3576_def.h`, which does define `OTP_S_BASE`, `KEYLADDER_BASE` and
+  `CRYPTO_S_BASE`
+- `hw_get_random_bytes()` is implemented only in `platform_rk3588.c`
+- the only Rockchip driver in `core/drivers` is `rockchip_otp.c`
+
+So `CFG_WITH_SOFTWARE_PRNG` (default `y`) applies, and its seeding is OP-TEE's
+weak default:
+
+    /*
+     * Override this in your platform code. This default implementation only
+     * seeds the random number generator from an easily predictable timestamp
+     * value or a constant value. It is not suitable for a secure environment.
+     */
+
+A key generated from that and then fused would be permanently weak, and would
+look perfectly healthy from the outside.
+
+The silicon does have a TRNG - `rng@2a410000`, `compatible = "rockchip,rkrng"`
+in the vendor device tree. The gap is that nothing in the secure world drives
+it. Wiring that up, and checking its output on hardware, has to come before any
+burn.
+
+## Rockchip's own model
+
+From rkbin's RK3576 BL32 release notes, the vendor design is not a raw HUK at a
+fixed index:
+
+- v1.04 "Supports reading and writing OTP data for Non Protected OEM Zone"
+- v1.04 "Support software TA encryption key, customers can use TA encryption
+  function without burning the key"
+- v1.06 "Add OEM OTP KEY hmac support for user ta"
+- v1.07 "Support deriving CMAC KDF keys from OEM OTP KEY"
+- v1.05 "check whether the rpmb key has been burned before changing security
+  level"
+
+An OEM key plus a key ladder (`KEYLADDER_BASE 0x2a420000`), with a Protected
+OEM Zone that only TAs can reach, and an explicit option that avoids burning
+anything. Key IDs resolve inside the blob, so none of the indices are public.
+

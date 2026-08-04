@@ -21,10 +21,21 @@
 set -e
 
 UBOOT_VERSION="v2026.01"
-RKBIN_COMMIT="ecb4fcbe954edf38b3ae037d5de6d9f5bccf81f4"
-DDR_BIN="bin/rk35/rk3576_ddr_lp4_2112MHz_lp5_2736MHz_v1.12.bin"
-BL31_ELF="bin/rk35/rk3576_bl31_v1.24.elf"
-# No BL32. Rockchip's RK3576TRUST.ini loads rk3576_bl32_v1.08.bin (OP-TEE)
+# rkbin source. rockchip-linux/rkbin is the official repo but has not been
+# updated since 2026-06-11 and still ships BL32 v1.08, whose OP-TEE (3.13)
+# has no PKCS#11 TA - probed on hardware, TEEC_OpenSession on
+# fd02c9da-306c-48c7-a49c-bbd827ae86ee returns ITEM_NOT_FOUND. This fork
+# carries a later Rockchip drop: BL32 v1.12, whose changelog fixes PKCS#11
+# attribute handling (CKA_PUBLIC_KEY_INFO, CKA_SUBJECT), so the TA is there.
+#
+# It is third-party bytes running at S-EL1, which is a real trust step down
+# from the official repo. Pinned by commit so the build is reproducible, and
+# worth re-pointing at rockchip-linux/rkbin once it publishes v1.12.
+RKBIN_REPO="https://github.com/flipperdevices/rkbin.git"
+RKBIN_COMMIT="2e2961b363274470d8d805985af0dc1915e7d147"
+DDR_BIN="bin/rk35/rk3576_ddr_lp4_2112MHz_lp5_2736MHz_v1.13.bin"
+BL31_ELF="bin/rk35/rk3576_bl31_v1.25.elf"
+# No BL32. Rockchip's RK3576TRUST.ini loads rk3576_bl32 (OP-TEE)
 # next to BL31. Nothing here needs it: the NPU hangs that were once blamed
 # on its absence turned out to be PVTPLL state not surviving a power domain
 # cycle, fixed in the driver (see package/rknpu-driver/0008).
@@ -49,7 +60,7 @@ BL31_ELF="bin/rk35/rk3576_bl31_v1.24.elf"
 # kernel needs a reserved-memory node covering BL32_ADDR - rkbin blobs
 # publish no reservation, and Linux will otherwise allocate over OP-TEE's
 # DRAM and crash.
-BL32_BIN="bin/rk35/rk3576_bl32_v1.08.bin"
+BL32_BIN="bin/rk35/rk3576_bl32_v1.12.bin"
 # DRAM base (0x40000000, CONFIG_SYS_SDRAM_BASE) plus the 0x8400000 that
 # RKTRUST/RK3576TRUST.ini gives as [BL32_OPTION] ADDR. That value is an
 # offset, not an address: Rockchip's own fit_args.sh adds the base to it,
@@ -75,7 +86,10 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git make gcc \
     libgnutls28-dev uuid-dev >/dev/null
 
 git clone --depth 1 --branch $UBOOT_VERSION https://source.denx.de/u-boot/u-boot.git /u-boot
-git clone https://github.com/rockchip-linux/rkbin.git /rkbin
+# Partial clone. rkbin is a multi-GB binary repo and a full history download
+# takes over an hour; blobs are fetched on demand at checkout instead, which
+# pulls only the handful this build actually reads.
+git clone --filter=blob:none $RKBIN_REPO /rkbin
 git -C /rkbin checkout $RKBIN_COMMIT
 
 cd /u-boot

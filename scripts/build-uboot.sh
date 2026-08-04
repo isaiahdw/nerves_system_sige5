@@ -187,6 +187,13 @@ make -j\$(nproc) CROSS_COMPILE=aarch64-linux-gnu-
 # rename, on purpose.
 if [ '${USE_OPENSOURCE_TEE:-0}' = 1 ]; then
     cp u-boot-rockchip.bin /out/u-boot-rockchip-ostee.bin
+    # The PKCS#11 TA is a filesystem TA, not an early one: OP-TEE loads it
+    # through tee-supplicant from /lib/optee_armtz. It is signed with the key
+    # the core was built with - ours, on this path - so it will be trusted,
+    # unlike anything we could sign for Rockchip's blob. Export it so the
+    # rootfs can install it.
+    mkdir -p /out/optee-ta
+    cp /optee_os/out/arm-plat-rockchip/export-ta_arm64/ta/*.ta /out/optee-ta/
 elif [ '${WITH_BL32:-0}' = 1 ]; then
     cp u-boot-rockchip.bin /out/u-boot-rockchip-bl32.bin
 else

@@ -92,10 +92,43 @@ binary with an `optee_v1_header` and the blob has neither.
 
 The rest is not built yet. What it needs:
 
-- **Reserve the memory**, or Linux allocates over OP-TEE's DRAM and crashes.
-  The node has to cover `0x08400000`, the address in `RK3576TRUST.ini`. Do not
-  copy the number out of upstream OP-TEE: its rk3576 flavor puts TZDRAM at
-  `0x70000000`, nowhere near where this blob loads.
+- **Find the right load address first.** `WITH_BL32=1` was built and flashed,
+  and it does not boot. SPL verifies `u-boot`, `atf-2` and `atf-3` - the first
+  three entries of `loadables` - and hangs on the fourth, `tee-1`, before BL31
+  ever runs.
+
+  The reason is the address. The build script wraps the blob in an ELF at
+  `0x08400000`, the `[BL32_OPTION] ADDR` from `RKTRUST/RK3576TRUST.ini`, and on
+  this SoC that is not memory:
+
+  ```
+  /proc/iomem:  40200000-23fffffff : System RAM
+  vendor dts:   reg = <0x00 0x40200000 0x01 0xffe00000>
+  ```
+
+  DRAM begins at `0x40200000`. `0x08400000` is roughly 0.9 GB below it, so SPL
+  hangs copying 440 KB of TEE into nothing.
+
+  An earlier version of this section had it backwards: it said to use
+  `RK3576TRUST.ini`'s `0x08400000` and specifically not upstream OP-TEE's
+  `0x70000000`. `0x70000000` is inside DRAM; `0x08400000` is not.
+
+  Why Rockchip's ini carries that number is unresolved. The likely explanation
+  is that their loader treats it as an offset from the DRAM base rather than an
+  absolute address - it is the same value RK3588 uses, and RK3588's DRAM starts
+  at 0. Their U-Boot computes the region at runtime (`param_parse_optee_mem()`
+  reading `ATAG_TOS_MEM`) rather than trusting the ini, so the question never
+  arises downstream.
+
+  Before trying again, establish where the blob actually expects to run.
+  Rockchip's U-Boot in the vendor SDK is the place to look, since it is what
+  loads this blob successfully. Guessing `0x40200000 + 0x08400000` or reusing
+  upstream's `0x70000000` are both speculation until something confirms which
+  address the binary is linked for - it is raw position-dependent code, not an
+  ELF, so it will only run where it was built to run.
+
+- **Then reserve the memory**, or Linux allocates over OP-TEE's DRAM and
+  crashes.
 
   Neither automatic mechanism works here. Rockchip's own U-Boot learns the
   region at runtime - `param_parse_optee_mem()` reads `ATAG_TOS_MEM` left by

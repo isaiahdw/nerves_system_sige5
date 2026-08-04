@@ -92,21 +92,75 @@ binary with an `optee_v1_header` and the blob has neither.
 
 The rest is not built yet. What it needs:
 
-- **Reserve the memory**, or Linux allocates over OP-TEE's DRAM and crashes -
-  rkbin's blob publishes no reservation. The node has to cover `0x08400000`,
-  the address in `RK3576TRUST.ini`. Do not copy the number out of upstream
-  OP-TEE: its rk3576 flavor puts TZDRAM at `0x70000000`, nowhere near where
-  this blob loads. The two are not interchangeable in either direction.
-- **Userspace**, both already packaged: `BR2_PACKAGE_OPTEE_CLIENT` for
-  `tee-supplicant` (RPMB access goes through it), and
-  `BR2_PACKAGE_OPTEE_TEST` for `xtest`, which is how you prove secure
-  storage actually works rather than assuming.
+- **Reserve the memory**, or Linux allocates over OP-TEE's DRAM and crashes.
+  The node has to cover `0x08400000`, the address in `RK3576TRUST.ini`. Do not
+  copy the number out of upstream OP-TEE: its rk3576 flavor puts TZDRAM at
+  `0x70000000`, nowhere near where this blob loads.
+
+  Neither automatic mechanism works here. Rockchip's own U-Boot learns the
+  region at runtime - `param_parse_optee_mem()` reads `ATAG_TOS_MEM` left by
+  the preloader, then `bidram_reserve(MEM_OPTEE, ...)` - and none of that
+  ATAGS machinery exists in mainline U-Boot, which is what this system builds.
+  Mainline's generic path, `optee_copy_fdt_nodes()`, wants an
+  `optee_v1_header` on the binary, and this blob starts straight into AArch64
+  code with no header. So the reservation has to be **static in the dts**.
+
+  The **size** is not published anywhere: `RK3576TRUST.ini` gives only the load
+  address, and the vendor kernel dts has no reservation either (it carries the
+  `linaro,optee-tz` firmware node and nothing else - the reservation is
+  U-Boot's job downstream). Do not guess it from another Rockchip part. Read it
+  from OP-TEE itself: it prints its memory layout on the console as it starts,
+  so bring BL32 up once and take the numbers from that log.
+
+- **Userspace.** `BR2_PACKAGE_OPTEE_CLIENT` is enabled, giving
+  `tee-supplicant`. It is inert with no BL32 in the image.
+
+  `xtest` is **not** available: `BR2_PACKAGE_OPTEE_TEST` depends on
+  `BR2_TARGET_OPTEE_OS`, i.e. on buildroot building OP-TEE from source for its
+  TA dev kit, which contradicts using Rockchip's blob. Verification has to come
+  from whatever services the blob itself exposes.
+
+- **Find out what the blob will run.** This is the open question, and it
+  decides whether the plan above is even reachable. Sealing a key inside
+  OP-TEE normally means a Trusted Application, and TAs are signed - a blob will
+  only load TAs signed by a key it trusts. With Rockchip's prebuilt BL32 we do
+  not hold that key, so a TA we write ourselves may simply be refused.
+
+  The way round it is to use a service the blob already ships. If it includes
+  the standard PKCS#11 TA, `optee-client`'s `libckteec` gives key generation,
+  storage and signing over a normal PKCS#11 interface with no custom TA at
+  all - which is exactly what is wanted here. Enumerate the blob's TAs before
+  designing anything on top.
+
 - **Provision per device.** The RPMB key is written once and cannot be
   rewritten. Check first whether the factory already burned one - if it did
-  and you do not hold it, RPMB is unusable on that unit.
+  and you do not hold it, RPMB is unusable on that unit. Note Rockchip's own
+  U-Boot defaults to `CONFIG_OPTEE_ALWAYS_USE_SECURITY_PARTITION`, so the
+  vendor stack does not necessarily put secure storage in RPMB at all.
 
-The kernel side needs nothing: `CONFIG_OPTEE` is already in, which is why
-`/sys/bus/tee` exists on a running board with no `/dev/tee0` behind it.
+  **Do not reach for `mmc-utils` to answer that.** One
+  `mmc rpmb read-counter /dev/mmcblk0rpmb` on this board timed out and left the
+  eMMC controller wedged: every subsequent read failed with `EIO`, the rootfs
+  became unreadable, and it took a reboot to recover. Nothing was damaged - the
+  eMMC contents and the A/B slots were fine - but the box was useless until
+  restarted.
+
+  The likely reason is in the boot log: `mmc0: Command Queue Engine enabled`.
+  RPMB transfers require the controller to leave command-queue mode, and that
+  transition is a known way to hang CQHCI. Whatever the cause, the legacy
+  `/dev/mmcblk0rpmb` ioctl path is not safe here.
+
+  Use the kernel's RPMB subsystem instead. `CONFIG_RPMB` is enabled and
+  enumerates `/sys/class/rpmb/rpmb0`, and the OP-TEE driver binds to that, so
+  the secure world can reach RPMB without any legacy ioctl in the picture.
+  Whether the key is already programmed is best answered from OP-TEE once it
+  runs, not by poking the device from Linux.
+
+The kernel side is ready: `CONFIG_TEE` and `CONFIG_OPTEE` come from the arm64
+defconfig, which is why `/sys/bus/tee` exists on a running board with no
+`/dev/tee0` behind it. `CONFIG_RPMB` is enabled here too, so the OP-TEE driver
+can reach the replay-protected partition through the kernel's RPMB subsystem
+rather than proxying every frame through `tee-supplicant`.
 
 Use Rockchip's blob rather than building upstream OP-TEE, which looks like
 the cleaner option but is not. Upstream has a `plat-rockchip` rk3576, but it

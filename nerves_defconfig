@@ -117,3 +117,16 @@ BR2_PACKAGE_ALSA_UTILS_APLAY=y
 BR2_PACKAGE_ALSA_UTILS_AMIXER=y
 BR2_PACKAGE_ALSA_UTILS_ALSACTL=y
 BR2_PACKAGE_ALSA_UTILS_SPEAKER_TEST=y
+# Secure world userspace. tee-supplicant is the non-secure half OP-TEE calls
+# back into: it serves the secure world's storage and RPMB requests, so
+# nothing that keeps a key in OP-TEE works without it running.
+#
+# Harmless with no BL32 in the image, which is the default: /dev/tee0 never
+# appears, and the supplicant simply finds nothing to attach to. See the
+# secure-world section of the README.
+#
+# optee-test (xtest) is deliberately not enabled: it depends on
+# BR2_TARGET_OPTEE_OS, i.e. on buildroot building OP-TEE from source for the
+# TA dev kit. This system runs Rockchip's prebuilt BL32 instead, because that
+# is the one with real OTP backing behind tee_otp_get_hw_unique_key().
+BR2_PACKAGE_OPTEE_CLIENT=y

@@ -75,15 +75,37 @@ BL32_BIN="bin/rk35/rk3576_bl32_v1.12.bin"
 # TEE there, after verifying u-boot, atf-2 and atf-3 and before BL31 runs.
 BL32_ADDR="0x48400000"
 
+# USE_OPENSOURCE_TEE=1 replaces both Rockchip blobs with upstream: OP-TEE built
+# for PLATFORM=rockchip-rk3576, inside TF-A built with SPD=opteed. It is the
+# only combination that can give both a PKCS#11 TA and a per-device key -
+# Rockchip's BL32 has the OTP-backed HUK but no PKCS#11 (probed on hardware:
+# TEEC_OpenSession on the PKCS#11 UUID returns ITEM_NOT_FOUND on v1.08 and
+# v1.12), while upstream has PKCS#11 but no HUK for this SoC until the patch
+# in optee/ is applied.
+#
+# Opt-in, and unset by default, because it swaps out BL31 as well. Every GPU
+# measurement in docs/research rests on Rockchip's BL31 owning the PVTPLL, and
+# upstream TF-A is a different implementation of that.
+#
+# The layout differs from the blob's: upstream puts TZDRAM at 0x70000000/32 MB
+# and SHM at 0x72000000/4 MB (plat-rockchip conf.mk), where the blob uses
+# 0x48400000 and 14 MB. The reserved-memory node in linux/0022 describes the
+# blob's; it has to change with this.
+OPTEE_GIT="https://github.com/OP-TEE/optee_os.git"
+OPTEE_COMMIT="5a53776"
+TFA_GIT="https://github.com/ARM-software/arm-trusted-firmware.git"
+TFA_BRANCH="master"
+
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-docker run --rm -v "$REPO_DIR/uboot":/out debian:bookworm bash -c "
+docker run --rm -v "$REPO_DIR/uboot":/out -v "$REPO_DIR/optee":/optee-patches \
+    debian:bookworm bash -c "
 set -e
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git make gcc \
     gcc-aarch64-linux-gnu bison flex libssl-dev bc python3 python3-dev \
     python3-setuptools python3-pyelftools swig device-tree-compiler \
-    libgnutls28-dev uuid-dev >/dev/null
+    libgnutls28-dev uuid-dev python3-cryptography >/dev/null
 
 git clone --depth 1 --branch $UBOOT_VERSION https://source.denx.de/u-boot/u-boot.git /u-boot
 # Partial clone. rkbin is a multi-GB binary repo and a full history download
@@ -92,13 +114,39 @@ git clone --depth 1 --branch $UBOOT_VERSION https://source.denx.de/u-boot/u-boot
 git clone --filter=blob:none $RKBIN_REPO /rkbin
 git -C /rkbin checkout $RKBIN_COMMIT
 
+if [ '${USE_OPENSOURCE_TEE:-0}' = 1 ]; then
+    # OP-TEE first: TF-A needs tee.bin to package as BL32.
+    git clone --filter=blob:none $OPTEE_GIT /optee_os
+    git -C /optee_os checkout $OPTEE_COMMIT
+    git -C /optee_os apply /optee-patches/*.patch
+    make -C /optee_os PLATFORM=rockchip-rk3576 \
+        CROSS_COMPILE64=aarch64-linux-gnu- \
+        CFG_USER_TA_TARGETS=ta_arm64 \
+        CFG_PKCS11_TA=y \
+        -j\$(nproc)
+
+    git clone --depth 1 --branch $TFA_BRANCH $TFA_GIT /tfa
+    make -C /tfa PLAT=rk3576 \
+        CROSS_COMPILE=aarch64-linux-gnu- \
+        SPD=opteed BL32=/optee_os/out/arm-plat-rockchip/core/tee.bin \
+        -j\$(nproc)
+fi
+
 cd /u-boot
 export ROCKCHIP_TPL=/rkbin/$DDR_BIN
-export BL31=/rkbin/$BL31_ELF
+if [ '${USE_OPENSOURCE_TEE:-0}' = 1 ]; then
+    export BL31=/tfa/build/rk3576/release/bl31/bl31.elf
+    export TEE=/optee_os/out/arm-plat-rockchip/core/tee.bin
+    aarch64-linux-gnu-readelf -h \$BL31 | head -3
+else
+    export BL31=/rkbin/$BL31_ELF
+fi
 
-if [ '${WITH_BL32:-0}' = 1 ]; then
+if [ '${WITH_BL32:-0}' = 1 ] && [ '${USE_OPENSOURCE_TEE:-0}' != 1 ]; then
     # Wrap the raw blob so binman will take it: objcopy it into an ELF whose
-    # single loadable segment sits at the address BL31 expects.
+    # single loadable segment sits at the address BL31 expects. Upstream
+    # OP-TEE needs none of this - its tee.bin already carries a header binman
+    # accepts - so this is skipped when USE_OPENSOURCE_TEE is set.
     cat > /tee.ld <<'LDEOF'
 OUTPUT_FORMAT(\"elf64-littleaarch64\", \"elf64-littleaarch64\", \"elf64-littleaarch64\")
 OUTPUT_ARCH(aarch64)
@@ -133,14 +181,23 @@ grep -E 'CONFIG_ENV_IS|CONFIG_ENV_OFFSET|CONFIG_ENV_SIZE|CONFIG_SYS_MMC_ENV_DEV'
 
 make -j\$(nproc) CROSS_COMPILE=aarch64-linux-gnu-
 
-if [ '${WITH_BL32:-0}' = 1 ]; then
-    # Deliberately not u-boot-rockchip.bin: fwup packages that name, and a
-    # bootloader carrying an untested secure world should not be picked up
-    # by simply having been built. Enabling it is a rename, on purpose.
+# Deliberately not u-boot-rockchip.bin for either secure-world build: fwup
+# packages that name, and a bootloader carrying an untested secure world
+# should not be picked up by simply having been built. Enabling one is a
+# rename, on purpose.
+if [ '${USE_OPENSOURCE_TEE:-0}' = 1 ]; then
+    cp u-boot-rockchip.bin /out/u-boot-rockchip-ostee.bin
+elif [ '${WITH_BL32:-0}' = 1 ]; then
     cp u-boot-rockchip.bin /out/u-boot-rockchip-bl32.bin
 else
     cp u-boot-rockchip.bin /out/
 fi
 "
 
-echo "=== done. Updated uboot/u-boot-rockchip.bin"
+if [ "${USE_OPENSOURCE_TEE:-0}" = 1 ]; then
+    echo "=== done. Wrote uboot/u-boot-rockchip-ostee.bin (upstream TF-A + OP-TEE)"
+elif [ "${WITH_BL32:-0}" = 1 ]; then
+    echo "=== done. Wrote uboot/u-boot-rockchip-bl32.bin (Rockchip BL31 + BL32)"
+else
+    echo "=== done. Updated uboot/u-boot-rockchip.bin"
+fi

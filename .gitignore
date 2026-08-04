@@ -6,3 +6,9 @@
 build.log
 /log/
 /archive.log
+
+# Experimental bootloaders from scripts/build-uboot.sh. u-boot-rockchip.bin is
+# tracked because fwup packages it; these two carry a secure world nothing has
+# qualified yet, and are rebuilt on demand.
+/uboot/u-boot-rockchip-bl32.bin
+/uboot/u-boot-rockchip-ostee.bin

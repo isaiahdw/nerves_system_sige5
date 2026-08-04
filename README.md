@@ -159,17 +159,52 @@ The rest is not built yet. What it needs:
   TA dev kit, which contradicts using Rockchip's blob. Verification has to come
   from whatever services the blob itself exposes.
 
-- **Find out what the blob will run.** This is the open question, and it
-  decides whether the plan above is even reachable. Sealing a key inside
-  OP-TEE normally means a Trusted Application, and TAs are signed - a blob will
-  only load TAs signed by a key it trusts. With Rockchip's prebuilt BL32 we do
-  not hold that key, so a TA we write ourselves may simply be refused.
+- **The blob has no PKCS#11 TA.** Measured, not assumed: `TEEC_OpenSession` on
+  `fd02c9da-306c-48c7-a49c-bbd827ae86ee` returns `ITEM_NOT_FOUND` on both BL32
+  v1.08 and v1.12. It is not a filesystem TA either - there is no
+  `/lib/optee_armtz` and no `.ta` anywhere, and rkbin ships a TA bundle for
+  rk3506 but none for rk3576. What the blob does answer to is its own
+  `rk otp PTA` and the device-enumeration PTA (though `PTA_CMD_GET_DEVICES`
+  itself is `NOT_IMPLEMENTED`).
 
-  The way round it is to use a service the blob already ships. If it includes
-  the standard PKCS#11 TA, `optee-client`'s `libckteec` gives key generation,
-  storage and signing over a normal PKCS#11 interface with no custom TA at
-  all - which is exactly what is wanted here. Enumerate the blob's TAs before
-  designing anything on top.
+  So the "use a service the blob already ships" route is closed, and writing a
+  TA needs Rockchip's signing key, which we do not have.
+
+## The open-source route, and what it still needs
+
+Flipper Devices ship an RK3576 product and their build scripts
+(`flipperdevices/flipperone-linux-build-scripts`, `build-uboot.sh`) show the
+wiring works:
+
+```sh
+make PLATFORM=rockchip-rk3576 CFG_USER_TA_TARGETS=ta_arm64   # OP-TEE/optee_os
+make PLAT=rk3576 BL32=out/arm-plat-rockchip/core/tee.bin SPD=opteed  # ARM TF-A
+```
+
+Upstream OP-TEE has both a `rockchip-rk3576` flavor (TZDRAM `0x70000000`,
+32 MB; SHM `0x72000000`, 4 MB - both inside DRAM) and the PKCS#11 TA. That is
+the half Rockchip's blob lacks.
+
+What it lacks in turn is the HUK. `platform_rk3576.c` upstream is 50 lines and
+defines only `platform_secure_ddr_region()` - no `tee_otp_get_hw_unique_key()`,
+so OP-TEE falls back to a constant compiled into public source, and any secure
+storage keyed on it is theatre.
+
+`platform_rk3588.c` does implement it, and the pieces look portable:
+
+- the OTP driver is generic (`core/drivers/rockchip_otp.c`), selected by
+  `CFG_ROCKCHIP_OTP` and pointed at a platform `OTP_S_BASE`/`OTP_S_SIZE`
+- rk3588's `read_huk()` is a short `rockchip_otp_read_secure()` call over four
+  words at `ROCKCHIP_OTP_HUK_INDEX`, with an all-zero check meaning "no HUK yet"
+
+So porting it is roughly: find RK3576's secure-OTP base and HUK index, add
+`OTP_S_BASE`/`OTP_S_SIZE` to `platform_config.h`, force `CFG_ROCKCHIP_OTP` in
+the rk3576 conf.mk stanza, and copy rk3588's HUK functions into
+`platform_rk3576.c`. Small in volume, but it is key-derivation code and wants
+care and review rather than a quick port.
+
+That is the only route seen so far that ends with **both** PKCS#11 and a real
+per-device key.
 
 - **Provision per device.** The RPMB key is written once and cannot be
   rewritten. Check first whether the factory already burned one - if it did

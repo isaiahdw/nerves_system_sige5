@@ -69,25 +69,52 @@ in `rk3576-gpu-clock-investigation.md`. It is a separate array from the secure
 one at `0x2a480000`, and everything in it is readable by any process on the
 board, so nothing here can serve as a HUK.
 
-## Reading
+## Second board: all three groups identical
 
-Nothing found is per-device secret material. The likely conclusion is that this
-part has no HUK burned at all, which agrees with how Rockchip's own stack
-treats it: `trusty_write_oem_huk` and `trusty_oem_otp_key_is_written` exist
-because the HUK is OEM-written, not factory-burned. On that reading the
-question stops being "which index" and becomes "do we burn one, and where".
+The same image, surveyed on a second Sige5:
 
-This is not yet proven. A per-device secret differs between boards and a config
-word does not, so the test is to run the same survey on a second board and
-compare the three hashes:
+| group | board 1 | board 2 |
+| --- | --- | --- |
+| `0x008..0x00b` | `0x9d164c95` | `0x9d164c95` |
+| `0x064..0x067` | `0x8f784b0d` | `0x8f784b0d` |
+| `0x1c8..0x1cb` | `0x9d164c95` | `0x9d164c95` |
 
-- `0x064` differs between boards - a per-device value exists, and the index
-  is found without writing anything.
-- all three identical - nothing per-device is present; the part is
-  unprovisioned.
+Nothing in the secure OTP varies between devices.
 
-Until that comparison exists, no index may be treated as the HUK. A wrong read
-that lands on non-zero, non-secret data is the dangerous outcome: secure
-storage would key on public data and appear to work. `0x008` is a config word
-and `0x1c8` mirrors it - both would look perfectly plausible to code that only
-checks for non-zero.
+### The dies really are different
+
+An all-identical result only means something if per-device data would have
+shown up had it existed, so the boards have to be shown to be distinct dies.
+U-Boot derives `cpuid#` from the normal-world OTP:
+
+    board 2  cpuid#         = 4e5937553300000000000000000e2612
+    board 1  NS OTP +0x0a  -> 4e5937553300000000000000000d0c12
+
+Same `NY7U3` lot prefix, different tail. Board 2's `serial#` and `ethaddr`
+(`35f37dba56be723b`, `1e:7f:8a:9a:62:c2`) are derived from that value.
+
+So per-device identity exists on these parts, lives in the normal-world OTP
+where any process can read it, and has no secret counterpart in the secure OTP.
+
+## Conclusion
+
+The RK3576 secure OTP ships blank apart from a config word and its mirror.
+There is no HUK to find, at `0x104` or anywhere else. This matches how
+Rockchip's own stack treats it - `trusty_write_oem_huk` and
+`trusty_oem_otp_key_is_written` exist because the HUK is OEM-written, not
+factory-burned.
+
+The question is therefore not which index to read but whether to burn one. That
+is a permanent, unrepeatable write, and the index is still not vendor-confirmed
+for this SoC, so `optee/0001` stays read-only until that is a deliberate
+decision.
+
+What the survey does settle is the risk of the write: `0x104` is empty on both
+boards, so burning there would not destroy existing OTP data. The remaining
+exposure is a collision with whatever Rockchip's own BL32 expects, which cannot
+be checked from outside the blob.
+
+Reading an unconfirmed index remains the more insidious failure. A read that
+lands on non-zero, non-secret data would be accepted as a key and secure
+storage would appear to work while protecting nothing - `0x008` is a config
+word and `0x1c8` mirrors it, and both would pass any "is it non-zero" check.

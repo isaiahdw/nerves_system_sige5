@@ -352,3 +352,69 @@ block and refusing unless the GPU is already awake -
 hangs the CPU. Read it while a load runs; poll, because the guard also
 refuses during a runtime-PM transition. It must release the reference and the
 mapping on the success path, and be gated on the RK3576 compatible.
+
+## Upstream TF-A gives the same clocks as Rockchip's BL31
+
+Every measurement above was taken with Rockchip's BL31 owning the PVTPLL. The
+`USE_OPENSOURCE_TEE=1` build replaces it with upstream TF-A, which is a
+different implementation of the same job, so none of it carried over on its
+own.
+
+It does carry over. Two lines of evidence.
+
+### The tables are the same
+
+`plat/rockchip/rk3576/scmi/rk3576_clk.c` in upstream TF-A holds
+`rk3576_gpu_pvtpll_table`, and Rockchip's BL31 holds the same table as data -
+`struct pvtpll_table` is 28 bytes (`rate`, `length`, `length_frac`,
+`length_low`, `length_low_frac`, `ring_sel`, `volt_sel_thr`), so it can be
+scanned straight out of the ELF. Both v1.20 and v1.25 agree with upstream at
+every rate:
+
+| rate | Rockchip BL31 | upstream TF-A |
+| --- | --- | --- |
+| 900 | 20 (`length_low` 19) | 20 |
+| 800 | 21 | 21 |
+| 700 | 21 | 21 |
+| 600 | 23 | 23 |
+| 500 | 32 | 32 |
+| 400 | 48 | 48 |
+| 300 | 63 | 63 |
+
+The only difference is `length_low = 19` at 900 MHz, and it is unreachable
+here: `clk_scmi_gpu_set_rate()` only consults it when `OPP_LENGTH_LOW`, which
+is `BIT(2)` of the requested rate, is set. Every rate in the OPP table is a
+multiple of 8, so bit 2 is always clear.
+
+### The hardware agrees
+
+Same board, same script, only the bootloader at sector 64 changed. Measured
+with panfrost fdinfo, `delta(drm-cycles-fragment) / delta(drm-engine-fragment)`:
+
+| target | Rockchip BL31 | upstream TF-A | again, upstream |
+| --- | --- | --- | --- |
+| 300 | 422.8 | 422.8 | 423.7 |
+| 400 | 502.7 | 506.5 | 503.7 |
+| 500 | 638.9 | 642.9 | 639.9 |
+| 600 | 765.0 | 769.0 | 766.2 |
+| 700 | 794.9 | 798.4 | 796.1 |
+| 800 | 794.9 | 797.9 | 796.0 |
+| 900 | 813.7 | 816.2 | 814.7 |
+
+The third column is a repeat on the same firmware, and it is there because the
+second column alone looked like a consistent `+3` to `+4 MHz` shift. Repeating
+gives a run-to-run spread of up to 3 MHz, which is the same size, and the
+repeat lands about 1 MHz from the Rockchip run rather than 4. So the shift is
+measurement spread, not the firmware.
+
+Note 700 and 800 measuring the same, on both firmwares, to within 0.1 MHz.
+That is the tables' most distinctive prediction - they share ring length 21 -
+and it is a fingerprint rather than a coincidence.
+
+### What this does not excuse
+
+The labels are still wrong, and the same on both firmwares. Requesting 300 MHz
+yields about 423, and 900 yields about 815. The usable span is roughly 423 to
+816 MHz across seven OPPs, two of which are the same operating point. That is
+the subject of the open question about what the OPP table should say; swapping
+the firmware neither caused it nor fixed it.

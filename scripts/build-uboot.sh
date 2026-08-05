@@ -35,62 +35,27 @@ RKBIN_REPO="https://github.com/flipperdevices/rkbin.git"
 RKBIN_COMMIT="2e2961b363274470d8d805985af0dc1915e7d147"
 DDR_BIN="bin/rk35/rk3576_ddr_lp4_2112MHz_lp5_2736MHz_v1.13.bin"
 BL31_ELF="bin/rk35/rk3576_bl31_v1.25.elf"
-# No BL32. Rockchip's RK3576TRUST.ini loads rk3576_bl32 (OP-TEE)
-# next to BL31. Nothing here needs it: the NPU hangs that were once blamed
-# on its absence turned out to be PVTPLL state not surviving a power domain
-# cycle, fixed in the driver (see package/rknpu-driver/0008).
-#
-# It is left out, not impossible. Two routes exist if a secure world is ever
-# wanted - for key storage, RPMB, or secure boot:
-#
-#   - Rockchip's blob has the useful security features (OEM OTP key, key
-#     ladder, RPMB). binman rejects it directly - that path takes an ELF, or
-#     a binary carrying an optee_v1_header, and rkbin's blob has neither - so
-#     WITH_BL32=1 below wraps it in an ELF at the RK3576TRUST.ini address.
-#   - Upstream optee_os does have a plat-rockchip rk3576 (platform_rk3576.c)
-#     and builds to an ELF, so it packages cleanly - but that file only sets
-#     up the DDR firewall. With no tee_otp_get_hw_unique_key() behind it,
-#     OP-TEE falls back to its built-in default HUK. RPMB derives its
-#     authentication key from that HUK, so secure storage would be keyed on a
-#     constant published in public source. Rockchip's blob is the one with
-#     real OTP backing, which is why WITH_BL32 uses it.
-#
-# WITH_BL32=1 is opt-in and unset by default: a secure world nothing has
-# tested yet has no business in a firmware image. Before shipping it, the
-# kernel needs a reserved-memory node covering BL32_ADDR - rkbin blobs
-# publish no reservation, and Linux will otherwise allocate over OP-TEE's
-# DRAM and crash.
-BL32_BIN="bin/rk35/rk3576_bl32_v1.12.bin"
-# DRAM base (0x40000000, CONFIG_SYS_SDRAM_BASE) plus the 0x8400000 that
-# RKTRUST/RK3576TRUST.ini gives as [BL32_OPTION] ADDR. That value is an
-# offset, not an address: Rockchip's own fit_args.sh adds the base to it,
-#
-#   -t) TEE_LOAD_ADDR=$2
-#       # Compatible leagcy: Offset
-#       if ((TEE_LOAD_ADDR < DRAM_BASE)); then
-#               TEE_LOAD_ADDR="0x"$(echo "obase=16;$((DRAM_BASE+$2))"|bc)
-#
-# Taking it literally puts the blob below the start of RAM - this board's
-# System RAM begins at 0x40200000 - and SPL hangs mid-FIT trying to copy the
-# TEE there, after verifying u-boot, atf-2 and atf-3 and before BL31 runs.
-BL32_ADDR="0x48400000"
+# No BL32 from rkbin. Rockchip's RK3576TRUST.ini loads rk3576_bl32 next to
+# BL31, and this used to be buildable with WITH_BL32=1, but there is no way to
+# use it: the blob ships no PKCS#11 TA (measured - TEEC_OpenSession returns
+# ITEM_NOT_FOUND on v1.08 and v1.12), is not a filesystem TA, and authoring one
+# needs Rockchip's signing key. See docs/research/rk3576-firmware-versions.md,
+# which also keeps the trust-ini load-address trap that route walked into.
 
 # USE_OPENSOURCE_TEE=1 replaces both Rockchip blobs with upstream: OP-TEE built
 # for PLATFORM=rockchip-rk3576, inside TF-A built with SPD=opteed. It is the
-# only combination that can give both a PKCS#11 TA and a per-device key -
-# Rockchip's BL32 has the OTP-backed HUK but no PKCS#11 (probed on hardware:
-# TEEC_OpenSession on the PKCS#11 UUID returns ITEM_NOT_FOUND on v1.08 and
-# v1.12), while upstream has PKCS#11 but no HUK for this SoC until the patch
-# in optee/ is applied.
+# only combination that gives both a PKCS#11 TA and a per-device key. Upstream
+# has PKCS#11 but no HUK for this SoC until the patches in optee/ are applied;
+# Rockchip's blob has the OTP-backed key machinery and no PKCS#11 to reach it
+# with, which is why it is not an option here.
 #
 # Opt-in, and unset by default, because it swaps out BL31 as well. Every GPU
 # measurement in docs/research rests on Rockchip's BL31 owning the PVTPLL, and
 # upstream TF-A is a different implementation of that.
 #
-# The layout differs from the blob's: upstream puts TZDRAM at 0x70000000/32 MB
-# and SHM at 0x72000000/4 MB (plat-rockchip conf.mk), where the blob uses
-# 0x48400000 and 14 MB. The reserved-memory node in linux/0022 describes the
-# blob's; it has to change with this.
+# Upstream puts TZDRAM at 0x70000000/32 MB and SHM at 0x72000000/4 MB
+# (plat-rockchip conf.mk). linux/0022 reserves those, and the 0x48400000 region
+# a Rockchip BL32 would have used, so one kernel boots either bootloader.
 
 # HUK_DRY_RUN=1 reports what fusing a HUK would write, and where, without
 # writing it - see optee/0008. The OTP write path has never executed on this
@@ -150,30 +115,6 @@ else
     export BL31=/rkbin/$BL31_ELF
 fi
 
-if [ '${WITH_BL32:-0}' = 1 ] && [ '${USE_OPENSOURCE_TEE:-0}' != 1 ]; then
-    # Wrap the raw blob so binman will take it: objcopy it into an ELF whose
-    # single loadable segment sits at the address BL31 expects. Upstream
-    # OP-TEE needs none of this - its tee.bin already carries a header binman
-    # accepts - so this is skipped when USE_OPENSOURCE_TEE is set.
-    cat > /tee.ld <<'LDEOF'
-OUTPUT_FORMAT(\"elf64-littleaarch64\", \"elf64-littleaarch64\", \"elf64-littleaarch64\")
-OUTPUT_ARCH(aarch64)
-ENTRY(_start)
-SECTIONS
-{
-	. = $BL32_ADDR;
-	_start = .;
-	.text : { *(.data) }
-}
-LDEOF
-    aarch64-linux-gnu-objcopy -B aarch64 -I binary -O elf64-littleaarch64 \\
-        --rename-section .data=.text,alloc,load,readonly,code,contents \\
-        /rkbin/$BL32_BIN /bl32.o
-    aarch64-linux-gnu-ld -T /tee.ld /bl32.o -o /tee.elf
-    aarch64-linux-gnu-readelf -l /tee.elf | grep -A1 LOAD
-    export TEE=/tee.elf
-fi
-
 make sige5-rk3576_defconfig
 
 # Nerves environment: stored on the SD card (mmc dev 0) at 15 MB, shared
@@ -189,21 +130,17 @@ grep -E 'CONFIG_ENV_IS|CONFIG_ENV_OFFSET|CONFIG_ENV_SIZE|CONFIG_SYS_MMC_ENV_DEV'
 
 make -j\$(nproc) CROSS_COMPILE=aarch64-linux-gnu-
 
-# Deliberately not u-boot-rockchip.bin for either secure-world build: fwup
-# packages that name, and a bootloader carrying an untested secure world
-# should not be picked up by simply having been built. Enabling one is a
-# rename, on purpose.
+# Deliberately not u-boot-rockchip.bin: fwup packages that name, and a
+# bootloader carrying a secure world should not be picked up by simply having
+# been built. Enabling it is a rename, on purpose.
 if [ '${USE_OPENSOURCE_TEE:-0}' = 1 ]; then
     cp u-boot-rockchip.bin /out/u-boot-rockchip-ostee.bin
     # The PKCS#11 TA is a filesystem TA, not an early one: OP-TEE loads it
     # through tee-supplicant from /lib/optee_armtz. It is signed with the key
-    # the core was built with - ours, on this path - so it will be trusted,
-    # unlike anything we could sign for Rockchip's blob. Export it so the
+    # the core was built with - ours - so it will be trusted. Export it so the
     # rootfs can install it.
     mkdir -p /out/optee-ta
     cp /optee_os/out/arm-plat-rockchip/export-ta_arm64/ta/*.ta /out/optee-ta/
-elif [ '${WITH_BL32:-0}' = 1 ]; then
-    cp u-boot-rockchip.bin /out/u-boot-rockchip-bl32.bin
 else
     cp u-boot-rockchip.bin /out/
 fi
@@ -211,8 +148,6 @@ fi
 
 if [ "${USE_OPENSOURCE_TEE:-0}" = 1 ]; then
     echo "=== done. Wrote uboot/u-boot-rockchip-ostee.bin (upstream TF-A + OP-TEE)"
-elif [ "${WITH_BL32:-0}" = 1 ]; then
-    echo "=== done. Wrote uboot/u-boot-rockchip-bl32.bin (Rockchip BL31 + BL32)"
 else
     echo "=== done. Updated uboot/u-boot-rockchip.bin"
 fi

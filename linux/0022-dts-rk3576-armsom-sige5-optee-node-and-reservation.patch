@@ -52,7 +52,7 @@ Claude-Session: https://claude.ai/code/session_01PBGQqVfXFDyZYA6aV3X3Qq
 + * Two regions, because the two secure worlds this system can be built with
 + * sit at different addresses and one kernel image should boot on either:
 + *
-+ *   Rockchip's blob (scripts/build-uboot.sh WITH_BL32=1) loads at 0x48400000.
++ *   A Rockchip BL32 blob loads at 0x48400000; not built here, kept anyway.
 + *   Its size is published nowhere; OP-TEE reports its own layout at startup,
 + *   "TEEOS 0x200000 TA 0xc00000 SHM 0x200000", which is 14 MB.
 + *

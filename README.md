@@ -74,29 +74,26 @@ BL31 (TF-A)  ── loads ──▶  BL32 (OP-TEE)
                               └─ sealed against a key fused into the SoC
 ```
 
-### Two routes, and why this one
+### Building it
 
 ```sh
-USE_OPENSOURCE_TEE=1 ./scripts/build-uboot.sh   # upstream TF-A + OP-TEE
-WITH_BL32=1          ./scripts/build-uboot.sh   # Rockchip's BL31 + BL32 blob
+USE_OPENSOURCE_TEE=1 ./scripts/build-uboot.sh
 ```
 
-Both are off by default and neither is packaged by fwup; they write
-`u-boot-rockchip-ostee.bin` and `u-boot-rockchip-bl32.bin`, and enabling one is
-a bootloader write at sector 64 (see [docs/flashing.md](docs/flashing.md)).
+Off by default and not packaged by fwup; it writes
+`u-boot-rockchip-ostee.bin`, and enabling it is a bootloader write at sector 64
+(see [docs/flashing.md](docs/flashing.md)). It replaces BL31 as well, which is
+worth knowing because the GPU measurements below were taken on Rockchip's -
+they turn out to be identical on both, but that was checked rather than assumed.
 
-**Rockchip's blob has no PKCS#11 TA.** Measured, not assumed: `TEEC_OpenSession`
-on `fd02c9da-306c-48c7-a49c-bbd827ae86ee` returns `ITEM_NOT_FOUND` on both v1.08
-and v1.12. It is not a filesystem TA either — no `/lib/optee_armtz`, no `.ta`
-anywhere, and rkbin ships a TA bundle for rk3506 but none for rk3576. It does
-answer to its own `rk otp PTA` and the device-enumeration PTA. So "use a service
-the blob already ships" is closed, and writing a TA needs Rockchip's signing key.
-
-Upstream has PKCS#11 but arrived with no HUK — `platform_rk3576.c` was 50 lines
-that only set up the DDR firewall, so OP-TEE fell back to a constant compiled
-into public source, and any storage keyed on that is theatre. The patches in
-`optee/` close that gap, which makes upstream the only route ending with **both**
-PKCS#11 and a real per-device key.
+Rockchip's own BL32 blob is **not** an option here, and used to be. It ships no
+PKCS#11 TA - `TEEC_OpenSession` on `fd02c9da-306c-48c7-a49c-bbd827ae86ee`
+returns `ITEM_NOT_FOUND` on both v1.08 and v1.12, measured on hardware - is not
+a filesystem TA either, and authoring one needs Rockchip's signing key. So its
+OTP-backed key machinery is reachable only through TAs that cannot exist, which
+leaves upstream as the only route ending with both PKCS#11 and a per-device key.
+The route and what it cost to explore are in
+[docs/research/rk3576-firmware-versions.md](docs/research/rk3576-firmware-versions.md).
 
 ### What the patches add
 
@@ -132,31 +129,6 @@ Until one is fused, secure storage cannot initialise, which is the current state
 
 Fusing is irreversible and off by default. Nothing in this repository has been
 fused.
-
-### If you use the blob instead
-
-`WITH_BL32=1` wraps `rk3576_bl32_v1.12.bin` in an ELF, because binman takes an
-ELF or a binary carrying an `optee_v1_header` and the blob has neither. The load
-address is the trap:
-
-**`[BL32_OPTION] ADDR` in `RKTRUST/RK3576TRUST.ini` is an offset, not an
-address.** Rockchip's own `fit_args.sh` says so:
-
-```sh
--t)     TEE_LOAD_ADDR=$2
-        # Compatible leagcy: Offset
-        if ((TEE_LOAD_ADDR < DRAM_BASE));  then
-                TEE_LOAD_ADDR="0x"$(echo "obase=16;$((DRAM_BASE+$2))"|bc)
-```
-
-With `CONFIG_SYS_SDRAM_BASE = 0x40000000`, the ini's `0x08400000` means
-`0x48400000`. Taken literally it lands 0.9 GB below DRAM, and SPL hangs
-mid-FIT copying the TEE into nothing — after verifying `u-boot`, `atf-2` and
-`atf-3`, before BL31 runs. Do not take an `ADDR` out of a Rockchip trust ini
-without checking it against the DRAM base.
-
-The kernel reserves all three regions (`linux/0022`), so one kernel boots either
-bootloader.
 
 ### RPMB
 

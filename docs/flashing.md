@@ -147,13 +147,11 @@ from U-Boot also reports "Boot area 0 is not write protected" and a 4 MiB RPMB.
 
 ## Which bootloader
 
-`scripts/build-uboot.sh` produces three, and only the first is packaged by
-fwup:
+`scripts/build-uboot.sh` produces two, and only the first is packaged by fwup:
 
 | file | secure world |
 | --- | --- |
 | `u-boot-rockchip.bin` | none - Rockchip BL31 only |
-| `u-boot-rockchip-bl32.bin` | Rockchip BL31 + BL32 (`WITH_BL32=1`) |
 | `u-boot-rockchip-ostee.bin` | upstream TF-A + OP-TEE (`USE_OPENSOURCE_TEE=1`) |
 
 Swapping between them is a bootloader write at sector 64 and nothing else, so a

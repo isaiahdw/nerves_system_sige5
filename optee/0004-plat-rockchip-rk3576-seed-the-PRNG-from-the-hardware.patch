@@ -1,7 +1,7 @@
 From d77bc10b666265110e2bc50c6f56f8c0407f5c1a Mon Sep 17 00:00:00 2001
 From: Isaiah <isaiahdw@gmail.com>
 Date: Tue, 4 Aug 2026 21:32:48 -0700
-Subject: [PATCH 4/8] plat-rockchip: rk3576: seed the PRNG from the hardware
+Subject: [PATCH 04/10] plat-rockchip: rk3576: seed the PRNG from the hardware
  TRNG
 
 Without a platform hw_get_random_bytes(), rk3576 falls back to OP-TEE's weak

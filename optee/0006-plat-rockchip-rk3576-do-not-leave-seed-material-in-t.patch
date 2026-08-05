@@ -1,8 +1,8 @@
 From c7597e0b74d17048b5709862ede77c37733f3fcc Mon Sep 17 00:00:00 2001
 From: Isaiah <isaiahdw@gmail.com>
 Date: Tue, 4 Aug 2026 21:33:45 -0700
-Subject: [PATCH 6/8] plat-rockchip: rk3576: do not leave seed material in the
- TRNG registers
+Subject: [PATCH 06/10] plat-rockchip: rk3576: do not leave seed material in
+ the TRNG registers
 
 RKRNG holds the last generated block in its data registers until something
 requests another, and this is the non-secure instance, so the normal world can

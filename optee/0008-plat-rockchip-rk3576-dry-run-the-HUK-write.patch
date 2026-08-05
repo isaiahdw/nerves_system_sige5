@@ -1,7 +1,7 @@
 From 7bf42e398ccb5a64a28602029b071276492e46cf Mon Sep 17 00:00:00 2001
 From: Isaiah <isaiahdw@gmail.com>
 Date: Tue, 4 Aug 2026 21:35:14 -0700
-Subject: [PATCH 8/8] plat-rockchip: rk3576: dry-run the HUK write
+Subject: [PATCH 08/10] plat-rockchip: rk3576: dry-run the HUK write
 
 rockchip_otp_write_secure() has never executed on this platform and its first
 run would be permanent, so this reports everything a burn would do short of the

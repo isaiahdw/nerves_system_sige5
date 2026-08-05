@@ -129,6 +129,7 @@ if [ '${USE_OPENSOURCE_TEE:-0}' = 1 ]; then
         CFG_USER_TA_TARGETS=ta_arm64 \
         CFG_PKCS11_TA=y \
         CFG_RK3576_HUK_DRY_RUN=$([ "${HUK_DRY_RUN:-0}" = 1 ] && echo y || echo n) \
+        CFG_RK3576_TRNG_S_PROBE=$([ "${TRNG_S_PROBE:-0}" = 1 ] && echo y || echo n) \
         -j\$(nproc)
 
     git clone --depth 1 --branch $TFA_BRANCH $TFA_GIT /tfa

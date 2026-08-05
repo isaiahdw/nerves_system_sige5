@@ -226,7 +226,29 @@ with no two alike across six draws.
 
 ## Burning a HUK
 
-Nothing in this repository has been fused.
+### Verified end to end
+
+A HUK has been fused on one board and the whole chain works from the fuses up:
+
+    slot blank in 4 of 4 words
+    candidate usable in 4 of 4 words
+    candidate passes every check a burn requires
+    second draw differs, as it must
+    HUK burn: committing 4 words at index 0x80 - irreversible
+    HUK burn: done, verified
+
+On the next boot `read_huk()` succeeds - no burn, no "No HUK" - and secure
+storage initialises. Through PKCS#11, with `tee-supplicant` running:
+
+    C_Initialize / C_GetSlotList (3 slots) / C_OpenSession
+    C_GenerateKeyPair (EC P-256, CKA_TOKEN)
+    C_SignInit / C_Sign -> 64-byte signature
+
+The keypair is generated inside OP-TEE, persisted to secure storage encrypted
+against the HUK, and used to sign. The private key never enters Linux. Storage
+lands in `/data/tee`, on the app partition - it survives firmware updates and
+does not survive a data wipe, so a factory reset means re-enrolment.
+
 
 ```sh
 SECURE_WORLD=1 ./scripts/build-uboot.sh

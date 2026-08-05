@@ -15,6 +15,39 @@ mainline branch (same SoC). Verified on a Sige5 v1.2 board: eMMC boot,
 OTA updates with validation, both network interfaces, onboard WiFi, GPU,
 NPU, HDMI console, watchdog, RTC, and audio devices.
 
+## What works
+
+In plain terms, before the detail below.
+
+**Works and is exercised on hardware.** eMMC boot with A/B firmware slots and
+automatic revert, OTA updates, both Ethernet ports, onboard WiFi, HDMI with a
+framebuffer console, the GPU under Mesa (OpenGL ES 3.1, no X11 or Wayland), the
+NPU including real vision and language models, CPU and GPU frequency scaling,
+thermal management, watchdog, RTC, ADC, USB, audio devices, and a hardware RNG.
+
+**Works but is opt-in.** A secure world - OP-TEE with a per-device key fused
+into the SoC, and PKCS#11 for generating and using keys that never leave it.
+Off by default; one build flag turns it on.
+
+**Does not work.** Bluetooth (the UART is disabled in the mainline dts), CAN
+(no mainline driver), video decode (lands in kernel 7.0), PWM and the fan
+header, and MIPI CSI/DSI. microSD boot is unreachable while the eMMC has a
+valid bootloader, because the boot ROM's order is fixed.
+
+**Untested.** M.2 NVMe - the drivers are built in, but no drive was fitted.
+
+Two things worth knowing that are not defects:
+
+- **GPU and NPU frequency labels are nominal, not delivered.** Asking for
+  300 MHz on the GPU gives about 423, and 900 gives about 815. The clock is a
+  PVTPLL that tracks the silicon rather than a divider, so an OPP names an
+  operating point, not a frequency. See
+  [docs/research/rk3576-gpu-clocks.md](docs/research/rk3576-gpu-clocks.md).
+- **The secure world's key storage is bound to the board.** Keys are encrypted
+  against a fuse in the SoC and stored on the app partition, so a data wipe
+  loses them and the device has to re-enrol. Moving the eMMC to another board
+  loses them too. That is what device-bound means.
+
 ## Boot architecture
 
 Everything lives on the soldered eMMC. The RK3576 boot ROM on this board
@@ -128,14 +161,37 @@ that the secure OTP really is unreachable from the normal world, where the
 secure TRNG is, what the burn checks before committing anything, and what a
 power cut during it actually costs.
 
-### The part ships blank
+### The per-device key
 
-The RK3576 secure OTP has no HUK. Two boards surveyed identically, and Rockchip
-expects the OEM to burn one — `trusty_write_oem_huk` exists for exactly that.
-Until one is fused, secure storage cannot initialise, which is the current state.
+The RK3576 secure OTP ships with no hardware unique key — Rockchip expects the
+OEM to burn one, which is why `trusty_write_oem_huk` exists in their stack.
+Without it secure storage cannot initialise, so a `SECURE_WORLD=1` image fuses
+one on the first boot of an unprovisioned part.
 
-Fusing is irreversible and off by default. Nothing in this repository has been
-fused.
+It writes four words at index `0x80`, and only after the slot is confirmed
+blank, the candidate passes a set of sanity checks, and a second independent
+draw from the TRNG differs from the first. It then reads the value back and
+refuses to use it unless it matches. A later boot on a provisioned part does
+nothing.
+
+Fusing is irreversible, but it is not a brick risk: the write is bounded at
+about 4 ms, and losing power inside that window leaves a slot the read path
+refuses — the board boots normally and simply cannot hold a key. The fuses that
+can brick an RK3576 are the secure-boot control word and the RSA hash, and
+nothing here touches either.
+
+Verified end to end on hardware: key fused and read back, surviving power
+cycles, secure storage initialising, and an EC P-256 keypair generated inside
+OP-TEE, persisted, and used to sign — with the private key never entering
+Linux.
+
+### What it does not protect against
+
+Someone who can boot their own image can ask the secure world to sign for them.
+The key is safe from extraction, not from use by whoever controls the device;
+closing that needs verified boot, which is more fuses. And because keys are
+sealed against a fuse in this SoC and stored on the app partition, a data wipe
+or a different board means re-enrolment.
 
 ### RPMB
 
@@ -155,20 +211,13 @@ The RPMB key is also one-shot, and OP-TEE derives it from the HUK. So the order
 matters: fuse the HUK, validate it completely, and only then provision RPMB —
 otherwise one mistake strands the eMMC as well.
 
-### The limit
-
-This protects a key from being *extracted*. It does not stop someone booting
-their own image and asking the secure world to sign for them. Closing that needs
-verified boot, which is more fuses — and the ones that enable it are the ones
-that can brick a part.
-
-For what this buys in plain terms, how it compares to a Trust&GO ATECC608, and
-why RPMB is optional rather than required, see
+For what this buys in plain terms, how it compares to a Trust&GO ATECC608, why
+RPMB is optional rather than required, and the full secure address map, see
 [docs/research/rk3576-secure-world.md](docs/research/rk3576-secure-world.md).
 
 ## Hardware support
 
-Verified on a Sige5 v1.2, 2026-08-01.
+Verified on a Sige5 v1.2, 2026-08-05.
 
 | Feature | Status | Notes |
 | --- | --- | --- |
@@ -188,11 +237,14 @@ Verified on a Sige5 v1.2, 2026-08-01.
 | CPU frequency scaling | Yes | schedutil via SCMI; A53 cluster to 2.016 GHz, A72 cluster to 2.208 GHz |
 | Thermal | Yes | tsadc zones with cpufreq cooling; the NPU zone gets a passive trip and devfreq cooling from `linux/0011` |
 | LEDs | Yes | Green heartbeat + red status + mmc activity triggers |
-| Hardware RNG | Yes | /dev/hwrng feeds the kernel entropy pool |
+| Hardware RNG | Yes | Two instances. `/dev/hwrng` (`rng@2a410000`) feeds the kernel entropy pool; a second, secure-only block at `0x2a440000` seeds OP-TEE. 1 MB sampled: 7.99981 bits/byte, chi-square 278.9 on 255 df |
+| Secure world (OP-TEE) | Opt-in | `SECURE_WORLD=1 ./scripts/build-uboot.sh` builds upstream TF-A + OP-TEE 4.10 in place of rkbin's BL31. Fuses a per-device key on first boot of an unprovisioned part. Verified: key burned, survives power cycles, secure storage initialises |
+| PKCS#11 key storage | Opt-in | With the secure world: EC P-256 generated inside OP-TEE, persisted encrypted against the fused key, signed with. The private key never enters Linux. Needs `tee-supplicant` running |
+| RPMB | Available, unused | 4 MiB, reached through the kernel RPMB subsystem. Adds rollback protection only; not needed for key storage. Its key is one-shot and derived from the HUK, so provision it only after the HUK is settled |
 | ADC (SARADC) | Yes | Enabled by `linux/0013` (upstream leaves it disabled); header ADC inputs, vref from vcca_1v8_s0 |
 | CAN | No | RK3576 CAN-FD has no mainline driver or dts nodes |
 | GPIO/I2C/SPI/UART header | Expected | Via [Circuits.*](https://elixir-circuits.github.io/) |
-| NPU (6 TOPS) | Yes | Vendor rknpu driver built out-of-tree against the mainline kernel (`package/rknpu-driver`) + librknnrt 2.3.2. IOMMU-backed pageable buffers (no CMA cap), devfreq across 300-900 MHz. Both cores usable together. Verified with single, chained and dual-core int8 models and an LLM; models are built on a host with rknn-toolkit2 |
+| NPU (6 TOPS) | Yes | Vendor rknpu driver built out-of-tree against the mainline kernel (`package/rknpu-driver`) + librknnrt 2.3.2. IOMMU-backed pageable buffers (no CMA cap), devfreq across 300-900 MHz. Both cores usable together. Verified with MobileNetV2 (250 inf/s, top-5 matching Rockchip's reference exactly), Qwen3-0.6B W4A16 through rkllm 1.3.0 at 17.8 tok/s, and an int8 matmul checked against the CPU. Same results with and without the secure world. Models are built on a host with rknn-toolkit2 |
 | Video decode | No | rkvdec2 for RK3576 lands in kernel 7.0 |
 | PWM / fan header | No | No RK3576 PWM nodes in mainline 6.18 |
 | MIPI CSI/DSI | No | Not wired up in mainline for this board |

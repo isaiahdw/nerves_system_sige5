@@ -53,35 +53,39 @@ Then, from the host:
 gadget, so the mode string tells you nothing. Try a read to find out which you
 have.
 
-### Speed
+### Speed - this is the slow one
 
-This path runs well under 1 MB/s. Fine for a 10 MB bootloader, useless for a
-filesystem: a 1.8 GB image did not finish in 50 minutes. Size the job before
-starting it.
+Measured on the same board and the same 1.8 GB image:
+
+| transport | time |
+| --- | --- |
+| maskrom + `db` SPL loader (route 4) | 88 s |
+| U-Boot rockusb gadget (this route) | did not finish in 3000 s |
+
+About 35x. The gadget is fine for a 10 MB bootloader and the wrong tool for a
+filesystem. If a whole image is going on, use route 4.
 
 ## 3. Board has no OS and needs a filesystem
 
-The trap here is worth stating exactly, because the image is not the problem.
+**Use route 4.** Maskrom writes the whole 1.8 GB image in 88 seconds, which is
+the answer for a bare board and needs nothing clever.
+
+Two other things are true and neither is the reason a flash is ever slow, so
+do not go chasing them:
 
     fwup -a -d /tmp/board.img -i firmware.fw -t complete
     ls -l  ->  1895956480 bytes      (1808 MB apparent)
     du -h  ->  140M                  (what is actually stored)
 
-The file is **sparse**. Two things force it to span the whole layout: GPT puts
-its backup header at the end of the last partition, and the `complete` task
-ends with `raw_memset(${APP_PART_OFFSET}, 256, 0xff)` to invalidate the app
-partition, which lands at sector 2654208. Everything between is holes.
+The file is sparse - GPT puts its backup header at the end of the last
+partition, and `complete` ends with `raw_memset(${APP_PART_OFFSET}, 256, 0xff)`
+at sector 2654208, so the file spans the layout with holes in between. And
+`rkdeveloptool` cannot see holes, so it sends the apparent size. Through the
+maskrom loader that costs nothing worth having; through the U-Boot gadget it is
+1.67 GB of zeros at under 1 MB/s. The transport is what matters.
 
-`fwup` writing to a device seeks past those holes, so it moves ~140 MB and is
-quick. `rkdeveloptool wl` does not know what a hole is: it reads the apparent
-size and pushes all 1808 MB, 1.67 GB of which is zeros, over a link that runs
-under 1 MB/s. Measured, that does not finish inside 50 minutes.
-
-So the slowness is the pairing, not the image. Anything that writes through
-`fwup` - `mix burn`, `mix upload`, or `fwup -d` on a device - was always
-moving 140 MB.
-
-Expose the eMMC as a USB disk from U-Boot and let fwup do it properly:
+If maskrom is not reachable, the eMMC can be exported as a USB disk from U-Boot
+and handed to fwup, which does skip the holes:
 
 Expose the eMMC as a USB disk from U-Boot and let fwup do it properly:
 

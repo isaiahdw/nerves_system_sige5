@@ -321,15 +321,12 @@ rkdeveloptool wl 0 disk.img
 rkdeveloptool rd
 ```
 
-Note what that costs. `disk.img` is *sparse* — 1808 MB apparent, ~140 MB
-actually stored — because GPT puts its backup header at the end of the last
-partition and `complete` writes an invalidation marker at the app partition.
-`fwup` seeks past the holes; `rkdeveloptool wl` cannot, so it pushes all
-1808 MB over a link running under 1 MB/s, and measured, that does not finish
-inside 50 minutes. Every other route (`mix burn`, `mix upload`, `fwup -d` on a
-device) moves only the ~140 MB. To flash a bare board quickly, export the eMMC
-from U-Boot with `ums 0 mmc 0` and point `fwup` at the resulting disk — see the
-doc.
+That is the fast path: measured, it writes the whole 1.8 GB image in 88
+seconds. Note that `rkdeveloptool db` is load-bearing — it puts Rockchip's SPL
+loader in RAM, and everything is written through that. U-Boot's own `rockusb`
+gadget accepts the same commands and runs about 35× slower (the same image did
+not finish in 3000 s), so if a write is crawling, check which one you are
+actually talking to. `rkdeveloptool ld` prints `Maskrom` for both.
 
 The image is smaller than the eMMC; on the first boot the system grows
 the app partition to fill the disk automatically.

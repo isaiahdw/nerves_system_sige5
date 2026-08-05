@@ -102,7 +102,7 @@ inherits the base row.
 | 900 | 825000 | | 812500 | 800000 | 787500 |
 | 950 | 850000 | | 837500 | 825000 | 812500 |
 
-Two things worth noting against our mainline table:
+Two differences against our mainline table:
 
 - The vendor ships a **950 MHz** OPP, which we dropped. Note it cannot come from
   the SCMI path: TF-A's `rk3576_gpu_pvtpll_table` has no 950 entry and its lookup
@@ -510,7 +510,7 @@ The vendor drives CPU, CPU and **GPU** throttling from the single
 passive trip is 75 C. Mainline throttles each domain from its own sensor at 85 C.
 Mainline's per-domain approach is arguably the better design; the vendor's is more
 conservative about when it starts. No change is required, but the 10 C difference
-is worth knowing when interpreting sustained-load results.
+matters when interpreting sustained-load results.
 
 The board also has a `pwm-fan` node.
 

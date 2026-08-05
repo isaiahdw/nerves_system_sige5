@@ -17,36 +17,33 @@ NPU, HDMI console, watchdog, RTC, and audio devices.
 
 ## What works
 
-In plain terms, before the detail below.
-
-**Works and is exercised on hardware.** eMMC boot with A/B firmware slots and
+Working and exercised on hardware: eMMC boot with A/B firmware slots and
 automatic revert, OTA updates, both Ethernet ports, onboard WiFi, HDMI with a
 framebuffer console, the GPU under Mesa (OpenGL ES 3.1, no X11 or Wayland), the
-NPU including real vision and language models, CPU and GPU frequency scaling,
-thermal management, watchdog, RTC, ADC, USB, audio devices, and a hardware RNG.
+NPU with vision and language models, CPU and GPU frequency scaling, thermal
+management, watchdog, RTC, ADC, USB, audio devices and a hardware RNG.
 
-**Works but is opt-in.** A secure world - OP-TEE with a per-device key fused
-into the SoC, and PKCS#11 for generating and using keys that never leave it.
-Off by default; one build flag turns it on.
+Opt-in: a secure world. OP-TEE with a per-device key fused into the SoC, and
+PKCS#11 for generating and using keys that never leave it. One build flag.
 
-**Does not work.** Bluetooth (the UART is disabled in the mainline dts), CAN
-(no mainline driver), video decode (lands in kernel 7.0), PWM and the fan
-header, and MIPI CSI/DSI. microSD boot is unreachable while the eMMC has a
-valid bootloader, because the boot ROM's order is fixed.
+Not working: Bluetooth (uart4 is disabled in the mainline dts), CAN (no
+mainline driver), video decode (rkvdec2 lands in kernel 7.0), PWM and the fan
+header, MIPI CSI/DSI. microSD boot is unreachable while the eMMC holds a valid
+bootloader — the boot ROM's order is fixed.
 
-**Untested.** M.2 NVMe - the drivers are built in, but no drive was fitted.
+Untested: M.2 NVMe. The drivers are built in, but no drive was fitted.
 
-Two things worth knowing that are not defects:
+Two surprises that are not bugs:
 
-- **GPU and NPU frequency labels are nominal, not delivered.** Asking for
-  300 MHz on the GPU gives about 423, and 900 gives about 815. The clock is a
-  PVTPLL that tracks the silicon rather than a divider, so an OPP names an
-  operating point, not a frequency. See
-  [docs/research/rk3576-gpu-clocks.md](docs/research/rk3576-gpu-clocks.md).
-- **The secure world's key storage is bound to the board.** Keys are encrypted
-  against a fuse in the SoC and stored on the app partition, so a data wipe
-  loses them and the device has to re-enrol. Moving the eMMC to another board
-  loses them too. That is what device-bound means.
+**GPU and NPU frequency labels are nominal.** Ask the GPU for 300 MHz and you
+get about 423; ask for 900 and you get about 815. The clock is a PVTPLL that
+tracks the silicon rather than a divider, so an OPP names an operating point,
+not a frequency —
+[docs/research/rk3576-gpu-clocks.md](docs/research/rk3576-gpu-clocks.md).
+
+**Secure-world keys are bound to the board.** They are encrypted against a fuse
+in the SoC and stored on the app partition, so a data wipe loses them and the
+device re-enrols. Moving the eMMC to another board loses them too.
 
 ## Boot architecture
 
@@ -123,9 +120,8 @@ part that has none**, because a secure world without one cannot store anything.
 It only ever writes a blank slot and only after its checks pass, so booting it
 on a part that already has a key does nothing.
 
-It replaces BL31 as well, which is worth knowing because the GPU measurements
-below were taken on Rockchip's — they turn out identical on both, but that was
-checked rather than assumed.
+It replaces BL31 as well. The GPU measurements below were taken on Rockchip's
+BL31; both firmwares deliver identical rates, verified rather than assumed.
 
 Rockchip's own BL32 blob is not built here. It ships no PKCS#11 TA -
 `TEEC_OpenSession` on `fd02c9da-306c-48c7-a49c-bbd827ae86ee` returns
@@ -211,9 +207,9 @@ The RPMB key is also one-shot, and OP-TEE derives it from the HUK. So the order
 matters: fuse the HUK, validate it completely, and only then provision RPMB —
 otherwise one mistake strands the eMMC as well.
 
-For what this buys in plain terms, how it compares to a Trust&GO ATECC608, why
-RPMB is optional rather than required, and the full secure address map, see
-[docs/research/rk3576-secure-world.md](docs/research/rk3576-secure-world.md).
+[docs/research/rk3576-secure-world.md](docs/research/rk3576-secure-world.md)
+has the secure address map, the OTP layout, how this compares to a Trust&GO
+ATECC608, and why RPMB is optional rather than required.
 
 ## Hardware support
 

@@ -5,8 +5,6 @@ this firmware does about it.
 
 ## An OPP rate is an operating point, not a frequency
 
-This is the whole thing, and everything below follows from it.
-
 Above roughly 600 MHz the GPU is not clocked by a PLL with a divider. It is
 clocked by a PVTPLL - a ring oscillator whose length sets a *delay target*. BL31
 owns it, and a rate request selects a `(ring length, voltage)` pair from a table.

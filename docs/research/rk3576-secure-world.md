@@ -34,8 +34,7 @@ and gets a signature back. Dump the eMMC and you get ciphertext.
 | **Secure storage (REE-FS)** | keys stored encrypted and authenticated, keyed from the HUK | yes - and this is the default |
 | **RPMB** | rollback protection: nobody can restore an older copy of secure storage | no - see below |
 
-A common assumption, and one worth stating plainly because it is wrong: **RPMB
-is not required for secure storage.** OP-TEE's default backend is `CFG_REE_FS`,
+**RPMB is not required for secure storage**, despite the common assumption. OP-TEE's default backend is `CFG_REE_FS`,
 which keeps encrypted, authenticated files on the normal filesystem, keyed from
 the HUK. Confidentiality and integrity come from that alone.
 
@@ -356,9 +355,8 @@ The failure modes are not symmetric, which is the real argument for the order. A
 bad HUK costs that unit its HUK and leaves the eMMC untouched. A bad RPMB key
 costs that eMMC's RPMB permanently, and the eMMC is soldered.
 
-Once all of this is qualified, the several build flags here are likely to
-collapse into one provisioning switch. They are separate now because each was
-worth being able to turn on alone while establishing that it works.
+These build flags will likely collapse into a single provisioning switch once
+the sequence is qualified. They are separate so each can be enabled alone.
 
 ### The RPMB key
 

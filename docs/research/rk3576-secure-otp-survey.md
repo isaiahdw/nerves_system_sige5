@@ -170,19 +170,20 @@ The failure modes of a wrong write, worst first:
   BL32 expects.
 - Writing where bits are already set. Refused by the driver - a safe failure.
 
-## What we do not have: entropy
+## Entropy: why it blocked the burn, and what fixed it
 
-RK3588's port generates its HUK with `hw_get_random_bytes()`, backed by a
-secure TRNG at `TRNG_S_BASE`. For RK3576:
+This was the reason a HUK could not responsibly be generated, let alone fused,
+and it is worth keeping because the failure would have been silent.
 
-- there is no `TRNG_S_BASE`, in OP-TEE's `platform_config.h` or in TF-A's
-  `rk3576_def.h`, which does define `OTP_S_BASE`, `KEYLADDER_BASE` and
-  `CRYPTO_S_BASE`
-- `hw_get_random_bytes()` is implemented only in `platform_rk3588.c`
-- the only Rockchip driver in `core/drivers` is `rockchip_otp.c`
+RK3588's port generates its HUK with `hw_get_random_bytes()`, backed by a secure
+TRNG. RK3576 had none of that: no `TRNG_S_BASE` in OP-TEE's `platform_config.h`
+or in TF-A's `rk3576_def.h` (which does define `OTP_S_BASE`, `KEYLADDER_BASE`
+and `CRYPTO_S_BASE`), `hw_get_random_bytes()` implemented only in
+`platform_rk3588.c`, and `rockchip_otp.c` the only Rockchip driver in
+`core/drivers`.
 
-So `CFG_WITH_SOFTWARE_PRNG` (default `y`) applies, and its seeding is OP-TEE's
-weak default:
+So `CFG_WITH_SOFTWARE_PRNG` (default `y`) applied, with OP-TEE's weak default
+seeding:
 
     /*
      * Override this in your platform code. This default implementation only
@@ -190,13 +191,13 @@ weak default:
      * value or a constant value. It is not suitable for a secure environment.
      */
 
-A key generated from that and then fused would be permanently weak, and would
-look perfectly healthy from the outside.
+A key generated from that and fused would have been permanently weak while
+looking perfectly healthy from outside.
 
-The silicon does have a TRNG - `rng@2a410000`, `compatible = "rockchip,rkrng"`
-in the vendor device tree. The gap is that nothing in the secure world drives
-it. Wiring that up, and checking its output on hardware, has to come before any
-burn.
+Resolved by `optee/0004` and `optee/0010`: `hw_get_random_bytes()` now drives
+RKRNG, and seeding uses the secure instance found below. A TRNG that cannot be
+read is fatal rather than silently degraded - the alternative is booting with
+the predictable seed, which is the thing being avoided.
 
 ## Where the secure TRNG is
 
@@ -401,3 +402,100 @@ per-candidate gate is what guards the burn itself.
 Both boards also survey identically - `0x008`, `0x064` and `0x1c8` with the
 same hashes, and `0x080` blank in all four words - now read at the confirmed
 index rather than RK3588's.
+
+## Burning a HUK
+
+Nothing here has been fused. This is what the code does when it is turned on,
+and what was established before it was written.
+
+### Turning it on
+
+    USE_OPENSOURCE_TEE=1 PERSIST_HUK=1 ./scripts/build-uboot.sh
+
+`CFG_RK3576_PERSIST_HUK` is off by default, and a build with it on will program
+the first unprovisioned part it boots on - there is no per-board confirmation.
+Treat such an image as a provisioning tool, not a firmware, and do not leave one
+lying next to the normal build. The two are distinguishable:
+
+    strings u-boot-rockchip-ostee.bin | grep 'HUK burn'
+
+Empty means persist is compiled out.
+
+Two read-only flags exist alongside it, both off by default:
+`HUK_DRY_RUN=1` reports what a burn would do without writing, and
+`TRNG_S_PROBE=1` re-runs the search for `RKRNG_S`.
+
+### What it checks, in order
+
+From `persist_huk()` in `optee/0013`. The order is the design: after the first
+word there is nothing left to do, because bits only go one way, the slot cannot
+be rewritten, and a half-written slot is worse than an empty one.
+
+1. Read the slot and refuse unless all four words are zero, so a burn can never
+   add bits to somebody else's value.
+2. Draw a candidate from the secure TRNG.
+3. Put it through `huk_candidate_is_sound()`: no zero word (that is how an
+   unprogrammed slot reads), no repeated word (a latched output rather than
+   2^-32 luck), 40 to 88 of 128 bits set, at least 10 distinct bytes.
+4. Draw again and require the two to differ - the only way to catch a generator
+   stuck on one value, since a single draw from a stuck source passes every
+   check above.
+5. Write.
+6. Read back and require an exact match before trusting it.
+
+Rejection costs nothing: no write happens and the next boot can retry. Every
+threshold is set where a real key fails it far less often than a broken source
+passes it.
+
+### What a power cut during the write costs
+
+Not a brick, which is the assumption worth correcting.
+
+The write is four words, each polled with `OTP_POLL_TIMEOUT_US` of 1000, so the
+whole operation is bounded at about 4 ms and is normally far quicker. Lose power
+inside that window and the slot is half programmed: the board boots normally,
+and `read_huk()` refuses the slot rather than accepting a short key. That unit
+can no longer hold a HUK at `0x80`, and everything else about it still works.
+
+The fuses that can brick an RK3576 are the secure-boot control word at `0x008`
+and the RSA hash at `0x184` - enable secure boot with no key burned and the boot
+ROM demands a signature it cannot verify, which maskrom will not rescue. Neither
+is touched.
+
+There is also room to retry. Rockchip's whitelist reserves words `0x80`-`0x8f`
+for HUK material and OP-TEE uses four of them, so `0x84`, `0x88` and `0x8c` are
+spare - probably why 64 bytes are reserved for a 16-byte key. No fallback is
+implemented; the room simply exists.
+
+### What was established first
+
+- The index, from Rockchip's own driver, with the whitelist shown exhaustive.
+- The slot blank in all four words, on two dies.
+- The secure OTP unreachable from the normal world.
+- The secure TRNG located, and confirmed at the same address on two dies.
+- Its output statistically clean over 1 MB.
+- The gate exercised on hardware, on both boards, without writing anything.
+- Nothing else writing the OTP: TF-A's rk3576 port mentions it only in a
+  header, and no patch here calls the write path outside `persist_huk()`.
+
+### What remains unproven
+
+Two things, and neither shrinks by testing harder.
+
+**A collision with Rockchip's BL32.** If that blob is ever run on a part burned
+here, it may expect something else at `0x80`. It cannot be checked from outside
+a binary.
+
+**The statistics are from the wrong instance.** `/dev/hwrng` is `rng@2a410000`,
+the non-secure block; seeding uses `RKRNG_S`, which Linux cannot reach. Direct
+evidence about the block a key would come from is six candidates - 96 bytes -
+plus "two requests differ". The gate catches a catastrophically broken source,
+but a plausible-looking low-entropy one would pass every check it makes.
+
+This one is closeable and has not been closed: OP-TEE could pull tens of KB
+through `hw_get_random_bytes()` and accumulate a histogram in the secure world,
+printing aggregate statistics and never bytes. Worth doing before a burn. Note
+that even then, statistical tests cannot distinguish a good DRBG from a true
+RNG - the block is asked for its true-random path (`RKRNG_CTRL_REQ_TRNG`, not
+the DRNG mode), but proving entropy needs the kind of SP 800-90B assessment
+Rockchip published for RK3588 and has not for this part.

@@ -243,6 +243,63 @@ The probe is kept behind `CFG_RK3576_TRNG_S_PROBE`, off by default, so the
 result can be re-run on another board or a later revision rather than resting
 on one measurement.
 
+## The HUK index, confirmed
+
+`0x80` is right, and it comes from Rockchip. Their own U-Boot ships
+`drivers/misc/rk3576-secure-otp.S` (in `rockchip-linux/u-boot`) - generated
+assembly rather than the `.c`, but the range checks survive intact:
+
+    sub  w1, w23, #512      ; offset - 512
+    cmp  w1, 63             ; ... <= 63   -> [512, 575]
+    sub  w0, w23, #32       ; offset - 32
+    ccmp w0, 1, 0, hi       ; ... <= 1    -> [32, 33]
+    bls  .L22               ; accept
+    sub  w0, w23, #1552     ; offset - 1552
+    cmp  w0, 15
+    bhi  .L14               ; > 15 -> reject -> [1552, 1567]
+
+Three whitelisted byte ranges, and those three subtractions are the only
+range-check constants in the file - each appears twice, once on the read path
+and once on the write path - so the list is exhaustive. Divided by four for
+word indices:
+
+| bytes | words | field |
+| --- | --- | --- |
+| 32-33 | `0x8` | secure boot status |
+| 512-575 | `0x80`-`0x8f` | HUK key material |
+| 1552-1567 | `0x184`-`0x187` | RSA key hash |
+
+The HUK region is 16 words; OP-TEE uses the first four, which is the 16 bytes
+`HW_UNIQUE_KEY_LENGTH` wants.
+
+Three lines of evidence, and only the first two are about each other:
+
+- **Rockchip's driver**, above. Primary, and the only one that is authoritative.
+- **the-gabe/optee_os**, branch `rk3576`, documents the same three ranges and
+  cites that driver. OP-TEE PR #7841 credits the-gabe, so the PR is not a third
+  source - it is the same one at one remove.
+- **This board.** The survey's results line up with the map: word `0x008`
+  non-zero (a secure boot status word exists), `0x080` blank (no HUK burned),
+  `0x184` blank (no RSA hash, so secure boot is off - consistent with the
+  status word not being the `0x00ff` enable pattern). Nothing here was fitted
+  to the map; the survey ran before it was found.
+
+The survey's other two hits, `0x064` and `0x1c8`, fall outside all three
+ranges. They are fields the vendor driver does not expose to the normal world,
+which is why the whitelist says nothing about them.
+
+That same tree also gives `RKRNG_S_BASE 0x2a440000`, matching what probing
+found here by an unrelated method - behaviour on the bus rather than reading
+someone's header.
+
+### One correction it forces
+
+`OTP_S_MAX_INDEX` is `0x200` on RK3576, not the `0x300` inherited from RK3588,
+which is what the survey scanned to. Everything found sits below `0x200`
+(`0x1c8` is the highest), and the over-range reads turned up nothing, so no
+result changes - but the bound was wrong and reads past the end of the array
+could have aliased rather than failing.
+
 ## Rockchip's own model
 
 From rkbin's RK3576 BL32 release notes, the vendor design is not a raw HUK at a

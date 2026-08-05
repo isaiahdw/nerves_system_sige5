@@ -1,7 +1,7 @@
 From 08ce32486c18965edaf9c918580e3389a13a166b Mon Sep 17 00:00:00 2001
 From: Isaiah <isaiahdw@gmail.com>
 Date: Tue, 4 Aug 2026 21:33:24 -0700
-Subject: [PATCH 05/11] plat-rockchip: rk3576: use RK3576's own HUK index
+Subject: [PATCH 05/12] plat-rockchip: rk3576: use RK3576's own HUK index
 
 0x104 was RK3588's, inherited by copying that platform's header. The pending
 upstream RK3576 port gives 0x80 instead.

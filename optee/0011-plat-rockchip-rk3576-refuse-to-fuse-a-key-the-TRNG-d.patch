@@ -1,7 +1,7 @@
 From 6f3b02e52f97c6e4947f88c4126ef037070dfb94 Mon Sep 17 00:00:00 2001
 From: Isaiah <isaiahdw@gmail.com>
 Date: Wed, 5 Aug 2026 05:04:17 -0700
-Subject: [PATCH 11/11] plat-rockchip: rk3576: refuse to fuse a key the TRNG
+Subject: [PATCH 11/12] plat-rockchip: rk3576: refuse to fuse a key the TRNG
  did not produce
 
 A burn cannot be undone or repeated, so a generator that is stuck, gated off,

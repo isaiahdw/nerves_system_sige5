@@ -1,0 +1,70 @@
+From 9a9c7f43e810d9e227e53acebd31fca45ede1b6d Mon Sep 17 00:00:00 2001
+From: Isaiah <isaiahdw@gmail.com>
+Date: Wed, 5 Aug 2026 05:17:52 -0700
+Subject: [PATCH 12/12] plat-rockchip: rk3576: bound the OTP survey at the real
+ end of the array
+
+The secure OTP is 0x200 words on RK3576. The survey inherited RK3588's 0x300
+and read 256 words past the end, where the hardware may alias rather than
+reject - which would have shown up as data at an index that does not exist.
+
+Nothing found sat above 0x1c8 and the over-range reads returned nothing, so no
+result changes; the bound was simply wrong.
+
+The size, and the index the survey is looking for, come from Rockchip's own
+U-Boot driver: drivers/misc/rk3576-secure-otp.S whitelists byte ranges
+[32,33], [512,575] and [1552,1567], which are words 0x8 for the secure boot
+status, 0x80-0x8f for HUK key material, and 0x184-0x187 for the RSA hash.
+---
+ core/arch/arm/plat-rockchip/platform_config.h |  6 ++++++
+ core/arch/arm/plat-rockchip/platform_rk3576.c | 12 ++++++------
+ 2 files changed, 12 insertions(+), 6 deletions(-)
+
+diff --git a/core/arch/arm/plat-rockchip/platform_config.h b/core/arch/arm/plat-rockchip/platform_config.h
+index 6a5fdc8..08b6c68 100644
+--- a/core/arch/arm/plat-rockchip/platform_config.h
++++ b/core/arch/arm/plat-rockchip/platform_config.h
+@@ -262,6 +262,12 @@
+ #define ROCKCHIP_OTP_HUK_INDEX	0x80
+ #define ROCKCHIP_OTP_HUK_SIZE	0x4
+ 
++/*
++ * Word count of the secure OTP. RK3588's is 0x300 and inheriting it reads off
++ * the end of this array, where a read may alias rather than fail.
++ */
++#define ROCKCHIP_OTP_S_MAX_INDEX	0x200
++
+ #elif defined(PLATFORM_FLAVOR_rv1106)
+ 
+ /* GIC-400 (GICv2) */
+diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
+index 8569a74..851f15e 100644
+--- a/core/arch/arm/plat-rockchip/platform_rk3576.c
++++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
+@@ -286,9 +286,9 @@ static struct tee_hw_unique_key *huk;
+ 
+ /*
+  * Survey the secure OTP so the HUK index can be found without writing
+- * anything. RK3576's index is not documented, and reads at
+- * ROCKCHIP_OTP_HUK_INDEX come back empty on the boards seen so far, which
+- * could mean either the wrong location or an unprovisioned part.
++ * anything. Reads at ROCKCHIP_OTP_HUK_INDEX come back empty on the boards seen
++ * so far, which on an index since confirmed against Rockchip's own driver
++ * means an unprovisioned part rather than the wrong location.
+  *
+  * Reports only where data is and what it hashes to, never the data. A real
+  * HUK printed to a shared console would not be a key any more. Comparing the
+@@ -302,10 +302,10 @@ static void survey_secure_otp(void)
+ 	const uint32_t stride = 4;
+ 	uint32_t idx = 0;
+ 
+-	IMSG("secure OTP survey: index range 0..0x300, %u words per group",
+-	     stride);
++	IMSG("secure OTP survey: index range 0..%#x, %u words per group",
++	     ROCKCHIP_OTP_S_MAX_INDEX, stride);
+ 
+-	for (idx = 0; idx + stride <= 0x300; idx += stride) {
++	for (idx = 0; idx + stride <= ROCKCHIP_OTP_S_MAX_INDEX; idx += stride) {
+ 		uint32_t buf[4] = { };
+ 		uint32_t hash = 2166136261u;   /* FNV-1a, enough to compare */
+ 		bool empty = true;

@@ -1,7 +1,7 @@
 From d9795353357c854c698bf4b9900578076f901716 Mon Sep 17 00:00:00 2001
 From: Isaiah <isaiahdw@gmail.com>
 Date: Tue, 4 Aug 2026 21:32:48 -0700
-Subject: [PATCH 03/11] plat-rockchip: rk3576: survey the secure OTP when no
+Subject: [PATCH 03/12] plat-rockchip: rk3576: survey the secure OTP when no
  HUK is found
 
 RK3576's HUK index is not documented anywhere found so far.

@@ -1,7 +1,7 @@
 From a1b194aeb5c2696e72f9956f54c3bdb5b9e2a1fe Mon Sep 17 00:00:00 2001
 From: Isaiah <isaiahdw@gmail.com>
 Date: Tue, 4 Aug 2026 21:34:33 -0700
-Subject: [PATCH 07/11] plat-rockchip: rk3576: reject a partially programmed
+Subject: [PATCH 07/12] plat-rockchip: rk3576: reject a partially programmed
  HUK slot
 
 Some words programmed and the rest still zero means a burn did not finish - a

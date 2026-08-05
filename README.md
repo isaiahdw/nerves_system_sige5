@@ -53,201 +53,135 @@ boots the previous slot on the next reboot. If the env is missing or the
 nerves boot path fails, `bootflow scan` falls back to
 `extlinux/extlinux.conf` (eMMC first, then SD).
 
-## Secure world (OP-TEE) — not built in, opt-in
+## Secure world (OP-TEE) — opt-in, not in the shipped image
 
-There is no BL32 in the image. The boot chain runs BL31 (TF-A) and nothing
-in TrustZone above it, so `/dev/tee0` never appears even though the kernel
-carries the OP-TEE driver.
+The default image has no BL32. The boot chain runs BL31 and nothing in
+TrustZone above it, so `/dev/tee0` never appears even though the kernel carries
+the OP-TEE driver.
 
-Turning it on is worth understanding, because it is the only way this board
-can keep a secret. Suppose the device holds a private key to authenticate
-to NervesHub. Today that key is a file on the data partition: anyone who
-unsolders the eMMC, or gets root once, reads it and can impersonate the
-device forever. With a secure world the key is generated and sealed inside
-OP-TEE, stored in the eMMC's RPMB partition, and the application never sees
-it - it asks the secure world to sign a challenge and gets a signature
-back. Pulling the eMMC yields ciphertext.
-
-RPMB is what makes that real, and this board already has it: a
-replay-protected partition (`/dev/mmcblk0rpmb`) authenticated by a key the
-eMMC itself holds, with a counter so writes cannot be rolled back to an
-older state.
+Turning it on is the only way this board can keep a secret. Say the device
+holds a private key for NervesHub. Today that is a file on the data partition:
+anyone who unsolders the eMMC, or gets root once, reads it and can impersonate
+the device forever. With a secure world the key lives inside OP-TEE, sealed by a
+per-device hardware key, and the application never sees it — it asks the secure
+world to sign a challenge and gets a signature back. Pulling the eMMC yields
+ciphertext.
 
 ```
-BL31 (TF-A)  ── loads ──▶  BL32 (OP-TEE) @ 0x08400000
+BL31 (TF-A)  ── loads ──▶  BL32 (OP-TEE)
                               │
        Linux  ── /dev/tee0 ──▶│ signs with a key it never hands over
-                              └─ sealed in /dev/mmcblk0rpmb
+                              └─ sealed against a key fused into the SoC
 ```
 
-To build a bootloader with it:
+### Two routes, and why this one
 
 ```sh
-WITH_BL32=1 ./scripts/build-uboot.sh
+USE_OPENSOURCE_TEE=1 ./scripts/build-uboot.sh   # upstream TF-A + OP-TEE
+WITH_BL32=1          ./scripts/build-uboot.sh   # Rockchip's BL31 + BL32 blob
 ```
 
-That wraps Rockchip's `rk3576_bl32_v1.08.bin` in an ELF at the load address
-from `RKTRUST/RK3576TRUST.ini`, because binman only accepts an ELF or a
-binary with an `optee_v1_header` and the blob has neither.
+Both are off by default and neither is packaged by fwup; they write
+`u-boot-rockchip-ostee.bin` and `u-boot-rockchip-bl32.bin`, and enabling one is
+a bootloader write at sector 64 (see [docs/flashing.md](docs/flashing.md)).
 
-The rest is not built yet. What it needs:
+**Rockchip's blob has no PKCS#11 TA.** Measured, not assumed: `TEEC_OpenSession`
+on `fd02c9da-306c-48c7-a49c-bbd827ae86ee` returns `ITEM_NOT_FOUND` on both v1.08
+and v1.12. It is not a filesystem TA either — no `/lib/optee_armtz`, no `.ta`
+anywhere, and rkbin ships a TA bundle for rk3506 but none for rk3576. It does
+answer to its own `rk otp PTA` and the device-enumeration PTA. So "use a service
+the blob already ships" is closed, and writing a TA needs Rockchip's signing key.
 
-- **Find the right load address first.** `WITH_BL32=1` was built and flashed,
-  and it does not boot. SPL verifies `u-boot`, `atf-2` and `atf-3` - the first
-  three entries of `loadables` - and hangs on the fourth, `tee-1`, before BL31
-  ever runs.
+Upstream has PKCS#11 but arrived with no HUK — `platform_rk3576.c` was 50 lines
+that only set up the DDR firewall, so OP-TEE fell back to a constant compiled
+into public source, and any storage keyed on that is theatre. The patches in
+`optee/` close that gap, which makes upstream the only route ending with **both**
+PKCS#11 and a real per-device key.
 
-  The reason is the address. The build script wraps the blob in an ELF at
-  `0x08400000`, the `[BL32_OPTION] ADDR` from `RKTRUST/RK3576TRUST.ini`, and on
-  this SoC that is not memory:
+### What the patches add
 
-  ```
-  /proc/iomem:  40200000-23fffffff : System RAM
-  vendor dts:   reg = <0x00 0x40200000 0x01 0xffe00000>
-  ```
+Thirteen patches, applied to a pinned optee_os by `scripts/build-uboot.sh`:
 
-  DRAM begins at `0x40200000`. `0x08400000` is roughly 0.9 GB below it, so SPL
-  hangs copying 440 KB of TEE into nothing.
+- a HUK read from the secure OTP at the confirmed index, refusing a partially
+  programmed slot rather than accepting a short key
+- `hw_get_random_bytes()` driving RKRNG, and PRNG seeding from it — a TRNG that
+  cannot be read is fatal rather than silently degraded
+- a secure-world console, without which OP-TEE's own diagnostics go nowhere and
+  a TA that will not start looks identical to one that is missing
+- read-only diagnostics: an OTP survey, a search for the secure TRNG, and a dry
+  run reporting what a burn would do
+- the burn itself, off by default
 
-  An earlier version of this section had it backwards: it said to use
-  `RK3576TRUST.ini`'s `0x08400000` and specifically not upstream OP-TEE's
-  `0x70000000`. `0x70000000` is inside DRAM; `0x08400000` is not.
+Working on hardware: upstream TF-A v2.15.0 + OP-TEE 4.10 boot, the PKCS#11 TA
+loads from the rootfs signed with the key the core was built with, and
+`/dev/tee0` appears. Secure storage does **not** initialise yet, because the
+part ships with no HUK — see below.
 
-  **The ini value is an offset, not an address.** Rockchip's own
-  `arch/arm/mach-rockchip/fit_args.sh` says so outright:
+The full investigation is in
+[docs/research/rk3576-secure-otp-survey.md](docs/research/rk3576-secure-otp-survey.md):
+where the HUK lives and how that was confirmed against Rockchip's own driver,
+that the secure OTP really is unreachable from the normal world, where the
+secure TRNG is, what the burn checks before committing anything, and what a
+power cut during it actually costs.
 
-  ```sh
-  -t)
-          TEE_LOAD_ADDR=$2
-          # Compatible leagcy: Offset
-          if ((TEE_LOAD_ADDR < DRAM_BASE));  then
-                  TEE_LOAD_ADDR="0x"$(echo "obase=16;$((DRAM_BASE+$2))"|bc)
-  ```
+### The part ships blank
 
-  Anything below `DRAM_BASE` gets the base added. With
-  `CONFIG_SYS_SDRAM_BASE = 0x40000000` for RK3576, the real load address is
+The RK3576 secure OTP has no HUK. Two boards surveyed identically, and Rockchip
+expects the OEM to burn one — `trusty_write_oem_huk` exists for exactly that.
+Until one is fused, secure storage cannot initialise, which is the current state.
 
-      0x40000000 + 0x08400000 = 0x48400000
+Fusing is irreversible and off by default. Nothing in this repository has been
+fused.
 
-  which is inside RAM. `BL32_ADDR` in `scripts/build-uboot.sh` is now that
-  value. Do not take an `ADDR` out of a Rockchip trust ini literally without
-  checking it against the DRAM base first.
+### If you use the blob instead
 
-- **Then reserve the memory**, or Linux allocates over OP-TEE's DRAM and
-  crashes.
+`WITH_BL32=1` wraps `rk3576_bl32_v1.12.bin` in an ELF, because binman takes an
+ELF or a binary carrying an `optee_v1_header` and the blob has neither. The load
+address is the trap:
 
-  Neither automatic mechanism works here. Rockchip's own U-Boot learns the
-  region at runtime - `param_parse_optee_mem()` reads `ATAG_TOS_MEM` left by
-  the preloader, then `bidram_reserve(MEM_OPTEE, ...)` - and none of that
-  ATAGS machinery exists in mainline U-Boot, which is what this system builds.
-  Mainline's generic path, `optee_copy_fdt_nodes()`, wants an
-  `optee_v1_header` on the binary, and this blob starts straight into AArch64
-  code with no header. So the reservation has to be **static in the dts**.
-
-  The **size** is not published anywhere: `RK3576TRUST.ini` gives only the load
-  address, and the vendor kernel dts has no reservation either (it carries the
-  `linaro,optee-tz` firmware node and nothing else - the reservation is
-  U-Boot's job downstream). Do not guess it from another Rockchip part. Read it
-  from OP-TEE itself: it prints its memory layout on the console as it starts,
-  so bring BL32 up once and take the numbers from that log.
-
-- **Userspace.** `BR2_PACKAGE_OPTEE_CLIENT` is enabled, giving
-  `tee-supplicant`. It is inert with no BL32 in the image.
-
-  `xtest` is **not** available: `BR2_PACKAGE_OPTEE_TEST` depends on
-  `BR2_TARGET_OPTEE_OS`, i.e. on buildroot building OP-TEE from source for its
-  TA dev kit, which contradicts using Rockchip's blob. Verification has to come
-  from whatever services the blob itself exposes.
-
-- **The blob has no PKCS#11 TA.** Measured, not assumed: `TEEC_OpenSession` on
-  `fd02c9da-306c-48c7-a49c-bbd827ae86ee` returns `ITEM_NOT_FOUND` on both BL32
-  v1.08 and v1.12. It is not a filesystem TA either - there is no
-  `/lib/optee_armtz` and no `.ta` anywhere, and rkbin ships a TA bundle for
-  rk3506 but none for rk3576. What the blob does answer to is its own
-  `rk otp PTA` and the device-enumeration PTA (though `PTA_CMD_GET_DEVICES`
-  itself is `NOT_IMPLEMENTED`).
-
-  So the "use a service the blob already ships" route is closed, and writing a
-  TA needs Rockchip's signing key, which we do not have.
-
-## The open-source route, and what it still needs
-
-Flipper Devices ship an RK3576 product and their build scripts
-(`flipperdevices/flipperone-linux-build-scripts`, `build-uboot.sh`) show the
-wiring works:
+**`[BL32_OPTION] ADDR` in `RKTRUST/RK3576TRUST.ini` is an offset, not an
+address.** Rockchip's own `fit_args.sh` says so:
 
 ```sh
-make PLATFORM=rockchip-rk3576 CFG_USER_TA_TARGETS=ta_arm64   # OP-TEE/optee_os
-make PLAT=rk3576 BL32=out/arm-plat-rockchip/core/tee.bin SPD=opteed  # ARM TF-A
+-t)     TEE_LOAD_ADDR=$2
+        # Compatible leagcy: Offset
+        if ((TEE_LOAD_ADDR < DRAM_BASE));  then
+                TEE_LOAD_ADDR="0x"$(echo "obase=16;$((DRAM_BASE+$2))"|bc)
 ```
 
-Upstream OP-TEE has both a `rockchip-rk3576` flavor (TZDRAM `0x70000000`,
-32 MB; SHM `0x72000000`, 4 MB - both inside DRAM) and the PKCS#11 TA. That is
-the half Rockchip's blob lacks.
+With `CONFIG_SYS_SDRAM_BASE = 0x40000000`, the ini's `0x08400000` means
+`0x48400000`. Taken literally it lands 0.9 GB below DRAM, and SPL hangs
+mid-FIT copying the TEE into nothing — after verifying `u-boot`, `atf-2` and
+`atf-3`, before BL31 runs. Do not take an `ADDR` out of a Rockchip trust ini
+without checking it against the DRAM base.
 
-What it lacks in turn is the HUK. `platform_rk3576.c` upstream is 50 lines and
-defines only `platform_secure_ddr_region()` - no `tee_otp_get_hw_unique_key()`,
-so OP-TEE falls back to a constant compiled into public source, and any secure
-storage keyed on it is theatre.
+The kernel reserves all three regions (`linux/0022`), so one kernel boots either
+bootloader.
 
-`platform_rk3588.c` does implement it, and the pieces look portable:
+### RPMB
 
-- the OTP driver is generic (`core/drivers/rockchip_otp.c`), selected by
-  `CFG_ROCKCHIP_OTP` and pointed at a platform `OTP_S_BASE`/`OTP_S_SIZE`
-- rk3588's `read_huk()` is a short `rockchip_otp_read_secure()` call over four
-  words at `ROCKCHIP_OTP_HUK_INDEX`, with an all-zero check meaning "no HUK yet"
+`CONFIG_RPMB` is on and enumerates `/sys/class/rpmb/rpmb0`, which the OP-TEE
+driver binds to — the secure world reaches the replay-protected partition
+through the kernel rather than proxying every frame through `tee-supplicant`.
 
-So porting it is roughly: find RK3576's secure-OTP base and HUK index, add
-`OTP_S_BASE`/`OTP_S_SIZE` to `platform_config.h`, force `CFG_ROCKCHIP_OTP` in
-the rk3576 conf.mk stanza, and copy rk3588's HUK functions into
-`platform_rk3576.c`. Small in volume, but it is key-derivation code and wants
-care and review rather than a quick port.
+**Do not reach for `mmc-utils`.** One `mmc rpmb read-counter /dev/mmcblk0rpmb`
+on this board timed out and left the eMMC controller wedged: every subsequent
+read failed with `EIO`, the rootfs became unreadable, and only a reboot
+recovered it. Nothing was damaged — contents and A/B slots were fine — but the
+box was useless until restarted. The boot log has the likely reason, `mmc0:
+Command Queue Engine enabled`; RPMB transfers need the controller out of
+command-queue mode, and that transition is a known way to hang CQHCI.
 
-That is the only route seen so far that ends with **both** PKCS#11 and a real
-per-device key.
+The RPMB key is also one-shot, and OP-TEE derives it from the HUK. So the order
+matters: fuse the HUK, validate it completely, and only then provision RPMB —
+otherwise one mistake strands the eMMC as well.
 
-- **Provision per device.** The RPMB key is written once and cannot be
-  rewritten. Check first whether the factory already burned one - if it did
-  and you do not hold it, RPMB is unusable on that unit. Note Rockchip's own
-  U-Boot defaults to `CONFIG_OPTEE_ALWAYS_USE_SECURITY_PARTITION`, so the
-  vendor stack does not necessarily put secure storage in RPMB at all.
+### The limit
 
-  **Do not reach for `mmc-utils` to answer that.** One
-  `mmc rpmb read-counter /dev/mmcblk0rpmb` on this board timed out and left the
-  eMMC controller wedged: every subsequent read failed with `EIO`, the rootfs
-  became unreadable, and it took a reboot to recover. Nothing was damaged - the
-  eMMC contents and the A/B slots were fine - but the box was useless until
-  restarted.
-
-  The likely reason is in the boot log: `mmc0: Command Queue Engine enabled`.
-  RPMB transfers require the controller to leave command-queue mode, and that
-  transition is a known way to hang CQHCI. Whatever the cause, the legacy
-  `/dev/mmcblk0rpmb` ioctl path is not safe here.
-
-  Use the kernel's RPMB subsystem instead. `CONFIG_RPMB` is enabled and
-  enumerates `/sys/class/rpmb/rpmb0`, and the OP-TEE driver binds to that, so
-  the secure world can reach RPMB without any legacy ioctl in the picture.
-  Whether the key is already programmed is best answered from OP-TEE once it
-  runs, not by poking the device from Linux.
-
-The kernel side is ready: `CONFIG_TEE` and `CONFIG_OPTEE` come from the arm64
-defconfig, which is why `/sys/bus/tee` exists on a running board with no
-`/dev/tee0` behind it. `CONFIG_RPMB` is enabled here too, so the OP-TEE driver
-can reach the replay-protected partition through the kernel's RPMB subsystem
-rather than proxying every frame through `tee-supplicant`.
-
-Use Rockchip's blob rather than building upstream OP-TEE, which looks like
-the cleaner option but is not. Upstream has a `plat-rockchip` rk3576, but it
-only configures the DDR firewall; with no `tee_otp_get_hw_unique_key()`
-behind it OP-TEE falls back to a default hardware key compiled into public
-source. RPMB derives its authentication key from that, so secure storage
-would be sealed with a constant anyone can look up. Rockchip's blob is the
-one with real OTP backing.
-
-Worth being clear about the limit: this protects a key from being
-*extracted*. It does not stop someone booting their own image on the board
-and asking the secure world to sign for them. Closing that means verified
-boot, which is more fuses.
+This protects a key from being *extracted*. It does not stop someone booting
+their own image and asking the secure world to sign for them. Closing that needs
+verified boot, which is more fuses — and the ones that enable it are the ones
+that can brick a part.
 
 ## Hardware support
 
@@ -513,6 +447,18 @@ CRU dividers off GPLL/CPLL/AUPLL/SPLL/LPLL cannot produce the upper rates.
   at 900 MHz from 53.6 to 57.3 C the measured rate moved 0.05%. The vendor
   calibrates this PVTPLL at 800 MHz and 750 mV, which is where the
   achievable points cluster.
+
+  Three things since, all in
+  [docs/research/rk3576-gpu-clock-investigation.md](docs/research/rk3576-gpu-clock-investigation.md).
+  The same numbers come out of upstream TF-A as out of Rockchip's BL31, so none
+  of this is firmware-conditional — the PVTPLL tables are identical at every
+  rate. The low OPPs overshoot because they share one voltage: 700 mV is the DT
+  floor at and below 600 MHz, and at fixed voltage the ring delivers whatever
+  its length gives. And an OPP rate names an operating point — a (ring length,
+  voltage) pair — rather than a promised frequency, which is why 700 and 800
+  collapse: same ring length, different voltage, and on this silicon the lower
+  one already sustains it. That makes 800 MHz 50 mV for nothing *here*, though
+  the table has to be safe for slower dies than these two.
 
   The mechanism is in BL31. TF-A carries RK3576 upstream, and its GPU table
   (`plat/rockchip/rk3576/scmi/rk3576_clk.c`) maps each rate to a PVTPLL ring

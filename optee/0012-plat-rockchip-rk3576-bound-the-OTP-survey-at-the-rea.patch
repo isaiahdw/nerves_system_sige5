@@ -1,7 +1,7 @@
 From 9a9c7f43e810d9e227e53acebd31fca45ede1b6d Mon Sep 17 00:00:00 2001
 From: Isaiah <isaiahdw@gmail.com>
 Date: Wed, 5 Aug 2026 05:17:52 -0700
-Subject: [PATCH 12/12] plat-rockchip: rk3576: bound the OTP survey at the real
+Subject: [PATCH 12/13] plat-rockchip: rk3576: bound the OTP survey at the real
  end of the array
 
 The secure OTP is 0x200 words on RK3576. The survey inherited RK3588's 0x300

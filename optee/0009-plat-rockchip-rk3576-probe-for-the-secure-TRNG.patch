@@ -1,7 +1,7 @@
 From 0864ddecaa1311385aeb74778810d0cdf9090822 Mon Sep 17 00:00:00 2001
 From: Isaiah <isaiahdw@gmail.com>
 Date: Tue, 4 Aug 2026 23:21:29 -0700
-Subject: [PATCH 09/12] plat-rockchip: rk3576: probe for the secure TRNG
+Subject: [PATCH 09/13] plat-rockchip: rk3576: probe for the secure TRNG
 
 TF-A's firewall header names FW_SLV_ID_RKRNG_S as its own slave, so a secure
 random generator exists, but rk3576_def.h never gives its base. The secure

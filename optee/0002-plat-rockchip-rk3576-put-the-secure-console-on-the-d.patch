@@ -1,7 +1,7 @@
 From b6b5dd3a7c1aa9a2a31e87b6643474187f355486 Mon Sep 17 00:00:00 2001
 From: Isaiah <isaiahdw@gmail.com>
 Date: Tue, 4 Aug 2026 21:32:48 -0700
-Subject: [PATCH 02/12] plat-rockchip: rk3576: put the secure console on the
+Subject: [PATCH 02/13] plat-rockchip: rk3576: put the secure console on the
  debug UART
 
 Upstream leaves CFG_EARLY_CONSOLE off for this flavor, so OP-TEE's own

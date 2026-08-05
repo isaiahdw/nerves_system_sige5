@@ -1,0 +1,172 @@
+From a9ffbe4335ba6899f49f90348da5350c1c360c34 Mon Sep 17 00:00:00 2001
+From: Isaiah <isaiahdw@gmail.com>
+Date: Wed, 5 Aug 2026 10:18:36 -0700
+Subject: [PATCH 13/13] plat-rockchip: rk3576: fuse a HUK on a part that has
+ none
+
+The write path has existed unused; this is what calls it. Off by default, and
+a build with CFG_RK3576_PERSIST_HUK on will program the first unprovisioned
+part it boots on, so turning it on is a deliberate act.
+
+The order is the point, because after the first word there is nothing left to
+do - bits only go one way, the slot cannot be rewritten, and a half-written
+slot is worse than an empty one:
+
+  refuse unless the slot is entirely blank, so this can never add bits to
+  someone else's value;
+  take a candidate and put it through the same checks the dry run reports on;
+  take a second independent draw and require it to differ, which is the only
+  way to catch a generator stuck on one value;
+  write;
+  read back and require an exact match before trusting it.
+
+A write that fails part way cannot be repaired, and says so. The read path
+already refuses a partially programmed slot on later boots.
+
+Logs a hash and an outcome, never the key.
+---
+ core/arch/arm/plat-rockchip/conf.mk           |   6 +
+ core/arch/arm/plat-rockchip/platform_rk3576.c | 106 ++++++++++++++++++
+ 2 files changed, 112 insertions(+)
+
+diff --git a/core/arch/arm/plat-rockchip/conf.mk b/core/arch/arm/plat-rockchip/conf.mk
+index 0b77fa2..3ae6528 100644
+--- a/core/arch/arm/plat-rockchip/conf.mk
++++ b/core/arch/arm/plat-rockchip/conf.mk
+@@ -234,6 +234,12 @@ CFG_RK3576_HUK_DRY_RUN ?= n
+ # to leave on.
+ CFG_RK3576_TRNG_S_PROBE ?= n
+ 
++# Fuse a HUK on a part that has none. Irreversible: OTP bits only go one way,
++# the slot cannot be rewritten, and a build with this on will program the first
++# unprovisioned part it boots on. Everything it can check, it checks before the
++# first word is committed - see persist_huk() in platform_rk3576.c.
++CFG_RK3576_PERSIST_HUK ?= n
++
+ CFG_TZDRAM_START ?= 0x70000000
+ CFG_TZDRAM_SIZE  ?= 0x02000000
+ CFG_SHMEM_START  ?= 0x72000000
+diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
+index 851f15e..9dc1ce0 100644
+--- a/core/arch/arm/plat-rockchip/platform_rk3576.c
++++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
+@@ -554,6 +554,109 @@ out:
+ }
+ #endif /* CFG_RK3576_HUK_DRY_RUN */
+ 
++#ifdef CFG_RK3576_PERSIST_HUK
++/*
++ * Fuse a HUK, once, on a part that has none.
++ *
++ * Everything that can be checked is checked before the first word is
++ * committed, because after that there is nothing left to do: OTP bits only go
++ * one way, the slot cannot be rewritten, and a half-written slot is worse than
++ * an empty one.
++ *
++ * The order matters. Refuse unless the slot is entirely blank, so this can
++ * never add bits to someone else's value. Take a candidate and put it through
++ * the same checks the dry run reports on. Take a second, independent draw and
++ * require it to differ, which is the only way to catch a generator stuck on one
++ * value. Only then write, and only trust the result if it reads back exactly.
++ *
++ * Enabling this is a deliberate act - CFG_RK3576_PERSIST_HUK is off, and a
++ * build with it on will fuse the first unprovisioned part it boots on.
++ */
++static TEE_Result persist_huk(struct tee_hw_unique_key *hwkey)
++{
++	uint32_t cand[ROCKCHIP_OTP_HUK_SIZE] = { };
++	uint32_t again[ROCKCHIP_OTP_HUK_SIZE] = { };
++	uint32_t back[ROCKCHIP_OTP_HUK_SIZE] = { };
++	TEE_Result res = TEE_SUCCESS;
++	size_t i = 0;
++
++	static_assert(sizeof(cand) == sizeof(hwkey->data));
++
++	res = rockchip_otp_read_secure(back, ROCKCHIP_OTP_HUK_INDEX,
++				       ROCKCHIP_OTP_HUK_SIZE);
++	if (res) {
++		EMSG("HUK burn: cannot read the slot (%#"PRIx32")", res);
++		goto out;
++	}
++
++	for (i = 0; i < ARRAY_SIZE(back); i++) {
++		if (back[i]) {
++			EMSG("HUK burn: slot is not blank, refusing");
++			res = TEE_ERROR_BAD_STATE;
++			goto out;
++		}
++	}
++
++	res = hw_get_random_bytes(cand, sizeof(cand));
++	if (res) {
++		EMSG("HUK burn: TRNG failed (%#"PRIx32")", res);
++		goto out;
++	}
++
++	res = huk_candidate_is_sound(cand, ARRAY_SIZE(cand));
++	if (res)
++		goto out;
++
++	res = hw_get_random_bytes(again, sizeof(again));
++	if (res) {
++		EMSG("HUK burn: TRNG failed on the second draw (%#"PRIx32")",
++		     res);
++		goto out;
++	}
++
++	if (!memcmp(cand, again, sizeof(cand))) {
++		EMSG("HUK burn: TRNG repeated itself, refusing");
++		res = TEE_ERROR_NO_DATA;
++		goto out;
++	}
++
++	IMSG("HUK burn: committing %u words at index %#x - irreversible",
++	     ROCKCHIP_OTP_HUK_SIZE, ROCKCHIP_OTP_HUK_INDEX);
++
++	res = rockchip_otp_write_secure(cand, ROCKCHIP_OTP_HUK_INDEX,
++					ROCKCHIP_OTP_HUK_SIZE);
++	if (res) {
++		EMSG("HUK burn: write failed (%#"PRIx32") - the slot may now be "
++		     "partly programmed and cannot be repaired", res);
++		goto out;
++	}
++
++	memset(back, 0, sizeof(back));
++	res = rockchip_otp_read_secure(back, ROCKCHIP_OTP_HUK_INDEX,
++				       ROCKCHIP_OTP_HUK_SIZE);
++	if (res) {
++		EMSG("HUK burn: wrote but cannot verify (%#"PRIx32")", res);
++		goto out;
++	}
++
++	if (memcmp(cand, back, sizeof(cand))) {
++		EMSG("HUK burn: readback differs from what was written");
++		res = TEE_ERROR_CORRUPT_OBJECT;
++		goto out;
++	}
++
++	memcpy(hwkey->data, cand, HW_UNIQUE_KEY_LENGTH);
++	IMSG("HUK burn: done, verified");
++
++out:
++	memzero_explicit(cand, sizeof(cand));
++	memzero_explicit(again, sizeof(again));
++	memzero_explicit(back, sizeof(back));
++
++	return res;
++}
++#endif /* CFG_RK3576_PERSIST_HUK */
++
+ TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
+ {
+ 	TEE_Result res = TEE_SUCCESS;
+@@ -578,6 +681,9 @@ TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
+ 		survey_secure_otp();
+ #ifdef CFG_RK3576_HUK_DRY_RUN
+ 		dry_run_persist_huk();
++#endif
++#ifdef CFG_RK3576_PERSIST_HUK
++		res = persist_huk(huk);
+ #endif
+ 	}
+ 

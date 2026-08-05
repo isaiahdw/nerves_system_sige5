@@ -1,7 +1,7 @@
 From 22e6c7a4e9bab22e37159365ac361c5739bdd500 Mon Sep 17 00:00:00 2001
 From: Isaiah <isaiahdw@gmail.com>
 Date: Tue, 4 Aug 2026 23:28:50 -0700
-Subject: [PATCH 10/12] plat-rockchip: rk3576: seed from the secure TRNG
+Subject: [PATCH 10/13] plat-rockchip: rk3576: seed from the secure TRNG
 
 The probe found RKRNG_S at 0x2a440000, and both halves check out: the secure
 world gets different non-zero data from it on each request, while reading it

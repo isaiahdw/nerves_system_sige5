@@ -418,3 +418,67 @@ yields about 423, and 900 yields about 815. The usable span is roughly 423 to
 816 MHz across seven OPPs, two of which are the same operating point. That is
 the subject of the open question about what the OPP table should say; swapping
 the firmware neither caused it nor fixed it.
+
+## Why the labels are wrong, and why `length_low` exists
+
+### `length_low` is a low-*temperature* entry
+
+`struct pvtpll_table` carries `length_low`/`length_low_frac`, and Rockchip's
+BL31 sets `length_low = 19` on the GPU's 900 MHz row while upstream TF-A leaves
+it zero. The vendor DT binding names the field:
+
+    rockchip,pvtpll-table: ... each item consists frequency and pvtpll config
+    like <freq_khz ring length low_temp_ring low_temp_length>
+
+So "low" is temperature, not voltage. Cold silicon switches faster, so holding a
+frequency target needs a different ring length, and the vendor stack carries a
+second one for it - alongside `rockchip,pvtm-ref-temp`, `pvtm-temp-prop` and
+`pvtm-thermal-zone`, which convert a PVTM reading at the current temperature
+back to the reference temperature.
+
+Reaching it means setting a length field in the requested rate:
+`OPP_LENGTH_MASK` is `GENMASK_32(5, 2)`, four bits at bit 2, of which
+`OPP_LENGTH_LOW` is the lowest value. `clk_scmi_gpu_set_rate()` treats such a
+request as a mode switch - it swaps the table to the low lengths and returns
+without setting any rate.
+
+Nothing here does that. Every rate in the OPP table is a multiple of 64, so bits
+2 through 5 are clear, and mainline has no temperature-triggered switch to send
+it. The entry is unreachable, and its absence upstream costs nothing that is
+reachable either.
+
+### The frequencies are adaptive, and the floor holds them up
+
+PVTPLL is not a PLL asked for a frequency. The ring length sets a delay target
+and the delivered clock is whatever the silicon manages at the current voltage
+and temperature, so the OPP rate is nominal. Measured with voltage alongside:
+
+| target | vdd_gpu | temp | measured | MHz/mV |
+| --- | --- | --- | --- | --- |
+| 300 | 700 mV | 55 C | 422.7 | 0.604 |
+| 400 | 700 mV | 56 C | 502.6 | 0.718 |
+| 500 | 700 mV | 57 C | 638.8 | 0.913 |
+| 600 | 700 mV | 59 C | 765.0 | 1.093 |
+| 700 | 725 mV | 60 C | 795.0 | 1.097 |
+| 800 | 775 mV | 60 C | 794.9 | 1.026 |
+| 900 | 825 mV | 60 C | 813.7 | 0.986 |
+
+The first four rows share one voltage - 700 mV is the floor in the DT for
+everything at or below 600 MHz - which is why they all overshoot their label.
+At a fixed 700 mV the ring simply runs at whatever that length gives, and 300
+MHz worth of ring length yields 423 MHz. They are still real DVFS points, since
+dynamic power scales with frequency at constant voltage, but the numbers on them
+are fiction.
+
+### 800 MHz is strictly worse than 700
+
+700 and 800 share ring length 21, so they are the same operating point - 795.0
+against 794.9 MHz. The DT gives 800 MHz 775 mV against 700 MHz's 725 mV. Fifty
+millivolts for nothing, and leakage and dynamic power both rise with it.
+
+900 MHz is a weaker version of the same: 813.7 MHz for 825 mV, 2.4 percent more
+performance than 700 MHz for 100 mV more.
+
+Efficiency peaks at 600-700 MHz and falls off above it - the MHz/mV column is
+monotonic up to 700 and drops after. Whatever the OPP table ends up saying, 800
+MHz should not be in it.

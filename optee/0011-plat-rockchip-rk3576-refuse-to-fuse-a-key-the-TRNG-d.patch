@@ -1,0 +1,172 @@
+From 6f3b02e52f97c6e4947f88c4126ef037070dfb94 Mon Sep 17 00:00:00 2001
+From: Isaiah <isaiahdw@gmail.com>
+Date: Wed, 5 Aug 2026 05:04:17 -0700
+Subject: [PATCH 11/11] plat-rockchip: rk3576: refuse to fuse a key the TRNG
+ did not produce
+
+A burn cannot be undone or repeated, so a generator that is stuck, gated off,
+or handing back a register file rather than entropy has to be caught before the
+first word is committed. Afterwards there is no move left: the bits are set,
+they cannot be cleared, and the slot cannot be rewritten.
+
+Four blunt checks, meant to catch a broken source rather than grade a working
+one. No zero word, since that is how an unprogrammed slot reads and could never
+be told from a partial burn later. No repeated word, which means a latched
+output rather than 2^-32 luck. Set bits within about four standard deviations
+of the 64 expected. And at least 10 distinct bytes, where 16 random ones almost
+always hold 15 or 16.
+
+Rejecting costs nothing - no write happens and the next boot can try again - so
+each threshold is set where a real key fails it far less often than a broken
+source passes.
+
+A single draw cannot catch a generator stuck on one value, so the dry run also
+takes a second and requires the two to differ.
+
+Wired into the dry run, which is how it gets exercised on hardware without
+writing anything. The persist path must call it before its first write.
+---
+ core/arch/arm/plat-rockchip/platform_rk3576.c | 105 ++++++++++++++++++
+ 1 file changed, 105 insertions(+)
+
+diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
+index 535648c..8569a74 100644
+--- a/core/arch/arm/plat-rockchip/platform_rk3576.c
++++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
+@@ -4,6 +4,7 @@
+  */
+ 
+ #include <common.h>
++#include <compiler.h>
+ #include <crypto/crypto.h>
+ #include <drivers/rockchip_otp.h>
+ #include <io.h>
+@@ -385,6 +386,90 @@ out:
+ 	return res;
+ }
+ 
++/* Counted here rather than with __builtin_popcount, which the core does not
++ * link the libgcc helper for.
++ */
++static size_t popcount32(uint32_t v)
++{
++	size_t n = 0;
++
++	for (; v; v &= v - 1)
++		n++;
++
++	return n;
++}
++
++/*
++ * Refuse to fuse anything the TRNG did not plainly produce. A burn cannot be
++ * undone or repeated, so a generator that is stuck, gated off, or returning a
++ * register file rather than entropy has to be caught here, before the first
++ * word is committed - afterwards there is no move left.
++ *
++ * The checks are deliberately blunt. They are meant to catch a broken source,
++ * not to grade a working one, and each has a false-reject rate far below the
++ * cost of being wrong. Rejecting is free: no write happens and the burn can be
++ * retried on the next boot.
++ */
++static TEE_Result __maybe_unused huk_candidate_is_sound(const uint32_t *cand,
++							size_t words)
++{
++	uint32_t seen[256 / 32] = { };
++	size_t distinct = 0;
++	size_t bits = 0;
++	size_t i = 0;
++	size_t j = 0;
++
++	for (i = 0; i < words; i++) {
++		/*
++		 * A zero word is how an unprogrammed slot reads, so a key
++		 * containing one could never be told from a partial burn
++		 * afterwards. Chance for a real key is about 2^-32 per word.
++		 */
++		if (!cand[i]) {
++			EMSG("HUK candidate has a zero word");
++			return TEE_ERROR_NO_DATA;
++		}
++
++		/* Equal words mean a latched output, not 2^-32 luck */
++		for (j = 0; j < i; j++) {
++			if (cand[i] == cand[j]) {
++				EMSG("HUK candidate repeats a word");
++				return TEE_ERROR_NO_DATA;
++			}
++		}
++
++		bits += popcount32(cand[i]);
++
++		for (j = 0; j < sizeof(cand[i]); j++) {
++			uint8_t b = (cand[i] >> (j * 8)) & 0xff;
++
++			if (!(seen[b / 32] & BIT32(b % 32))) {
++				seen[b / 32] |= BIT32(b % 32);
++				distinct++;
++			}
++		}
++	}
++
++	/*
++	 * 128 bits should carry about 64 set. The window is roughly four
++	 * standard deviations either way, which a real key misses about twice
++	 * in 100000 while a stuck-at or heavily biased source lands outside it
++	 * every time.
++	 */
++	if (bits < 40 || bits > 88) {
++		EMSG("HUK candidate has %zu of 128 bits set", bits);
++		return TEE_ERROR_NO_DATA;
++	}
++
++	/* 16 random bytes almost always hold 15 or 16 distinct values */
++	if (distinct < 10) {
++		EMSG("HUK candidate has only %zu distinct bytes", distinct);
++		return TEE_ERROR_NO_DATA;
++	}
++
++	return TEE_SUCCESS;
++}
++
+ #ifdef CFG_RK3576_HUK_DRY_RUN
+ /*
+  * Everything a burn would do, short of the write. rockchip_otp_write_secure()
+@@ -402,6 +487,7 @@ static void dry_run_persist_huk(void)
+ {
+ 	uint32_t current[ROCKCHIP_OTP_HUK_SIZE] = { };
+ 	uint32_t cand[ROCKCHIP_OTP_HUK_SIZE] = { };
++	uint32_t again[ROCKCHIP_OTP_HUK_SIZE] = { };
+ 	uint32_t hash = 2166136261u;
+ 	TEE_Result res = TEE_SUCCESS;
+ 	size_t blank = 0;
+@@ -441,10 +527,29 @@ static void dry_run_persist_huk(void)
+ 
+ 	IMSG("  candidate usable in %zu of %zu words, fnv1a=0x%08x",
+ 	     good, ARRAY_SIZE(cand), hash);
++
++	res = huk_candidate_is_sound(cand, ARRAY_SIZE(cand));
++	if (res)
++		IMSG("  candidate REJECTED - a burn here would be refused");
++	else
++		IMSG("  candidate passes every check a burn requires");
++
++	/*
++	 * A generator stuck on one value passes every test applied to a single
++	 * draw. Only a second, independent draw catches it.
++	 */
++	if (!hw_get_random_bytes(again, sizeof(again))) {
++		if (!memcmp(cand, again, sizeof(cand)))
++			EMSG("  TRNG repeated itself - stuck, would not burn");
++		else
++			IMSG("  second draw differs, as it must");
++	}
++
+ 	IMSG("HUK dry run: no write performed");
+ 
+ out:
+ 	memzero_explicit(cand, sizeof(cand));
++	memzero_explicit(again, sizeof(again));
+ 	memzero_explicit(current, sizeof(current));
+ }
+ #endif /* CFG_RK3576_HUK_DRY_RUN */

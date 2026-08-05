@@ -1,7 +1,7 @@
 From 1657c275cd131605bcf04111c6f5364d7aa15fb5 Mon Sep 17 00:00:00 2001
 From: Isaiah <isaiahdw@gmail.com>
 Date: Tue, 4 Aug 2026 21:32:48 -0700
-Subject: [PATCH 01/10] plat-rockchip: rk3576: read the HUK from secure OTP
+Subject: [PATCH 01/11] plat-rockchip: rk3576: read the HUK from secure OTP
 
 Without this OP-TEE falls back to the default HUK compiled into public
 source, so anything sealed by secure storage - RPMB included - is keyed on a

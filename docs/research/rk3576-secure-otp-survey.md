@@ -15,13 +15,15 @@ Sweeping the whole readable range, `0..0x300` words, three groups are non-zero:
 
 Everything else reads back as zero.
 
-Two RK3588 landmarks are empty here:
+The survey ran against RK3588's indices, which is what the port had inherited.
+RK3576's real map is confirmed further down; the two do not agree, and only
+`0x008` happens to hold the same field on both.
 
-| RK3588 index | holds | RK3576 board |
+| RK3588 index | holds on RK3588 | RK3576 board |
 | --- | --- | --- |
-| `0x104` | HUK | empty |
-| `0x270` | RSA public-key hash | empty |
-| `0x008` | secure-boot status | non-zero |
+| `0x104` | HUK | empty (RK3576 keeps it at `0x80`) |
+| `0x270` | RSA public-key hash | empty (RK3576 keeps it at `0x184`) |
+| `0x008` | secure-boot status | non-zero (same field on RK3576) |
 
 An empty `0x270` is consistent with secure boot being off on this board, which
 it is.
@@ -99,25 +101,28 @@ where any process can read it, and has no secret counterpart in the secure OTP.
 ## Conclusion
 
 The RK3576 secure OTP ships blank apart from a config word and its mirror.
-There is no HUK to find, at `0x104` or anywhere else. This matches how
-Rockchip's own stack treats it - `trusty_write_oem_huk` and
-`trusty_oem_otp_key_is_written` exist because the HUK is OEM-written, not
-factory-burned.
+There is no HUK to find. This matches how Rockchip's own stack treats it -
+`trusty_write_oem_huk` and `trusty_oem_otp_key_is_written` exist because the
+HUK is OEM-written, not factory-burned.
 
-The question is therefore not which index to read but whether to burn one. That
-is a permanent, unrepeatable write, and the index is still not vendor-confirmed
-for this SoC, so `optee/0001` stays read-only until that is a deliberate
-decision.
+The question is therefore not which index to read but whether to burn one, which
+is a permanent, unrepeatable write.
 
-What the survey does settle is the risk of the write: `0x104` is empty on both
-boards, so burning there would not destroy existing OTP data. The remaining
-exposure is a collision with whatever Rockchip's own BL32 expects, which cannot
-be checked from outside the blob.
+The index itself was open while this section was first written and is not any
+more: the HUK lives at word `0x80`, per Rockchip's own U-Boot driver, and the
+survey read `0x104` only because that value had been inherited from RK3588. See
+"The HUK index, confirmed" below. Both read empty on every board seen, which
+the confirmed map explains as an unprovisioned part rather than a wrong guess.
 
-Reading an unconfirmed index remains the more insidious failure. A read that
-lands on non-zero, non-secret data would be accepted as a key and secure
-storage would appear to work while protecting nothing - `0x008` is a config
-word and `0x1c8` mirrors it, and both would pass any "is it non-zero" check.
+What the survey settles about the write is that the slot is blank, so burning
+there destroys nothing. The remaining exposure is a collision with whatever
+Rockchip's own BL32 expects, which cannot be checked from outside the blob.
+
+Reading the wrong index would have been the more insidious failure, and the
+survey shows why: a read landing on non-zero, non-secret data would be accepted
+as a key and secure storage would appear to work while protecting nothing.
+`0x008` is a config word and `0x1c8` mirrors it, and both would have passed any
+"is it non-zero" check.
 
 ## Is the secure OTP actually secret?
 
@@ -291,6 +296,29 @@ which is why the whitelist says nothing about them.
 That same tree also gives `RKRNG_S_BASE 0x2a440000`, matching what probing
 found here by an unrelated method - behaviour on the bus rather than reading
 someone's header.
+
+### That driver is normal-world code
+
+Worth being clear about what it implies, because it cuts against this build
+rather than for it. `rk3576-secure-otp.S` lives in `drivers/misc/`, so it runs
+in U-Boot proper, which is non-secure - and it contains no `smc` at all. It
+reaches the OTP controller directly by MMIO. Its whitelist is therefore policy
+in normal-world software, not a hardware boundary, and the same three ranges
+are permitted on the read path as on the write path: `rk3576_secure_otp_read`
+carries the identical `512`/`32`/`1552` checks that `rk3576_secure_otp_write`
+does. Reading HUK material is allowed, not just provisioning it.
+
+For that to work, Rockchip's firmware must leave `OTP_S` reachable from the
+non-secure world. It is not reachable here - `md.l 0x2a480000` from the U-Boot
+prompt on this build external-aborts - so upstream TF-A and upstream OP-TEE
+keep the secure OTP secure-only where the vendor stack apparently does not.
+This is inferred from the absence of an SMC in their driver rather than from
+reading their BL31, but it is the only way that driver can function.
+
+The practical consequence is narrow: nothing in this build exposes an OTP path
+to the normal world, so a key fused here is not reachable the way it would be
+under the vendor firmware. It does mean a key's secrecy should never be assumed
+from its position in the map alone.
 
 ### One correction it forces
 

@@ -1,0 +1,26 @@
+dt-bindings: pwm: rockchip: add the RK3576 controller
+
+RK3576 has a different register layout from the rk3328 generation, so it
+gets its own compatible rather than a fallback. Like rk3328 it takes the
+functional clock and the APB clock separately.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/Documentation/devicetree/bindings/pwm/pwm-rockchip.yaml
++++ b/Documentation/devicetree/bindings/pwm/pwm-rockchip.yaml
+@@ -15,6 +15,7 @@
+       - const: rockchip,rk2928-pwm
+       - const: rockchip,rk3288-pwm
+       - const: rockchip,rk3328-pwm
++      - const: rockchip,rk3576-pwm
+       - const: rockchip,vop-pwm
+       - items:
+           - const: rockchip,rk3036-pwm
+@@ -66,6 +67,7 @@
+           contains:
+             enum:
+               - rockchip,rk3328-pwm
++              - rockchip,rk3576-pwm
+               - rockchip,rv1108-pwm
+ 
+     then:

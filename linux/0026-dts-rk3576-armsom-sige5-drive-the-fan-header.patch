@@ -1,0 +1,105 @@
+dts: rk3576: armsom-sige5: drive the fan header
+
+The board has a fan header wired to PWM2 channel 7 on GPIO3_D7, mux m3.
+Nothing described it, so a fan plugged in either sat still or ran flat out
+depending on how the header is wired.
+
+Levels and trip points follow the vendor dts: 0/50/100/150/200/255 out of
+255, stepping up at 50, 55, 60, 65 and 70 degrees. The vendor carries the
+trips as rockchip,temp-trips inside its own pwm-fan; upstream expects them
+as thermal trips with cooling maps, so they move to package-thermal, the
+sensor near the centre of the die.
+
+That zone had no trip below the 115 degree critical one and so did not
+poll at all; give it a one second poll now that something reacts to
+temperature below the shutdown point.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
++++ b/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
+@@ -1366,6 +1366,84 @@
+ 		optee@72000000 {
+ 			reg = <0x0 0x72000000 0x0 0x400000>;
+ 			no-map;
++		};
++	};
++};
++
++/ {
++	fan: pwm-fan {
++		compatible = "pwm-fan";
++		pwms = <&pwm2_7 0 50000 0>;
++		cooling-levels = <0 50 100 150 200 255>;
++		#cooling-cells = <2>;
++	};
++};
++
++/* fan header, PWM2 channel 7 on GPIO3_D7 */
++&pwm2_7 {
++	pinctrl-0 = <&pwm2m3_ch7>;
++	status = "okay";
++};
++
++&package_thermal {
++	polling-delay = <1000>;
++
++	trips {
++		package_fan0: package-fan0 {
++			temperature = <50000>;
++			hysteresis = <2000>;
++			type = "active";
++		};
++
++		package_fan1: package-fan1 {
++			temperature = <55000>;
++			hysteresis = <2000>;
++			type = "active";
++		};
++
++		package_fan2: package-fan2 {
++			temperature = <60000>;
++			hysteresis = <2000>;
++			type = "active";
++		};
++
++		package_fan3: package-fan3 {
++			temperature = <65000>;
++			hysteresis = <2000>;
++			type = "active";
+ 		};
++
++		package_fan4: package-fan4 {
++			temperature = <70000>;
++			hysteresis = <2000>;
++			type = "active";
++		};
+ 	};
++
++	cooling-maps {
++		map0 {
++			trip = <&package_fan0>;
++			cooling-device = <&fan 1 1>;
++		};
++
++		map1 {
++			trip = <&package_fan1>;
++			cooling-device = <&fan 2 2>;
++		};
++
++		map2 {
++			trip = <&package_fan2>;
++			cooling-device = <&fan 3 3>;
++		};
++
++		map3 {
++			trip = <&package_fan3>;
++			cooling-device = <&fan 4 4>;
++		};
++
++		map4 {
++			trip = <&package_fan4>;
++			cooling-device = <&fan 5 5>;
++		};
++	};
+ };

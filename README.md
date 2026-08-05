@@ -21,15 +21,16 @@ Working and exercised on hardware: eMMC boot with A/B firmware slots and
 automatic revert, OTA updates, both Ethernet ports, onboard WiFi, HDMI with a
 framebuffer console, the GPU under Mesa (OpenGL ES 3.1, no X11 or Wayland), the
 NPU with vision and language models, CPU and GPU frequency scaling, thermal
-management, watchdog, RTC, ADC, USB, audio devices and a hardware RNG.
+management, the fan header, watchdog, RTC, ADC, USB, audio devices and a
+hardware RNG.
 
 Opt-in: a secure world. OP-TEE with a per-device key fused into the SoC, and
 PKCS#11 for generating and using keys that never leave it. One build flag.
 
 Not working: Bluetooth (uart4 is disabled in the mainline dts), CAN (no
-mainline driver), video decode (rkvdec2 lands in kernel 7.0), PWM and the fan
-header, MIPI CSI/DSI. microSD boot is unreachable while the eMMC holds a valid
-bootloader — the boot ROM's order is fixed.
+mainline driver), video decode (rkvdec2 lands in kernel 7.0), MIPI CSI/DSI.
+microSD boot is unreachable while the eMMC holds a valid bootloader — the boot
+ROM's order is fixed.
 
 Untested: M.2 NVMe. The drivers are built in, but no drive was fitted.
 
@@ -242,7 +243,7 @@ Verified on a Sige5 v1.2, 2026-08-05.
 | GPIO/I2C/SPI/UART header | Expected | Via [Circuits.*](https://elixir-circuits.github.io/) |
 | NPU (6 TOPS) | Yes | Vendor rknpu driver built out-of-tree against the mainline kernel (`package/rknpu-driver`) + librknnrt 2.3.2. IOMMU-backed pageable buffers (no CMA cap), devfreq across 300-900 MHz. Both cores usable together. Verified with MobileNetV2 (250 inf/s, top-5 matching Rockchip's reference exactly), Qwen3-0.6B W4A16 through rkllm 1.3.0 at 17.8 tok/s, and an int8 matmul checked against the CPU. Same results with and without the secure world. Models are built on a host with rknn-toolkit2 |
 | Video decode | No | rkvdec2 for RK3576 lands in kernel 7.0 |
-| PWM / fan header | No | No RK3576 PWM nodes in mainline 6.18 |
+| PWM / fan header | Yes | RK3576 has a fourth-generation PWM block that mainline 6.18 does not know; `linux/0023`-`0026` add the driver, the binding, the fourteen channels of pwm1 and pwm2, and a `pwm-fan` on PWM2 channel 7 (GPIO3_D7, mux m3) at 20 kHz. The fan steps 0/50/100/150/200/255 at 50, 55, 60, 65 and 70 °C off the package sensor, and is a normal hwmon device the rest of the time |
 | MIPI CSI/DSI | No | Not wired up in mainline for this board |
 
 ## Building
@@ -253,6 +254,13 @@ Linux (or the Nerves Docker build environment) is required:
 mix deps.get
 mix compile
 ```
+
+Editing anything in `linux/` costs a full kernel rebuild, by design. Buildroot
+applies `linux/*.patch` when it first extracts the kernel and never looks
+again — a patch added afterwards is ignored, the kernel is rebuilt from the
+tree it already has, and the build reports success, so the symptom is a change
+that simply is not in the image. `external.mk` keeps a hash of the patch set
+inside the extracted tree and throws the tree away when it stops matching.
 
 ### Using in an application
 
@@ -285,10 +293,11 @@ fwup -a -d disk.img -t complete -i <firmware>.fw   # raw image on the host
 # OTG Type-C port to the host, hold MASKROM while connecting the PD
 # power supply to the other (PD-only) Type-C port:
 rkdeveloptool db uboot/rk3576_spl_loader_v1.09.108.bin
-rkdeveloptool cs 1                                  # storage: eMMC
 rkdeveloptool wl 0 disk.img
 rkdeveloptool rd
 ```
+
+The bootloader is inside that image — there is no separate write at sector 64.
 
 That is the fast path: measured, it writes the whole 1.8 GB image in 88
 seconds. Note that `rkdeveloptool db` is load-bearing — it puts Rockchip's SPL

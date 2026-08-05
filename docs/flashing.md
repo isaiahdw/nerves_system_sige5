@@ -3,6 +3,9 @@
 Four ways to get bytes onto the eMMC, with the constraints that decide which
 one to use.
 
+**First time, or a board in an unknown state: go to route 4.** One image
+carries everything, bootloader included, and it takes about 90 seconds.
+
 ## 1. Board runs Nerves and is on the network
 
 The normal case. Firmware goes over ssh:
@@ -116,7 +119,28 @@ The fast one, and the right default for anything larger than a bootloader:
 loader in RAM and everything is written through that, which is a different
 thing from U-Boot's rockusb gadget despite taking the same commands.
 
-    rkdeveloptool ld                                    # confirm it is listed
+To get there: OTG Type-C port to the host, then hold MASKROM while connecting
+power to the other (PD-only) Type-C port.
+
+A whole board from one file - this is the first-time path:
+
+    fwup -a -d disk.img -t complete -i <firmware>.fw   # raw image on the host
+
+    rkdeveloptool ld                                   # confirm it is listed
+    rkdeveloptool db uboot/rk3576_spl_loader_v1.09.108.bin
+    rkdeveloptool wl 0 disk.img
+    rkdeveloptool rd                                   # reset
+
+To confirm the loader is answering before committing to a write, read a
+sector: `rkdeveloptool rl 64 1 /tmp/s.bin` shows `RKNS` if a bootloader is
+there.
+
+The bootloader is inside that image - `fwup.conf` packages
+`uboot/u-boot-rockchip.bin` and the `complete` task writes it at sector 64
+along with everything else. There is no separate bootloader step.
+
+Just the bootloader, leaving the filesystems alone:
+
     rkdeveloptool db uboot/rk3576_spl_loader_v1.09.108.bin
     rkdeveloptool wl 64 uboot/u-boot-rockchip.bin
     rkdeveloptool rd

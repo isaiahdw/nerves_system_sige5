@@ -211,22 +211,37 @@ address in the group `rk3576_def.h` leaves out. The secure block runs
 OTP_S, `0x2a490000` DCF, `0x2a4a0000`/`0x2a4b0000` STIMER, `0x2a4c0000` WDT_S,
 `0x2a4d0000` OTP_MASK.
 
-That leaves `0x2a440000` through `0x2a470000` unaccounted, so `0x2a440000` is
-the leading candidate - it continues the run, and mirrors the non-secure side
-where crypto and rng sit adjacent - but three other slots fit equally well by
-address alone. The slave IDs do not settle it either: 28 and 29 are in the
-opposite order to their addresses.
+That leaves `0x2a440000` through `0x2a470000` unaccounted. No public source
+gives the value: GitHub code search finds no RK3576 reference to any of the
+four, and the Rockchip BL32 blob is packed, so the address-constant search that
+finds `0x2a4d0000` in BL31 v1.20 finds nothing there.
 
-No public source gives the value. GitHub code search finds no RK3576 reference
-to any of the four candidates, and the Rockchip BL32 blob is packed, so the
-address-constant search that finds `0x2a4d0000` in BL31 v1.20 finds nothing
-there.
+**It is `0x2a440000`**, found by probing from the secure world one candidate at
+a time, each announced before it was touched so that a fault would still name
+the address that caused it. The first answered:
 
-Confirming it means probing from the secure world, where a hit returns changing
-random data and a miss either times out harmlessly or external-aborts and takes
-the boot with it. That is recoverable - the bootloader can be rewritten over
-USB, see the recovery notes - but it is a deliberate experiment, not something
-to leave in a build.
+    I/TC:   about to touch 0x2a440000
+    I/TC:   0x2a440000: RKRNG_S - fresh data on each request
+
+Answering the RKRNG sequence is not by itself proof, since a mirror of the
+published block would do the same. The other half is that the normal world
+cannot reach it. From the U-Boot prompt:
+
+    => md.l 0x2a410014 1
+    2a410014: 00000000                       non-secure instance, reads
+    => md.l 0x2a440014 1
+    "Synchronous Abort" ... far 0x2a440014   secure, barred
+
+So it is the secure block, not an alias. Seeding uses it as of `optee/0010`,
+which retires what sharing the non-secure instance cost: its data registers are
+no longer readable from the normal world, Linux no longer owns the reset and
+gate of the block being seeded from, and the mode selector is no longer
+normal-world writable - the last mattering most, since a warm reboot could
+otherwise carry a degraded setting into the next boot's seeding.
+
+The probe is kept behind `CFG_RK3576_TRNG_S_PROBE`, off by default, so the
+result can be re-run on another board or a later revision rather than resting
+on one measurement.
 
 ## Rockchip's own model
 

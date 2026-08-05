@@ -115,7 +115,7 @@ loads from the rootfs signed with the key the core was built with, and
 part ships with no HUK — see below.
 
 The full investigation is in
-[docs/research/rk3576-secure-otp-survey.md](docs/research/rk3576-secure-otp-survey.md):
+[docs/research/rk3576-secure-world.md](docs/research/rk3576-secure-world.md):
 where the HUK lives and how that was confirmed against Rockchip's own driver,
 that the secure OTP really is unreachable from the normal world, where the
 secure TRNG is, what the burn checks before committing anything, and what a
@@ -425,7 +425,7 @@ CRU dividers off GPLL/CPLL/AUPLL/SPLL/LPLL cannot produce the upper rates.
   achievable points cluster.
 
   Three things since, all in
-  [docs/research/rk3576-gpu-clock-investigation.md](docs/research/rk3576-gpu-clock-investigation.md).
+  [docs/research/rk3576-gpu-clocks.md](docs/research/rk3576-gpu-clocks.md).
   The same numbers come out of upstream TF-A as out of Rockchip's BL31, so none
   of this is firmware-conditional — the PVTPLL tables are identical at every
   rate. The low OPPs overshoot because they share one voltage: 700 mV is the DT

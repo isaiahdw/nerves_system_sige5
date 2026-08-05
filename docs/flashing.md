@@ -1,8 +1,7 @@
 # Flashing a Sige5
 
-Four ways to get bytes onto the eMMC, in the order worth reaching for. Every
-one of these was worked out the hard way at least once; the notes are the
-mistakes, not the theory.
+Four ways to get bytes onto the eMMC, with the constraints that decide which
+one to use.
 
 ## 1. Board runs Nerves and is on the network
 

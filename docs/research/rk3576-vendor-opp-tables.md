@@ -72,7 +72,7 @@ The NPU's measured `pvtm=868` falls in the last bucket and the kernel printed
 `pvtm-volt-sel=4`, which confirms the decoding.
 
 This board's GPU PVTM score, measured through `GCK_CNT_AVG` and recorded in
-`rk3576-gpu-clock-investigation.md`, is **802**. In the table above that is the
+`rk3576-gpu-clocks.md`, is **802**. In the table above that is the
 801-820 bucket, so this die's **GPU grades L1**.
 
 That supersedes the grade in the earlier document, which read 802 as **L5** from

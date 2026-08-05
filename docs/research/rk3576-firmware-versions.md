@@ -47,7 +47,7 @@ covers both memory types and the fitted DRAM selects.
 BL31 v1.05 (2024-04-24) added "Add otp init", "Increase pvtpll length for middle
 frequencies" and "Adjust pvtpll table by otp opp info". The per-die adjustment
 matters here because this board's OTP `opp-info` cells are unprogrammed; see
-`rk3576-gpu-clock-investigation.md`.
+`rk3576-gpu-clocks.md`.
 
 BL31 v1.02 enabled the GPU counter that the clock measurements rely on.
 
@@ -56,15 +56,9 @@ rates, so v1.24 behaves as v1.05 established for these purposes.
 
 ## A trust-ini `ADDR` is an offset, not an address
 
-Kept because it cost a maskrom recovery to learn and applies to any Rockchip
-trust ini, not just the BL32 route this repository no longer builds.
-
-`RKTRUST/RK3576TRUST.ini` gives `[BL32_OPTION] ADDR = 0x08400000`. Loading a
-BL32 there hangs SPL mid-FIT - after it verifies `u-boot`, `atf-2` and `atf-3`,
-before BL31 runs - because this board's DRAM starts at `0x40200000` and
-`0x08400000` is roughly 0.9 GB below it. The board then needs maskrom.
-
-Rockchip's own `arch/arm/mach-rockchip/fit_args.sh` explains it:
+`RKTRUST/RK3576TRUST.ini` gives `[BL32_OPTION] ADDR = 0x08400000`. That is an
+offset from `DRAM_BASE`, not an address. Rockchip's own
+`arch/arm/mach-rockchip/fit_args.sh`:
 
 ```sh
 -t)     TEE_LOAD_ADDR=$2
@@ -73,28 +67,21 @@ Rockchip's own `arch/arm/mach-rockchip/fit_args.sh` explains it:
                 TEE_LOAD_ADDR="0x"$(echo "obase=16;$((DRAM_BASE+$2))"|bc)
 ```
 
-Anything below `DRAM_BASE` gets the base added. With
-`CONFIG_SYS_SDRAM_BASE = 0x40000000` for RK3576, the real address is
+With `CONFIG_SYS_SDRAM_BASE = 0x40000000` the real address is `0x48400000`.
+Taken literally it lands 0.9 GB below DRAM, which starts at `0x40200000`, and
+SPL hangs mid-FIT copying the TEE into nothing - after verifying `u-boot`,
+`atf-2` and `atf-3`, before BL31 runs. The board then needs maskrom.
 
-    0x40000000 + 0x08400000 = 0x48400000
+Check any trust-ini `ADDR` against the DRAM base before using it.
 
-Do not take an `ADDR` out of a trust ini literally without checking it against
-the DRAM base first.
+## Rockchip's BL32 blob is not usable here
 
-## Why the Rockchip BL32 route was dropped
+It ships no PKCS#11 TA. `TEEC_OpenSession` on
+`fd02c9da-306c-48c7-a49c-bbd827ae86ee` returns `ITEM_NOT_FOUND` on v1.08 and
+v1.12, measured on hardware. It is not a filesystem TA either - no
+`/lib/optee_armtz`, no `.ta` on the image - and rkbin ships a TA bundle for
+rk3506 but none for rk3576. Authoring one needs Rockchip's signing key.
 
-`WITH_BL32=1` used to wrap `rk3576_bl32_v1.12.bin` in an ELF - binman takes an
-ELF or a binary carrying an `optee_v1_header`, and the blob has neither - and
-build a bootloader with Rockchip's secure world.
-
-It is gone because there is no way to use it. The blob ships no PKCS#11 TA:
-`TEEC_OpenSession` on `fd02c9da-306c-48c7-a49c-bbd827ae86ee` returns
-`ITEM_NOT_FOUND` on both v1.08 and v1.12, measured on hardware. It is not a
-filesystem TA either - no `/lib/optee_armtz`, no `.ta` anywhere on the image,
-and rkbin ships a TA bundle for rk3506 but none for rk3576. Writing one needs
-Rockchip's signing key.
-
-So the blob offers OTP-backed key machinery reachable only through TAs that do
-not exist and cannot be authored. Upstream OP-TEE has PKCS#11 and, with the
-patches in `optee/`, a real per-device key - which makes it the only route that
-ends somewhere useful.
+So its OTP-backed key machinery is reachable only through TAs that cannot
+exist. `scripts/build-uboot.sh` builds upstream OP-TEE instead, which has
+PKCS#11 and, with the patches in `optee/`, a per-device key.

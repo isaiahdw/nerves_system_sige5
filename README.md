@@ -304,6 +304,10 @@ Then `export MIX_TARGET=sige5` for every mix command.
 
 ## Flashing
 
+See [docs/flashing.md](docs/flashing.md) for the full set of routes — over the
+network, from a U-Boot prompt, and from maskrom — along with the mistakes each
+one invites.
+
 Factory flash goes to the eMMC over USB maskrom (see
 [uboot/README.md](uboot/README.md) for details):
 
@@ -317,6 +321,14 @@ rkdeveloptool wl 0 disk.img
 rkdeveloptool rd
 ```
 
+That writes the whole image, which is mostly padding: a `complete` image is
+about 1.8 GB of which roughly 137 MB is data, and this transport runs under
+1 MB/s. Measured, a full write does not finish inside 50 minutes. It is the
+right shape for a factory jig that can run unattended and the wrong one for
+turning a board around. To do it quickly, expose the eMMC from U-Boot with
+`ums 0 mmc 0` and point `fwup` at the resulting disk, which skips the padding —
+see the doc.
+
 The image is smaller than the eMMC; on the first boot the system grows
 the app partition to fill the disk automatically.
 
@@ -324,7 +336,9 @@ Alternative with no tools: `mix burn` the same firmware to a microSD and
 boot from the slot — useful for first bring-up and recovery.
 
 OTA upgrades are the standard Nerves flow (`mix upload`); upgrades write
-the inactive slot only and revert automatically unless validated.
+the inactive slot only and revert automatically unless validated. The
+bootloader is not part of an A/B update — changing it is a separate write at
+sector 64, with one copy and no revert.
 
 ## Kernel
 

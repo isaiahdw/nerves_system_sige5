@@ -7,8 +7,8 @@ build.log
 /log/
 /archive.log
 
-# Experimental bootloader from scripts/build-uboot.sh. u-boot-rockchip.bin is
-# tracked because fwup packages it; this one carries a secure world nothing has
-# qualified yet, and is rebuilt on demand.
-/uboot/u-boot-rockchip-ostee.bin
+# u-boot-rockchip.bin is tracked because fwup packages it, and
+# u-boot-rockchip.variant records which build is in it - a plain binary diff
+# says only "binary files differ", which is not enough to notice that a secure
+# world got committed by accident.
 /uboot/optee-ta/

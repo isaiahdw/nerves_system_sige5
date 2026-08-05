@@ -12,7 +12,7 @@ The normal case. Firmware goes over ssh:
 The bootloader is not part of an A/B firmware update, so changing it is a
 separate step - copy it over and write it at sector 64:
 
-    sftp <ip> <<< 'put uboot/u-boot-rockchip-ostee.bin /tmp/u-boot.bin'
+    sftp <ip> <<< 'put uboot/u-boot-rockchip.bin /tmp/u-boot.bin'
     ssh <ip>
     iex> cmd("dd if=/tmp/u-boot.bin of=/dev/mmcblk0 bs=512 seek=64 conv=fsync")
 
@@ -44,7 +44,7 @@ back. No power cycle needed.
 
 Then, from the host:
 
-    rkdeveloptool wl 64 uboot/u-boot-rockchip-ostee.bin
+    rkdeveloptool wl 64 uboot/u-boot-rockchip.bin
     rkdeveloptool rl 64 <sectors> /tmp/verify.bin    # md5 must match the source
     rkdeveloptool rd                                 # reset
 
@@ -146,12 +146,18 @@ from U-Boot also reports "Boot area 0 is not write protected" and a 4 MiB RPMB.
 
 ## Which bootloader
 
-`scripts/build-uboot.sh` produces two, and only the first is packaged by fwup:
+`scripts/build-uboot.sh` writes one file, `uboot/u-boot-rockchip.bin`, and fwup
+packages it. Which build is in it depends on how it was made:
 
-| file | secure world |
+| build | secure world |
 | --- | --- |
-| `u-boot-rockchip.bin` | none - Rockchip BL31 only |
-| `u-boot-rockchip-ostee.bin` | upstream TF-A + OP-TEE (`USE_OPENSOURCE_TEE=1`) |
+| `./scripts/build-uboot.sh` | none - rkbin BL31 only |
+| `SECURE_WORLD=1 ./scripts/build-uboot.sh` | upstream TF-A + OP-TEE, fuses a HUK on first boot |
 
-Swapping between them is a bootloader write at sector 64 and nothing else, so a
-board can be moved between firmware stacks without touching its filesystem.
+`uboot/u-boot-rockchip.variant` records which, because a diff of the binary says
+only "binary files differ".
+
+Since it is the packaged file, rebuilding the system and flashing normally is
+enough - there is no separate bootloader to write. Moving an already-running
+board between stacks is still a write at sector 64 and nothing else, which
+leaves its filesystem alone.

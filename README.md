@@ -77,14 +77,22 @@ BL31 (TF-A)  ── loads ──▶  BL32 (OP-TEE)
 ### Building it
 
 ```sh
-USE_OPENSOURCE_TEE=1 ./scripts/build-uboot.sh
+SECURE_WORLD=1 ./scripts/build-uboot.sh
 ```
 
-Off by default and not packaged by fwup; it writes
-`u-boot-rockchip-ostee.bin`, and enabling it is a bootloader write at sector 64
-(see [docs/flashing.md](docs/flashing.md)). It replaces BL31 as well, which is
-worth knowing because the GPU measurements below were taken on Rockchip's -
-they turn out to be identical on both, but that was checked rather than assumed.
+That writes `uboot/u-boot-rockchip.bin` — the file fwup packages — so rebuild
+the system, build firmware, and flash normally. There is no second bootloader
+and nothing to swap in at flash time.
+`uboot/u-boot-rockchip.variant` records which build is in the binary.
+
+An image built this way **fuses a hardware unique key on the first boot of a
+part that has none**, because a secure world without one cannot store anything.
+It only ever writes a blank slot and only after its checks pass, so booting it
+on a part that already has a key does nothing.
+
+It replaces BL31 as well, which is worth knowing because the GPU measurements
+below were taken on Rockchip's — they turn out identical on both, but that was
+checked rather than assumed.
 
 Rockchip's own BL32 blob is not built here. It ships no PKCS#11 TA -
 `TEEC_OpenSession` on `fd02c9da-306c-48c7-a49c-bbd827ae86ee` returns

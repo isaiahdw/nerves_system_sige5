@@ -229,19 +229,23 @@ with no two alike across six draws.
 Nothing in this repository has been fused.
 
 ```sh
-USE_OPENSOURCE_TEE=1 PERSIST_HUK=1 ./scripts/build-uboot.sh
+SECURE_WORLD=1 ./scripts/build-uboot.sh
 ```
 
-`CFG_RK3576_PERSIST_HUK` is off by default, and a build with it on programs the
-first unprovisioned part it boots - there is no per-board confirmation. Such an
-image is a provisioning tool rather than a firmware, and is distinguishable:
+One flag. It builds upstream OP-TEE inside TF-A and writes the result to
+`uboot/u-boot-rockchip.bin` - the file fwup packages - so a normal firmware
+build and flash carries it. There is no second bootloader to swap in.
 
-```sh
-strings u-boot-rockchip-ostee.bin | grep 'HUK burn'   # empty = persist is out
-```
+That image fuses a HUK on the first boot of a part that has none, because a
+secure world without one cannot store anything. It only ever writes a blank
+slot, and only after the checks below pass, so booting it on a part that
+already has a key does nothing.
 
-Two read-only flags sit alongside it: `HUK_DRY_RUN=1` reports what a burn would
-do without writing, and `TRNG_S_PROBE=1` re-runs the search for `RKRNG_S`.
+`uboot/u-boot-rockchip.variant` records which build is in the binary, since a
+diff of the binary itself says only "binary files differ".
+
+`SECURE_WORLD_DEBUG=1` adds read-only diagnostics: an OTP survey, a search for
+`RKRNG_S`, and a dry run reporting what a burn would do without writing.
 
 ### Order of operations
 

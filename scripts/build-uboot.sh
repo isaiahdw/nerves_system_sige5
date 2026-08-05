@@ -42,25 +42,22 @@ BL31_ELF="bin/rk35/rk3576_bl31_v1.25.elf"
 # needs Rockchip's signing key. See docs/research/rk3576-firmware-versions.md,
 # which also keeps the trust-ini load-address trap that route walked into.
 
-# USE_OPENSOURCE_TEE=1 replaces both Rockchip blobs with upstream: OP-TEE built
-# for PLATFORM=rockchip-rk3576, inside TF-A built with SPD=opteed. It is the
-# only combination that gives both a PKCS#11 TA and a per-device key. Upstream
-# has PKCS#11 but no HUK for this SoC until the patches in optee/ are applied;
-# Rockchip's blob has the OTP-backed key machinery and no PKCS#11 to reach it
-# with, which is why it is not an option here.
+# SECURE_WORLD=1 builds a bootloader with a secure world: upstream OP-TEE for
+# PLATFORM=rockchip-rk3576 inside TF-A with SPD=opteed, replacing rkbin's BL31.
+# The result is written to u-boot-rockchip.bin - the same file fwup packages -
+# so a normal `mix firmware` and flash carries it, with no bootloader swapping.
 #
-# Opt-in, and unset by default, because it swaps out BL31 as well. Every GPU
-# measurement in docs/research rests on Rockchip's BL31 owning the PVTPLL, and
-# upstream TF-A is a different implementation of that.
+# That image fuses a hardware unique key on the first boot of a part that has
+# none, because a secure world without one cannot store anything. It only ever
+# writes a blank slot, and only after the checks in optee/0011 pass. See
+# docs/research/rk3576-secure-world.md.
 #
-# Upstream puts TZDRAM at 0x70000000/32 MB and SHM at 0x72000000/4 MB
-# (plat-rockchip conf.mk). linux/0022 reserves those, and the 0x48400000 region
-# a Rockchip BL32 would have used, so one kernel boots either bootloader.
-
-# HUK_DRY_RUN=1 reports what fusing a HUK would write, and where, without
-# writing it - see optee/0008. The OTP write path has never executed on this
-# SoC and its first run would be permanent, so the address and the
-# preconditions are worth seeing on a console first.
+# It also swaps out BL31. GPU rates are unaffected - the PVTPLL tables are
+# identical and it was measured both ways - but that is the thing to re-check if
+# clocks ever look wrong.
+#
+# SECURE_WORLD_DEBUG=1 adds read-only diagnostics: an OTP survey, a search for
+# the secure TRNG, and a dry run reporting what a burn would do.
 OPTEE_GIT="https://github.com/OP-TEE/optee_os.git"
 OPTEE_COMMIT="5a53776"
 TFA_GIT="https://github.com/ARM-software/arm-trusted-firmware.git"
@@ -84,7 +81,7 @@ git clone --depth 1 --branch $UBOOT_VERSION https://source.denx.de/u-boot/u-boot
 git clone --filter=blob:none $RKBIN_REPO /rkbin
 git -C /rkbin checkout $RKBIN_COMMIT
 
-if [ '${USE_OPENSOURCE_TEE:-0}' = 1 ]; then
+if [ '${SECURE_WORLD:-0}' = 1 ]; then
     # OP-TEE first: TF-A needs tee.bin to package as BL32.
     git clone --filter=blob:none $OPTEE_GIT /optee_os
     git -C /optee_os checkout $OPTEE_COMMIT
@@ -93,9 +90,9 @@ if [ '${USE_OPENSOURCE_TEE:-0}' = 1 ]; then
         CROSS_COMPILE64=aarch64-linux-gnu- \
         CFG_USER_TA_TARGETS=ta_arm64 \
         CFG_PKCS11_TA=y \
-        CFG_RK3576_HUK_DRY_RUN=$([ "${HUK_DRY_RUN:-0}" = 1 ] && echo y || echo n) \
-        CFG_RK3576_TRNG_S_PROBE=$([ "${TRNG_S_PROBE:-0}" = 1 ] && echo y || echo n) \
-        CFG_RK3576_PERSIST_HUK=$([ "${PERSIST_HUK:-0}" = 1 ] && echo y || echo n) \
+        CFG_RK3576_HUK_DRY_RUN=$([ "${SECURE_WORLD_DEBUG:-0}" = 1 ] && echo y || echo n) \
+        CFG_RK3576_TRNG_S_PROBE=$([ "${SECURE_WORLD_DEBUG:-0}" = 1 ] && echo y || echo n) \
+        CFG_RK3576_PERSIST_HUK=y \
         -j\$(nproc)
 
     git clone --depth 1 --branch $TFA_BRANCH $TFA_GIT /tfa
@@ -107,7 +104,7 @@ fi
 
 cd /u-boot
 export ROCKCHIP_TPL=/rkbin/$DDR_BIN
-if [ '${USE_OPENSOURCE_TEE:-0}' = 1 ]; then
+if [ '${SECURE_WORLD:-0}' = 1 ]; then
     export BL31=/tfa/build/rk3576/release/bl31/bl31.elf
     export TEE=/optee_os/out/arm-plat-rockchip/core/tee.bin
     aarch64-linux-gnu-readelf -h \$BL31 | head -3
@@ -130,11 +127,16 @@ grep -E 'CONFIG_ENV_IS|CONFIG_ENV_OFFSET|CONFIG_ENV_SIZE|CONFIG_SYS_MMC_ENV_DEV'
 
 make -j\$(nproc) CROSS_COMPILE=aarch64-linux-gnu-
 
-# Deliberately not u-boot-rockchip.bin: fwup packages that name, and a
-# bootloader carrying a secure world should not be picked up by simply having
-# been built. Enabling it is a rename, on purpose.
-if [ '${USE_OPENSOURCE_TEE:-0}' = 1 ]; then
-    cp u-boot-rockchip.bin /out/u-boot-rockchip-ostee.bin
+# One output name. fwup packages u-boot-rockchip.bin, so whichever variant was
+# built is the one that ships - no second artifact and no swapping at flash
+# time. uboot/u-boot-rockchip.variant records which it is, in a form git can
+# show; a diff of the binary alone says only that binary files differ.
+#
+# Careful with double quotes below: this whole block is inside a bash -c
+# double-quoted string, and an unescaped quote silently truncates it - the
+# build still runs and exits 0, but everything after the quote is dropped.
+if [ '${SECURE_WORLD:-0}' = 1 ]; then
+    cp u-boot-rockchip.bin /out/u-boot-rockchip.bin
     # The PKCS#11 TA is a filesystem TA, not an early one: OP-TEE loads it
     # through tee-supplicant from /lib/optee_armtz. It is signed with the key
     # the core was built with - ours - so it will be trusted. Export it so the
@@ -146,8 +148,24 @@ else
 fi
 "
 
-if [ "${USE_OPENSOURCE_TEE:-0}" = 1 ]; then
-    echo "=== done. Wrote uboot/u-boot-rockchip-ostee.bin (upstream TF-A + OP-TEE)"
+VARIANT_FILE="$REPO_DIR/uboot/u-boot-rockchip.variant"
+if [ "${SECURE_WORLD:-0}" = 1 ]; then
+    {
+        echo "variant: secure-world"
+        echo "built:   upstream TF-A + OP-TEE (PLATFORM=rockchip-rk3576, SPD=opteed)"
+        echo "fuses:   yes - burns a HUK on first boot of an unprovisioned part"
+        echo "debug:   ${SECURE_WORLD_DEBUG:-0}"
+    } > "$VARIANT_FILE"
+    echo
+    echo "=== uboot/u-boot-rockchip.bin now carries a SECURE WORLD."
+    echo "=== Booting it on a part with no HUK fuses one, permanently."
+    echo "=== This is the file fwup packages, so any firmware built from this"
+    echo "=== system will do that. See uboot/u-boot-rockchip.variant."
 else
-    echo "=== done. Updated uboot/u-boot-rockchip.bin"
+    {
+        echo "variant: plain"
+        echo "built:   rkbin BL31, no secure world"
+        echo "fuses:   no"
+    } > "$VARIANT_FILE"
+    echo "=== done. uboot/u-boot-rockchip.bin updated (plain, no secure world)"
 fi

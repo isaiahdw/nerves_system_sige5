@@ -87,8 +87,6 @@ maskrom loader that costs nothing worth having; through the U-Boot gadget it is
 If maskrom is not reachable, the eMMC can be exported as a USB disk from U-Boot
 and handed to fwup, which does skip the holes:
 
-Expose the eMMC as a USB disk from U-Boot and let fwup do it properly:
-
     => mmc dev 0
     => ums 0 mmc 0
 
@@ -114,8 +112,10 @@ privileges.
 
 ## 4. Maskrom
 
-For a board that will not reach U-Boot. Same protocol and same speed as
-route 2.
+The fast one, and the right default for anything larger than a bootloader:
+88 seconds for a full 1.8 GB image. `db` is the reason - it puts Rockchip's SPL
+loader in RAM and everything is written through that, which is a different
+thing from U-Boot's rockusb gadget despite taking the same commands.
 
     rkdeveloptool ld                                    # confirm it is listed
     rkdeveloptool db uboot/rk3576_spl_loader_v1.09.108.bin

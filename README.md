@@ -86,13 +86,12 @@ Off by default and not packaged by fwup; it writes
 worth knowing because the GPU measurements below were taken on Rockchip's -
 they turn out to be identical on both, but that was checked rather than assumed.
 
-Rockchip's own BL32 blob is **not** an option here, and used to be. It ships no
-PKCS#11 TA - `TEEC_OpenSession` on `fd02c9da-306c-48c7-a49c-bbd827ae86ee`
-returns `ITEM_NOT_FOUND` on both v1.08 and v1.12, measured on hardware - is not
-a filesystem TA either, and authoring one needs Rockchip's signing key. So its
-OTP-backed key machinery is reachable only through TAs that cannot exist, which
-leaves upstream as the only route ending with both PKCS#11 and a per-device key.
-The route and what it cost to explore are in
+Rockchip's own BL32 blob is not built here. It ships no PKCS#11 TA -
+`TEEC_OpenSession` on `fd02c9da-306c-48c7-a49c-bbd827ae86ee` returns
+`ITEM_NOT_FOUND` on v1.08 and v1.12, measured on hardware - is not a filesystem
+TA either, and authoring one needs Rockchip's signing key. Its OTP-backed key
+machinery is therefore reachable only through TAs that cannot exist, leaving
+upstream as the only route with both PKCS#11 and a per-device key. See
 [docs/research/rk3576-firmware-versions.md](docs/research/rk3576-firmware-versions.md).
 
 ### What the patches add

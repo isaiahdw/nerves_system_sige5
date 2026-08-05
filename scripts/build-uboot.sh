@@ -65,8 +65,17 @@ TFA_BRANCH="master"
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-docker run --rm -v "$REPO_DIR/uboot":/out -v "$REPO_DIR/optee":/optee-patches \
-    debian:bookworm bash -c "
+OUT_BIN="$REPO_DIR/uboot/u-boot-rockchip.bin"
+BUILD_STAMP="$(mktemp)"
+trap 'rm -f "$BUILD_STAMP"' EXIT
+
+# Fed on stdin rather than as bash -c "...". In a double-quoted argument any
+# unescaped quote below would end the string early, and the container would
+# silently run a truncated script - building fine, copying nothing, exiting 0.
+# In this heredoc quotes are just characters. Host expansion still happens, so
+# \$ still defers a variable to the container.
+docker run --rm -i -v "$REPO_DIR/uboot":/out -v "$REPO_DIR/optee":/optee-patches \
+    debian:bookworm bash -s <<CONTAINER_SCRIPT
 set -e
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git make gcc \
@@ -131,10 +140,7 @@ make -j\$(nproc) CROSS_COMPILE=aarch64-linux-gnu-
 # built is the one that ships - no second artifact and no swapping at flash
 # time. uboot/u-boot-rockchip.variant records which it is, in a form git can
 # show; a diff of the binary alone says only that binary files differ.
-#
-# Careful with double quotes below: this whole block is inside a bash -c
-# double-quoted string, and an unescaped quote silently truncates it - the
-# build still runs and exits 0, but everything after the quote is dropped.
+
 if [ '${SECURE_WORLD:-0}' = 1 ]; then
     cp u-boot-rockchip.bin /out/u-boot-rockchip.bin
     # The PKCS#11 TA is a filesystem TA, not an early one: OP-TEE loads it
@@ -146,7 +152,40 @@ if [ '${SECURE_WORLD:-0}' = 1 ]; then
 else
     cp u-boot-rockchip.bin /out/
 fi
-"
+CONTAINER_SCRIPT
+
+# Check the artifact matches what was asked for. The container can succeed and
+# still not produce what was intended - a truncated script, a copy that never
+# ran, a stale file left in place - and every one of those exits 0. Compare the
+# result against the request rather than trusting the exit code.
+if [ ! -f "$OUT_BIN" ]; then
+    echo "BUILD FAILED: $OUT_BIN was not produced" >&2
+    exit 1
+fi
+
+if [ ! "$OUT_BIN" -nt "$BUILD_STAMP" ]; then
+    echo "BUILD FAILED: $OUT_BIN was not written by this run." >&2
+    echo "  The container exited 0 but left the previous binary in place." >&2
+    exit 1
+fi
+
+# tee.bin only appears in the image when a secure world was built into it
+if grep -qa "OP-TEE version" "$OUT_BIN"; then
+    BUILT_SECURE=1
+else
+    BUILT_SECURE=0
+fi
+
+if [ "$BUILT_SECURE" != "$([ "${SECURE_WORLD:-0}" = 1 ] && echo 1 || echo 0)" ]; then
+    echo "BUILD FAILED: asked for SECURE_WORLD=${SECURE_WORLD:-0}," >&2
+    echo "  but the image $([ "$BUILT_SECURE" = 1 ] && echo does || echo does not) contain OP-TEE." >&2
+    exit 1
+fi
+
+if [ "${SECURE_WORLD:-0}" = 1 ] && ! grep -qa "HUK burn" "$OUT_BIN"; then
+    echo "BUILD FAILED: secure world built without the HUK provisioning path" >&2
+    exit 1
+fi
 
 VARIANT_FILE="$REPO_DIR/uboot/u-boot-rockchip.variant"
 if [ "${SECURE_WORLD:-0}" = 1 ]; then

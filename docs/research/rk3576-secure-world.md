@@ -3,6 +3,79 @@
 What the secure world on this SoC consists of, what is in its one-time
 programmable memory, and how this firmware uses it.
 
+## What it is for
+
+The board has no secure element - no ATECC608, no TPM - and the hardware cannot
+be changed. What it does have is TrustZone, which lets a small separate OS
+(OP-TEE) run at a privilege level Linux cannot reach, and a few fuses inside the
+SoC that only that OS can read.
+
+Between them those give the thing a secure element would: **a private key the
+device can use but nobody can copy off it.**
+
+### The problem being solved
+
+A device identity key - for NervesHub, an MQTT broker, a certificate - is
+normally a file on the data partition. Anyone who unsolders the eMMC, or gets
+root once, reads it and can impersonate that device forever, and you cannot tell
+that it happened.
+
+With a secure world the key is generated inside OP-TEE and never leaves it. The
+application does not hold the key; it asks the secure world to sign a challenge
+and gets a signature back. Dump the eMMC and you get ciphertext.
+
+### The pieces, and what each one buys
+
+| piece | what it gives you | needed for a device key? |
+| --- | --- | --- |
+| **OP-TEE** | a place to run code and hold secrets that Linux cannot read | yes |
+| **HUK** (fused per device) | the root secret everything else is encrypted against, unique to that SoC | yes |
+| **PKCS#11 TA** | the standard interface for generating keys and signing with them | yes |
+| **Secure storage (REE-FS)** | keys stored encrypted and authenticated, keyed from the HUK | yes - and this is the default |
+| **RPMB** | rollback protection: nobody can restore an older copy of secure storage | no - see below |
+
+A common assumption, and one worth stating plainly because it is wrong: **RPMB
+is not required for secure storage.** OP-TEE's default backend is `CFG_REE_FS`,
+which keeps encrypted, authenticated files on the normal filesystem, keyed from
+the HUK. Confidentiality and integrity come from that alone.
+
+What RPMB adds is only rollback protection. Without it, someone holding the eMMC
+can restore an *old snapshot* of secure storage and OP-TEE cannot tell. That
+matters for things that must move in one direction - revocation lists, usage
+counters, "this firmware version was superseded" - and matters very little for a
+device identity key, where restoring an old snapshot just hands back the same
+key.
+
+### Compared to Trust&GO
+
+The closest familiar equivalent is Microchip's ATECC608B in Trust&GO trim, and
+the shape is the same:
+
+| | ATECC608B Trust&GO | this |
+| --- | --- | --- |
+| where the private key lives | inside the chip | inside OP-TEE, encrypted against the HUK |
+| can it be read out | no | no |
+| how the application uses it | ask the chip to sign | ask the secure world to sign, over PKCS#11 |
+| provisioning | done in Microchip's factory, ships with a cert | done here, on first boot |
+| what you register with the cloud | the public key / cert | the public key |
+| root of trust | the chip's own fused key | the SoC's fused HUK |
+
+The practical differences: Trust&GO arrives pre-provisioned with a certificate
+chain and needs no fusing, where this needs a HUK burned once per device. And a
+discrete element is its own tamper boundary, where here the boundary is the SoC
+- an attacker who defeats TrustZone defeats the key, and there is no separate
+package to attack.
+
+### What neither protects against
+
+Someone who can boot their own image on the board can ask the secure world to
+sign for them. The key is safe from *extraction*; it is not safe from *use* by
+whoever controls the device. Closing that means verified boot, which is more
+fuses - and the ones that enable it are the ones that can brick a part.
+
+This is not specific to TrustZone: anyone who can talk to an ATECC608 can ask it
+to sign too, unless its slots and I/O protection are configured to prevent it.
+
 ## Address map
 
 From TF-A's `plat/rockchip/rk3576/rk3576_def.h`, plus two addresses it omits.
@@ -235,6 +308,32 @@ likely reason, `mmc0: Command Queue Engine enabled`; RPMB transfers need the
 controller out of command-queue mode and that transition is a known way to hang
 CQHCI.
 
+### Order of provisioning
+
+Fuse the HUK first, confirm it works, and only then consider RPMB. Not because
+RPMB is difficult, but because its key is *derived from the HUK*, so
+provisioning it early commits a second one-shot resource to a root that has not
+been shown good yet.
+
+1. Burn the HUK. Confirm the readback, that it survives a power cycle, that
+   secure storage initialises, and that PKCS#11 opens a session and can generate
+   and use a key. Only after all of those is the HUK proven.
+2. Decide whether rollback protection is actually wanted. For a device identity
+   key it usually is not.
+3. If it is, first find out whether the eMMC's RPMB key is already programmed -
+   if a factory set it and you do not hold it, RPMB is unusable on that unit
+   regardless. Ask OP-TEE, which reports it when it tries; do **not** probe with
+   `mmc-utils`, which wedges the controller.
+4. Then enable `CFG_RPMB_FS` and `CFG_RPMB_WRITE_KEY`, both off by default.
+
+The failure modes are not symmetric, which is the real argument for the order. A
+bad HUK costs that unit its HUK and leaves the eMMC untouched. A bad RPMB key
+costs that eMMC's RPMB permanently, and the eMMC is soldered.
+
+Once all of this is qualified, the several build flags here are likely to
+collapse into one provisioning switch. They are separate now because each was
+worth being able to turn on alone while establishing that it works.
+
 ### The RPMB key
 
 Nothing about it is stored. `tee_rpmb_key_gen()` is
@@ -256,12 +355,5 @@ matches what RPMB was provisioned with. And if the SoC fails, everything sealed
 against its HUK is gone. Both are the intended behaviour of a device-bound key.
 
 Programming the key into the eMMC is itself one-shot, and `CFG_RPMB_WRITE_KEY`
-is `n` by default - the same deliberate-act pattern as the HUK burn. The order
-is: fuse the HUK, validate it, then provision RPMB. Otherwise one mistake
-strands the eMMC too.
+is `n` by default - the same deliberate-act pattern as the HUK burn.
 
-## Scope
-
-This protects a key from extraction. It does not stop someone booting their own
-image and asking the secure world to sign for them, which needs verified boot -
-and the fuses that enable that are the ones that can brick a part.

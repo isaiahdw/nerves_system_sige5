@@ -154,6 +154,10 @@ their own image and asking the secure world to sign for them. Closing that needs
 verified boot, which is more fuses — and the ones that enable it are the ones
 that can brick a part.
 
+For what this buys in plain terms, how it compares to a Trust&GO ATECC608, and
+why RPMB is optional rather than required, see
+[docs/research/rk3576-secure-world.md](docs/research/rk3576-secure-world.md).
+
 ## Hardware support
 
 Verified on a Sige5 v1.2, 2026-08-01.

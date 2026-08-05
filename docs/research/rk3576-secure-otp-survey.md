@@ -193,6 +193,41 @@ in the vendor device tree. The gap is that nothing in the secure world drives
 it. Wiring that up, and checking its output on hardware, has to come before any
 burn.
 
+## Where the secure TRNG is
+
+The seeding in `optee/0004` uses `rng@2a410000`, which the CRU calls
+`HCLK_TRNG_NS`. A secure instance exists, and TF-A's firewall header names it
+outright:
+
+    FW_SLV_ID_NSCRYPTO	FW_SLV_ID(FW_SLV_TYPE_TOP, 26)   /* 0x2a400000 */
+    FW_SLV_ID_RKRNG_NS	FW_SLV_ID(FW_SLV_TYPE_TOP, 27)   /* 0x2a410000 */
+    FW_SLV_ID_SCRYPTO	FW_SLV_ID(FW_SLV_TYPE_TOP, 28)   /* 0x2a430000 */
+    FW_SLV_ID_KEYLAD	FW_SLV_ID(FW_SLV_TYPE_TOP, 29)   /* 0x2a420000 */
+    FW_SLV_ID_RKRNG_S	FW_SLV_ID(FW_SLV_TYPE_TOP, 30)   /* ?          */
+
+So `RKRNG_S` is a distinct firewalled slave, not a guess. Its base is the one
+address in the group `rk3576_def.h` leaves out. The secure block runs
+`0x2a420000` KEYLADDER, `0x2a430000` CRYPTO_S, then nothing until `0x2a480000`
+OTP_S, `0x2a490000` DCF, `0x2a4a0000`/`0x2a4b0000` STIMER, `0x2a4c0000` WDT_S,
+`0x2a4d0000` OTP_MASK.
+
+That leaves `0x2a440000` through `0x2a470000` unaccounted, so `0x2a440000` is
+the leading candidate - it continues the run, and mirrors the non-secure side
+where crypto and rng sit adjacent - but three other slots fit equally well by
+address alone. The slave IDs do not settle it either: 28 and 29 are in the
+opposite order to their addresses.
+
+No public source gives the value. GitHub code search finds no RK3576 reference
+to any of the four candidates, and the Rockchip BL32 blob is packed, so the
+address-constant search that finds `0x2a4d0000` in BL31 v1.20 finds nothing
+there.
+
+Confirming it means probing from the secure world, where a hit returns changing
+random data and a miss either times out harmlessly or external-aborts and takes
+the boot with it. That is recoverable - the bootloader can be rewritten over
+USB, see the recovery notes - but it is a deliberate experiment, not something
+to leave in a build.
+
 ## Rockchip's own model
 
 From rkbin's RK3576 BL32 release notes, the vendor design is not a raw HUK at a

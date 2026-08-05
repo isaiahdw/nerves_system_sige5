@@ -1,0 +1,122 @@
+From 7bf42e398ccb5a64a28602029b071276492e46cf Mon Sep 17 00:00:00 2001
+From: Isaiah <isaiahdw@gmail.com>
+Date: Tue, 4 Aug 2026 21:35:14 -0700
+Subject: [PATCH 8/8] plat-rockchip: rk3576: dry-run the HUK write
+
+rockchip_otp_write_secure() has never executed on this platform and its first
+run would be permanent, so this reports everything a burn would do short of the
+write: that the range is one the driver accepts, that the slot is still blank
+enough for a 0 -> 1 write to be taken rather than refused, and that the
+candidate the TRNG produced would satisfy the check read_huk() applies.
+
+Reports a hash, never the candidate. Comparing hashes across boots and boards
+shows the source is producing distinct keys, which is the property the burn
+depends on and the one the survey could not establish by reading alone.
+
+Off by default, following CFG_RK_SECURE_BOOT_SIMULATION on rk3588.
+---
+ core/arch/arm/plat-rockchip/conf.mk           |  5 ++
+ core/arch/arm/plat-rockchip/platform_rk3576.c | 67 +++++++++++++++++++
+ 2 files changed, 72 insertions(+)
+
+diff --git a/core/arch/arm/plat-rockchip/conf.mk b/core/arch/arm/plat-rockchip/conf.mk
+index 15c89ef..66f33af 100644
+--- a/core/arch/arm/plat-rockchip/conf.mk
++++ b/core/arch/arm/plat-rockchip/conf.mk
+@@ -222,6 +222,11 @@ $(call force,CFG_TEE_CORE_NB_CORE,8)
+ $(call force,CFG_AUTO_MAX_PA_BITS,y)
+ $(call force,CFG_ROCKCHIP_OTP,y)
+ 
++# Report what fusing a HUK would write, and where, without writing it. The OTP
++# write path has never executed on this platform and its first run would be
++# permanent, so it is worth seeing the address and the preconditions first.
++CFG_RK3576_HUK_DRY_RUN ?= n
++
+ CFG_TZDRAM_START ?= 0x70000000
+ CFG_TZDRAM_SIZE  ?= 0x02000000
+ CFG_SHMEM_START  ?= 0x72000000
+diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
+index 8157ee7..5489557 100644
+--- a/core/arch/arm/plat-rockchip/platform_rk3576.c
++++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
+@@ -282,6 +282,70 @@ out:
+ 	return res;
+ }
+ 
++#ifdef CFG_RK3576_HUK_DRY_RUN
++/*
++ * Everything a burn would do, short of the write. rockchip_otp_write_secure()
++ * has never run on this platform, and its first execution would be permanent,
++ * so this exercises the parts that can be checked: that the range is one the
++ * driver accepts, that the slot is still blank enough for a 0 -> 1 write to be
++ * taken rather than refused, and that the candidate the TRNG produced would
++ * pass the check read_huk() applies afterwards.
++ *
++ * Reports a hash, never the candidate. Comparing hashes across boots and
++ * across boards shows the source is producing distinct keys, which is the
++ * property the burn depends on.
++ */
++static void dry_run_persist_huk(void)
++{
++	uint32_t current[ROCKCHIP_OTP_HUK_SIZE] = { };
++	uint32_t cand[ROCKCHIP_OTP_HUK_SIZE] = { };
++	uint32_t hash = 2166136261u;
++	TEE_Result res = TEE_SUCCESS;
++	size_t blank = 0;
++	size_t good = 0;
++	size_t i = 0;
++
++	IMSG("HUK dry run: index %#x, %u words",
++	     ROCKCHIP_OTP_HUK_INDEX, ROCKCHIP_OTP_HUK_SIZE);
++
++	/* A read over the same range fails the same bounds check a write does */
++	res = rockchip_otp_read_secure(current, ROCKCHIP_OTP_HUK_INDEX,
++				       ROCKCHIP_OTP_HUK_SIZE);
++	if (res) {
++		EMSG("  range rejected by the driver: %#"PRIx32, res);
++		return;
++	}
++
++	for (i = 0; i < ARRAY_SIZE(current); i++)
++		if (!current[i])
++			blank++;
++	IMSG("  slot blank in %zu of %zu words", blank, ARRAY_SIZE(current));
++
++	res = hw_get_random_bytes(cand, sizeof(cand));
++	if (res) {
++		EMSG("  no candidate: TRNG returned %#"PRIx32, res);
++		goto out;
++	}
++
++	for (i = 0; i < ARRAY_SIZE(cand); i++) {
++		if (cand[i])
++			good++;
++		hash = (hash ^ cand[i]) * 16777619u;
++		/* A set bit where the slot already has one would be refused */
++		if (~cand[i] & current[i])
++			IMSG("  word %zu would be refused: 0 -> 1 only", i);
++	}
++
++	IMSG("  candidate usable in %zu of %zu words, fnv1a=0x%08x",
++	     good, ARRAY_SIZE(cand), hash);
++	IMSG("HUK dry run: no write performed");
++
++out:
++	memzero_explicit(cand, sizeof(cand));
++	memzero_explicit(current, sizeof(current));
++}
++#endif /* CFG_RK3576_HUK_DRY_RUN */
++
+ TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
+ {
+ 	TEE_Result res = TEE_SUCCESS;
+@@ -304,6 +368,9 @@ TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
+ 	if (res == TEE_ERROR_NO_DATA) {
+ 		EMSG("No HUK in secure OTP at index %#x", ROCKCHIP_OTP_HUK_INDEX);
+ 		survey_secure_otp();
++#ifdef CFG_RK3576_HUK_DRY_RUN
++		dry_run_persist_huk();
++#endif
+ 	}
+ 
+ out:

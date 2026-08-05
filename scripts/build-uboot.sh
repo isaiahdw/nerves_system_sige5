@@ -91,6 +91,11 @@ BL32_ADDR="0x48400000"
 # and SHM at 0x72000000/4 MB (plat-rockchip conf.mk), where the blob uses
 # 0x48400000 and 14 MB. The reserved-memory node in linux/0022 describes the
 # blob's; it has to change with this.
+
+# HUK_DRY_RUN=1 reports what fusing a HUK would write, and where, without
+# writing it - see optee/0008. The OTP write path has never executed on this
+# SoC and its first run would be permanent, so the address and the
+# preconditions are worth seeing on a console first.
 OPTEE_GIT="https://github.com/OP-TEE/optee_os.git"
 OPTEE_COMMIT="5a53776"
 TFA_GIT="https://github.com/ARM-software/arm-trusted-firmware.git"
@@ -123,6 +128,7 @@ if [ '${USE_OPENSOURCE_TEE:-0}' = 1 ]; then
         CROSS_COMPILE64=aarch64-linux-gnu- \
         CFG_USER_TA_TARGETS=ta_arm64 \
         CFG_PKCS11_TA=y \
+        CFG_RK3576_HUK_DRY_RUN=$([ "${HUK_DRY_RUN:-0}" = 1 ] && echo y || echo n) \
         -j\$(nproc)
 
     git clone --depth 1 --branch $TFA_BRANCH $TFA_GIT /tfa

@@ -1,4 +1,7 @@
-plat-rockchip: rk3576: read the HUK from secure OTP
+From 1657c275cd131605bcf04111c6f5364d7aa15fb5 Mon Sep 17 00:00:00 2001
+From: Isaiah <isaiahdw@gmail.com>
+Date: Tue, 4 Aug 2026 21:32:48 -0700
+Subject: [PATCH 1/8] plat-rockchip: rk3576: read the HUK from secure OTP
 
 Without this OP-TEE falls back to the default HUK compiled into public
 source, so anything sealed by secure storage - RPMB included - is keyed on a
@@ -18,6 +21,11 @@ at an unconfirmed index could destroy vendor OTP data irreversibly, so a
 missing key is reported rather than created. Confirming the index - a key
 that reads non-zero and differs between boards would do it - is the next
 step, and the generate/persist half can follow after that.
+---
+ core/arch/arm/plat-rockchip/conf.mk           |  1 +
+ core/arch/arm/plat-rockchip/platform_config.h | 15 ++++
+ core/arch/arm/plat-rockchip/platform_rk3576.c | 83 +++++++++++++++++++
+ 3 files changed, 99 insertions(+)
 
 diff --git a/core/arch/arm/plat-rockchip/conf.mk b/core/arch/arm/plat-rockchip/conf.mk
 index 366ffd0..6498ef9 100644

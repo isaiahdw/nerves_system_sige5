@@ -1,0 +1,65 @@
+From a1b194aeb5c2696e72f9956f54c3bdb5b9e2a1fe Mon Sep 17 00:00:00 2001
+From: Isaiah <isaiahdw@gmail.com>
+Date: Tue, 4 Aug 2026 21:34:33 -0700
+Subject: [PATCH 7/8] plat-rockchip: rk3576: reject a partially programmed HUK
+ slot
+
+Some words programmed and the rest still zero means a burn did not finish - a
+brownout part way through, or a word that failed the hardware verify. OTP bits
+only go one way, so such a slot can never be completed or rewritten.
+
+Treating "any non-zero word" as a valid key accepts that silently: secure
+storage initialises, everything downstream works, and the key is short of its
+entropy permanently. Requiring all four words costs nothing real, since a
+genuine random key trips it with probability about 4 * 2^-32.
+---
+ core/arch/arm/plat-rockchip/platform_rk3576.c | 24 ++++++++++++++++---
+ 1 file changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
+index 8065b2e..8157ee7 100644
+--- a/core/arch/arm/plat-rockchip/platform_rk3576.c
++++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
+@@ -237,7 +237,7 @@ static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
+ {
+ 	uint32_t buffer[ROCKCHIP_OTP_HUK_SIZE] = { };
+ 	TEE_Result res = TEE_SUCCESS;
+-	bool key_is_empty = true;
++	size_t written = 0;
+ 	size_t i = 0;
+ 
+ 	static_assert(sizeof(buffer) == sizeof(hwkey->data));
+@@ -249,13 +249,31 @@ static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
+ 
+ 	for (i = 0; i < ARRAY_SIZE(buffer); i++)
+ 		if (buffer[i])
+-			key_is_empty = false;
++			written++;
+ 
+-	if (key_is_empty) {
++	if (!written) {
+ 		res = TEE_ERROR_NO_DATA;
+ 		goto out;
+ 	}
+ 
++	/*
++	 * Some words programmed and some still zero means the burn did not
++	 * finish - a brownout part way through, or a word that failed the
++	 * hardware verify. OTP bits only go one way, so the slot can never be
++	 * completed or rewritten, and a key short of its full entropy is worse
++	 * than none because everything downstream still works. Treating "any
++	 * non-zero word" as a valid key would accept exactly that silently.
++	 *
++	 * A genuine random key trips this with probability about 4 * 2^-32, so
++	 * the check costs nothing real.
++	 */
++	if (written != ARRAY_SIZE(buffer)) {
++		EMSG("HUK slot partially programmed (%zu of %zu words)",
++		     written, ARRAY_SIZE(buffer));
++		res = TEE_ERROR_CORRUPT_OBJECT;
++		goto out;
++	}
++
+ 	memcpy(hwkey->data, buffer, HW_UNIQUE_KEY_LENGTH);
+ 
+ out:

@@ -1,4 +1,8 @@
-plat-rockchip: rk3576: put the secure console on the debug UART
+From b6b5dd3a7c1aa9a2a31e87b6643474187f355486 Mon Sep 17 00:00:00 2001
+From: Isaiah <isaiahdw@gmail.com>
+Date: Tue, 4 Aug 2026 21:32:48 -0700
+Subject: [PATCH 2/8] plat-rockchip: rk3576: put the secure console on the
+ debug UART
 
 Upstream leaves CFG_EARLY_CONSOLE off for this flavor, so OP-TEE's own
 diagnostics go nowhere. That makes secure-world faults unreadable from the
@@ -12,6 +16,9 @@ capture carries the whole boot.
 
 Debug aid, kept separate from the HUK port so it can be dropped once the
 questions it answers are settled.
+---
+ core/arch/arm/plat-rockchip/conf.mk | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
 
 diff --git a/core/arch/arm/plat-rockchip/conf.mk b/core/arch/arm/plat-rockchip/conf.mk
 index 6498ef9..15c89ef 100644

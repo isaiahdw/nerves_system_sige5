@@ -1,7 +1,8 @@
-From 7867bf5a8e2d14a28ffd95b28bb1bf7ef75e54b2 Mon Sep 17 00:00:00 2001
+From d77bc10b666265110e2bc50c6f56f8c0407f5c1a Mon Sep 17 00:00:00 2001
 From: Isaiah <isaiahdw@gmail.com>
-Date: Tue, 4 Aug 2026 16:01:29 -0700
-Subject: [PATCH] plat-rockchip: rk3576: seed the PRNG from the hardware TRNG
+Date: Tue, 4 Aug 2026 21:32:48 -0700
+Subject: [PATCH 4/8] plat-rockchip: rk3576: seed the PRNG from the hardware
+ TRNG
 
 Without a platform hw_get_random_bytes(), rk3576 falls back to OP-TEE's weak
 default seeding, which the comment on it describes as "an easily predictable
@@ -21,9 +22,9 @@ MMIO base external-aborts rather than failing gracefully. Seeding runs during
 core init, before any normal-world software beyond TF-A and U-Boot SPL, which
 bounds what sharing the block exposes.
 
-Follows the rk3588 plat_init_soft_prng() added in commit for that platform,
-with a larger seed: RKRNG has no published SP 800-90B assessment to size it
-from, so 64 bytes gives 256 bits even at 4 bits/byte.
+Seed length follows the rk3588 plat_init_soft_prng() with room to spare: RKRNG
+has no published SP 800-90B assessment to size it from, so 64 bytes gives 256
+bits even at 4 bits/byte.
 ---
  core/arch/arm/plat-rockchip/platform_config.h |  15 +++
  core/arch/arm/plat-rockchip/platform_rk3576.c | 107 ++++++++++++++++++

@@ -238,6 +238,10 @@ Then `export MIX_TARGET=sige5` for every mix command.
 
 ## Flashing
 
+Working notes from the bring-up are in
+[docs/research/](docs/research/README.md) — the secure OTP, the GPU clock path,
+the vendor OPP tables and the raw BSP artifacts they were decoded from.
+
 See [docs/flashing.md](docs/flashing.md) for the full set of routes — over the
 network, from a U-Boot prompt, and from maskrom — along with the mistakes each
 one invites.

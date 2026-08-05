@@ -470,15 +470,36 @@ MHz worth of ring length yields 423 MHz. They are still real DVFS points, since
 dynamic power scales with frequency at constant voltage, but the numbers on them
 are fiction.
 
-### 800 MHz is strictly worse than 700
+### An OPP rate names an operating point, not a frequency
 
-700 and 800 share ring length 21, so they are the same operating point - 795.0
-against 794.9 MHz. The DT gives 800 MHz 775 mV against 700 MHz's 725 mV. Fifty
-millivolts for nothing, and leakage and dynamic power both rise with it.
+That is the whole misunderstanding, and it explains both oddities at once. A
+row in the table is a (ring length, voltage) pair. PVTPLL locks to a delay
+target set by the length; what frequency that yields depends on voltage,
+temperature and the die. Rockchip labels the row with what it is nominally
+worth. Mainline's OPP framework reads that label as a real frequency.
 
-900 MHz is a weaker version of the same: 813.7 MHz for 825 mV, 2.4 percent more
-performance than 700 MHz for 100 mV more.
+So 700 and 800 MHz are two operating points that differ only in voltage - 725
+against 775 mV at the same ring length 21. That is how more frequency is meant
+to come out of the same delay target: on a die where 725 mV cannot sustain it,
+775 mV can. On this die 725 mV already sustains it, so the extra 50 mV buys
+nothing and the two rows collapse to one measured point, 795.0 against 794.9
+MHz.
 
-Efficiency peaks at 600-700 MHz and falls off above it - the MHz/mV column is
-monotonic up to 700 and drops after. Whatever the OPP table ends up saying, 800
-MHz should not be in it.
+And 900 MHz is a row whose nominal name this die does not reach: ring length 20
+at 825 mV and 60 C gives 813.7 MHz, and the table has no shorter ring to offer.
+
+### What that does and does not license
+
+On this die, 800 MHz is dominated - same frequency as 700 for 50 mV more - and
+900 MHz buys 2.4 percent over 700 for 100 mV. MHz/mV rises to 700 and falls
+after.
+
+It does not follow that 800 MHz should be deleted. The table has to be safe for
+the worst die in the distribution, and on a slower one the extra 50 mV may be
+exactly what puts 800 above 700, which is presumably why it is there. Both
+Sige5 boards measured here carry the same bin - `21 01` at OTP +0x24, against
+`23 01` on an RK3576S smt1019 - so nothing here says anything about the spread.
+
+Relabelling the OPPs with measured rates has the same problem: the measurements
+are of one bin at one temperature, and a table written from them would be wrong
+on other silicon in the same way the vendor's is wrong here.

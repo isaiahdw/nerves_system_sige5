@@ -345,3 +345,32 @@ An OEM key plus a key ladder (`KEYLADDER_BASE 0x2a420000`), with a Protected
 OEM Zone that only TAs can reach, and an explicit option that avoids burning
 anything. Key IDs resolve inside the blob, so none of the indices are public.
 
+
+## The RNG, characterised
+
+1 MB from `/dev/hwrng` on a Sige5, analysed off-board:
+
+| test | result | ideal |
+| --- | --- | --- |
+| distinct byte values | 256 of 256 | 256 |
+| chi-square, 255 df | 278.9 | 205-310 unremarkable |
+| ones proportion | 0.499947 (z = -0.31) | 0.5 |
+| Shannon entropy | 7.99981 bits/byte | 8.0 |
+| serial correlation | +0.000257 | 0 |
+| zlib ratio | 1.0003 | above 1 |
+| longest equal-byte run | 3 | - |
+| repeated 16-byte blocks | 0 of 65536 | 0 |
+
+Nothing structured anywhere, and no 16-byte block - the size of a HUK - repeats
+in 65536 of them.
+
+This is the **non-secure** instance, `rng@2a410000`, because that is the one
+Linux binds. Seeding uses `RKRNG_S` at `0x2a440000`, which the normal world
+cannot reach, so this bounds the quality of the design rather than of the exact
+block a fused key would come from. The two are the same IP, and the checks in
+`optee/0011` run on the actual candidate from the actual block, which is what
+closes the gap.
+
+It also means the 64-byte seed length is conservative by a wide margin: at
+7.9998 bits/byte the assumption behind it - 4 bits/byte - is off by a factor of
+two, and 64 bytes carries far more than the 256 bits it was sized for.

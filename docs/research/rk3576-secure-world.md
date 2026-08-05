@@ -116,7 +116,8 @@ PKCS#11 TA loads but cannot open a session.
 
 ## Random numbers
 
-`hw_get_random_bytes()` drives RKRNG at `RKRNG_S`. A request is written to
+`hw_get_random_bytes()` drives RKRNG at `RKRNG_S`, the secure instance. A
+request is written to
 `CTRL` hiword-masked, `TRNG_RDY` comes up in `STATE`, and 32 bytes appear at
 `DATA0`. The data registers hold the last block until something asks for
 another, so the implementation requests once more before returning and leaves
@@ -140,9 +141,15 @@ Quality, from 1 MB through `/dev/hwrng`:
 | longest equal-byte run | 3 | - |
 | repeated 16-byte blocks | 0 of 65536 | 0 |
 
-That is the non-secure instance, since it is the one Linux binds. At 7.9998
-bits/byte the 64-byte seed carries far more than the 256 bits it was sized for
-on a conservative 4 bits/byte assumption.
+Those figures come from the non-secure instance, because `/dev/hwrng` is the
+only one Linux can bind - the secure block is unreachable from the normal world
+by design. Both are the same IP on the same die. At 7.9998 bits/byte the
+64-byte seed carries far more than the 256 bits it was sized for on a
+conservative 4 bits/byte assumption.
+
+Direct evidence about `RKRNG_S` itself: it returns fresh data on every request
+on both dies, and every candidate drawn from it has passed the checks below,
+with no two alike across six draws.
 
 ## Burning a HUK
 
@@ -203,15 +210,16 @@ Two things are not established, and neither shrinks by testing harder.
 A part burned here may not satisfy Rockchip's BL32 if that blob is ever run on
 it, since what the blob expects at `0x80` cannot be read out of a binary.
 
-And the statistics above are from the non-secure instance. Direct evidence about
-`RKRNG_S` is six candidates across two boards, plus the requirement that two
-requests differ. The per-candidate checks catch a catastrophically broken source
-but would pass a plausible-looking low-entropy one. Closing this means
-accumulating a histogram inside OP-TEE and printing aggregate statistics only;
-even then, statistical tests cannot distinguish a good DRBG from a true RNG, and
-proving entropy needs the SP 800-90B assessment Rockchip published for RK3588
-and has not for this part. The block is asked for its true-random path
-(`RKRNG_CTRL_REQ_TRNG`), not the DRNG mode.
+And the bulk statistics are of the sibling instance rather than `RKRNG_S`
+itself, since Linux cannot reach the secure block. Direct evidence about the
+block a key comes from is six candidates across two boards plus the
+requirement that two requests differ - enough to catch a catastrophically
+broken source, not enough to distinguish a plausible-looking low-entropy one.
+Closing it means accumulating a histogram inside OP-TEE and printing aggregate
+statistics only. Even then, statistical tests cannot tell a good DRBG from a
+true RNG; proving entropy needs the SP 800-90B assessment Rockchip published
+for RK3588 and has not for this part. The block is asked for its true-random
+path (`RKRNG_CTRL_REQ_TRNG`), not the DRNG mode.
 
 ## RPMB
 
@@ -227,9 +235,30 @@ likely reason, `mmc0: Command Queue Engine enabled`; RPMB transfers need the
 controller out of command-queue mode and that transition is a known way to hang
 CQHCI.
 
-The RPMB key is one-shot and OP-TEE derives it from the HUK, so the order is:
-fuse the HUK, validate it, then provision RPMB. Otherwise one mistake strands
-the eMMC as well.
+### The RPMB key
+
+Nothing about it is stored. `tee_rpmb_key_gen()` is
+
+```c
+huk_subkey_derive(HUK_SUBKEY_RPMB, cid, sizeof(cid), key, len)
+```
+
+where `cid` is the eMMC's own CID with the PRV and CRC fields masked off, since
+those change on an eMMC firmware update. So the key is a deterministic function
+of the HUK and that specific eMMC, re-derived on every boot and never written
+anywhere. There is no key to back up, escrow or remember - the HUK stays in
+fuses and never leaves the secure world, and neither does anything derived from
+it.
+
+Two consequences follow. The pairing is bound to both halves: move the eMMC to
+another board, or fit another eMMC to this one, and the derived key no longer
+matches what RPMB was provisioned with. And if the SoC fails, everything sealed
+against its HUK is gone. Both are the intended behaviour of a device-bound key.
+
+Programming the key into the eMMC is itself one-shot, and `CFG_RPMB_WRITE_KEY`
+is `n` by default - the same deliberate-act pattern as the HUK burn. The order
+is: fuse the HUK, validate it, then provision RPMB. Otherwise one mistake
+strands the eMMC too.
 
 ## Scope
 

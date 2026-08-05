@@ -17,24 +17,34 @@ NPU, HDMI console, watchdog, RTC, and audio devices.
 
 ## What works
 
-Working and exercised on hardware: eMMC boot with A/B firmware slots and
-automatic revert, OTA updates, both Ethernet ports, onboard WiFi, HDMI with a
-framebuffer console, the GPU under Mesa (OpenGL ES 3.1, no X11 or Wayland), the
-NPU with vision and language models, CPU and GPU frequency scaling, thermal
-management, the fan header, watchdog, RTC, ADC, USB, audio devices and a
-hardware RNG.
+Exercised on hardware:
 
-Opt-in: a secure world. OP-TEE with a per-device key fused into the SoC, and
-PKCS#11 for generating and using keys that never leave it. One build flag.
+- eMMC boot, A/B firmware slots, automatic revert
+- OTA updates
+- Ethernet x2, onboard WiFi
+- HDMI with a framebuffer console
+- GPU under Mesa — OpenGL ES 3.1, no X11 or Wayland
+- NPU with vision and language models
+- CPU, GPU and NPU frequency scaling
+- Thermal management and the fan header
+- Watchdog, RTC, ADC, USB, audio devices, hardware RNG
 
-Not working: Bluetooth (uart4 is disabled in the mainline dts), CAN (no
-mainline driver), video decode (rkvdec2 lands in kernel 7.0), MIPI CSI/DSI.
-microSD boot is unreachable while the eMMC holds a valid bootloader — the boot
-ROM's order is fixed.
+Opt-in, one build flag: a secure world. OP-TEE with a per-device key fused into
+the SoC, and PKCS#11 for keys that never leave it.
 
-Untested: M.2 NVMe. The drivers are built in, but no drive was fitted.
+Not working:
 
-Two surprises that are not bugs:
+| | Why |
+| --- | --- |
+| Bluetooth | uart4 is disabled in the mainline dts |
+| CAN | No mainline driver |
+| Video decode | rkvdec2 for RK3576 lands in kernel 7.0 |
+| MIPI CSI/DSI | Not wired up in mainline for this board |
+| microSD boot | The boot ROM checks eMMC first and the order is fixed |
+
+Untested: M.2 NVMe. The drivers are built in; no drive was fitted.
+
+Two behaviours that look like bugs and are not:
 
 **GPU and NPU frequency labels are nominal.** Ask the GPU for 300 MHz and you
 get about 423; ask for 900 and you get about 815. The clock is a PVTPLL that
@@ -255,12 +265,11 @@ mix deps.get
 mix compile
 ```
 
-Editing anything in `linux/` costs a full kernel rebuild, by design. Buildroot
-applies `linux/*.patch` when it first extracts the kernel and never looks
-again — a patch added afterwards is ignored, the kernel is rebuilt from the
-tree it already has, and the build reports success, so the symptom is a change
-that simply is not in the image. `external.mk` keeps a hash of the patch set
-inside the extracted tree and throws the tree away when it stops matching.
+Editing anything in `linux/` costs a full kernel rebuild. Buildroot applies
+`linux/*.patch` only when it first extracts the kernel, so `external.mk` keeps
+a hash of the patch set inside the extracted tree and discards the tree when
+the hash stops matching. Without that, an added or edited patch is ignored and
+the build still succeeds — the change is simply absent from the image.
 
 ### Using in an application
 
@@ -277,40 +286,34 @@ Then `export MIX_TARGET=sige5` for every mix command.
 
 ## Flashing
 
-Working notes from the bring-up are in
-[docs/research/](docs/research/README.md) — the secure OTP, the GPU clock path,
-the vendor OPP tables and the raw BSP artifacts they were decoded from.
-
-See [docs/flashing.md](docs/flashing.md) for the full set of routes — over the
-network, from a U-Boot prompt, and from maskrom — along with the mistakes each
-one invites.
-
-Factory flash goes to the eMMC over USB maskrom (see
-[uboot/README.md](uboot/README.md) for details):
+Factory flash goes to the eMMC over USB maskrom. Connect the OTG Type-C port
+to the host, then hold MASKROM while connecting power to the other (PD-only)
+Type-C port:
 
 ```sh
 fwup -a -d disk.img -t complete -i <firmware>.fw   # raw image on the host
-# OTG Type-C port to the host, hold MASKROM while connecting the PD
-# power supply to the other (PD-only) Type-C port:
 rkdeveloptool db uboot/rk3576_spl_loader_v1.09.108.bin
 rkdeveloptool wl 0 disk.img
 rkdeveloptool rd
 ```
 
-The bootloader is inside that image — there is no separate write at sector 64.
+- The bootloader is inside that image. There is no separate write at sector 64.
+- 88 seconds for the whole 1.8 GB image, measured.
+- `db` is load-bearing: it puts Rockchip's SPL loader in RAM and everything is
+  written through that. U-Boot's own `rockusb` gadget takes the same commands
+  and runs about 35× slower — the same image did not finish in 3000 s.
+  `rkdeveloptool ld` prints `Maskrom` for both, so a crawling write means the
+  wrong transport.
+- The image is smaller than the eMMC. First boot grows the app partition to
+  fill the disk.
 
-That is the fast path: measured, it writes the whole 1.8 GB image in 88
-seconds. Note that `rkdeveloptool db` is load-bearing — it puts Rockchip's SPL
-loader in RAM, and everything is written through that. U-Boot's own `rockusb`
-gadget accepts the same commands and runs about 35× slower (the same image did
-not finish in 3000 s), so if a write is crawling, check which one you are
-actually talking to. `rkdeveloptool ld` prints `Maskrom` for both.
+Other routes — over the network, from a U-Boot prompt, from maskrom —
+are in [docs/flashing.md](docs/flashing.md). `mix burn` to a microSD needs no
+tools at all and boots from the card slot when the eMMC has no valid loader.
 
-The image is smaller than the eMMC; on the first boot the system grows
-the app partition to fill the disk automatically.
-
-Alternative with no tools: `mix burn` the same firmware to a microSD and
-boot from the slot — useful for first bring-up and recovery.
+Bring-up notes are in [docs/research/](docs/research/README.md): the secure
+OTP, the GPU clock path, the vendor OPP tables and the BSP artifacts they were
+decoded from.
 
 OTA upgrades are the standard Nerves flow (`mix upload`); upgrades write
 the inactive slot only and revert automatically unless validated. The

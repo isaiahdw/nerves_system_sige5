@@ -1,128 +1,97 @@
 # Flashing a Sige5
 
-Four ways to get bytes onto the eMMC, with the constraints that decide which
-one to use.
+Four routes. Pick by what the board can currently do.
 
-**First time, or a board in an unknown state: go to route 4.** One image
-carries everything, bootloader included, and it takes about 90 seconds.
+| board state | route |
+| --- | --- |
+| Runs Nerves, on the network | 1 — ssh |
+| First flash, or unknown state | 4 — maskrom |
+| No OS, reaches a U-Boot prompt, bootloader only | 2 — rockusb |
+| No OS, needs a filesystem, maskrom unreachable | 3 — ums + fwup |
 
-## 1. Board runs Nerves and is on the network
+## 1. ssh
 
-The normal case. Firmware goes over ssh:
+Firmware:
 
     ./upload.sh <ip>            # or: MIX_TARGET=sige5 mix upload <ip>
 
-The bootloader is not part of an A/B firmware update, so changing it is a
-separate step - copy it over and write it at sector 64:
+The bootloader is not part of an A/B update, so changing it is a separate
+write at sector 64:
 
     sftp <ip> <<< 'put uboot/u-boot-rockchip.bin /tmp/u-boot.bin'
     ssh <ip>
     iex> cmd("dd if=/tmp/u-boot.bin of=/dev/mmcblk0 bs=512 seek=64 conv=fsync")
 
-Verify by reading back **the image's own size**, not a remembered one:
+Verify against the image's own size:
 
     iex> cmd("dd if=/dev/mmcblk0 bs=512 skip=64 count=<sectors> of=/tmp/rb.bin")
     iex> :crypto.hash(:md5, File.read!("/tmp/rb.bin")) |> Base.encode16(case: :lower)
 
-`<sectors>` is `ceil(bytes / 512)` for the file being written. It changes
-between builds - a count carried over from a previous image reads a short
-buffer and reports a mismatch that is not real.
+`<sectors>` is `ceil(bytes / 512)` for the file just written, and it changes
+between builds. A count carried over from a previous image reads a short buffer
+and reports a mismatch that is not real.
 
-There is no A/B safety net on the bootloader. One copy, and a bad one means
-maskrom.
+The bootloader has no A/B safety net. One copy; a bad one means maskrom.
 
-## 2. Board has no OS, but reaches a U-Boot prompt
-
-`rkdeveloptool` can drive U-Boot's rockusb gadget.
+## 2. rockusb, from a U-Boot prompt
 
     => mmc dev 0
     => rockusb 0 mmc 0
 
-**`mmc dev 0` first.** Without it the gadget still enumerates and reads still
-work, but every write fails with `failed writing to device mmc: 0` on the
-console, and the session then wedges so thoroughly that reads stop too and
-`rkdeveloptool db` reports "Downloading bootloader failed!". That looks exactly
-like a dead board and is not one - spam Ctrl-C on the console to get the prompt
-back. No power cycle needed.
-
-Then, from the host:
+Then from the host:
 
     rkdeveloptool wl 64 uboot/u-boot-rockchip.bin
     rkdeveloptool rl 64 <sectors> /tmp/verify.bin    # md5 must match the source
     rkdeveloptool rd                                 # reset
 
-`rkdeveloptool ld` prints `Maskrom` for both true maskrom and a U-Boot rockusb
-gadget, so the mode string tells you nothing. Try a read to find out which you
-have.
+**`mmc dev 0` comes first.** Without it the gadget enumerates and reads work,
+but every write fails with `failed writing to device mmc: 0` on the console and
+the session then wedges — reads stop too, and `rkdeveloptool db` reports
+"Downloading bootloader failed!". The board is fine: Ctrl-C on the console
+returns the prompt, no power cycle.
 
-### Speed - this is the slow one
-
-Measured on the same board and the same 1.8 GB image:
+This route is for the bootloader only. Speed, same board and same 1.8 GB image:
 
 | transport | time |
 | --- | --- |
 | maskrom + `db` SPL loader (route 4) | 88 s |
-| U-Boot rockusb gadget (this route) | did not finish in 3000 s |
+| rockusb gadget (this route) | did not finish in 3000 s |
 
-About 35x. The gadget is fine for a 10 MB bootloader and the wrong tool for a
-filesystem. If a whole image is going on, use route 4.
+`rkdeveloptool ld` prints `Maskrom` for both true maskrom and a rockusb gadget,
+so the mode string does not tell you which you have. A read does.
 
-## 3. Board has no OS and needs a filesystem
+## 3. ums + fwup
 
-**Use route 4.** Maskrom writes the whole 1.8 GB image in 88 seconds, which is
-the answer for a bare board and needs nothing clever.
-
-Two other things are true and neither is the reason a flash is ever slow, so
-do not go chasing them:
-
-    fwup -a -d /tmp/board.img -i firmware.fw -t complete
-    ls -l  ->  1895956480 bytes      (1808 MB apparent)
-    du -h  ->  140M                  (what is actually stored)
-
-The file is sparse - GPT puts its backup header at the end of the last
-partition, and `complete` ends with `raw_memset(${APP_PART_OFFSET}, 256, 0xff)`
-at sector 2654208, so the file spans the layout with holes in between. And
-`rkdeveloptool` cannot see holes, so it sends the apparent size. Through the
-maskrom loader that costs nothing worth having; through the U-Boot gadget it is
-1.67 GB of zeros at under 1 MB/s. The transport is what matters.
-
-If maskrom is not reachable, the eMMC can be exported as a USB disk from U-Boot
-and handed to fwup, which does skip the holes:
+For a filesystem when maskrom is unreachable. Export the eMMC as a USB disk:
 
     => mmc dev 0
     => ums 0 mmc 0
 
-The host sees a removable disk - confirm it before writing anything:
+Identify it before writing:
 
     diskutil info /dev/diskN | grep -E "Media Name|Protocol|Disk Size"
       Device / Media Name:  UMS disk 0        <- U-Boot's own gadget name
       Protocol:             USB
       Disk Size:            62.5 GB           <- matches the 58.2 GiB eMMC
 
-Then:
+Write:
 
     diskutil unmountDisk /dev/diskN
     sudo fwup -a -t complete -d /dev/rdiskN -i firmware.fw
 
-`/dev/rdiskN`, not `/dev/diskN` - the raw node is the difference between a
-couple of minutes and a long wait. macOS will offer to initialise the Linux
-partitions; ignore it.
+`/dev/rdiskN`, not `/dev/diskN` — the raw node is minutes instead of a long
+wait. macOS offers to initialise the Linux partitions; ignore it.
 
-If sudo is not available, the same regions can go over rockusb instead by
-writing only the non-zero spans at their sector offsets. Slow, but it needs no
-privileges.
+Without sudo, the same regions can go over rockusb by writing only the non-zero
+spans at their sector offsets. Slow, but it needs no privileges.
 
 ## 4. Maskrom
 
-The fast one, and the right default for anything larger than a bootloader:
-88 seconds for a full 1.8 GB image. `db` is the reason - it puts Rockchip's SPL
-loader in RAM and everything is written through that, which is a different
-thing from U-Boot's rockusb gadget despite taking the same commands.
+The default for anything larger than a bootloader. Connect the OTG Type-C port
+to the host, then hold MASKROM while connecting power to the other (PD-only)
+Type-C port.
 
-To get there: OTG Type-C port to the host, then hold MASKROM while connecting
-power to the other (PD-only) Type-C port.
-
-A whole board from one file - this is the first-time path:
+Whole board from one file:
 
     fwup -a -d disk.img -t complete -i <firmware>.fw   # raw image on the host
 
@@ -131,26 +100,31 @@ A whole board from one file - this is the first-time path:
     rkdeveloptool wl 0 disk.img
     rkdeveloptool rd                                   # reset
 
-To confirm the loader is answering before committing to a write, read a
-sector: `rkdeveloptool rl 64 1 /tmp/s.bin` shows `RKNS` if a bootloader is
-there.
-
-The bootloader is inside that image - `fwup.conf` packages
-`uboot/u-boot-rockchip.bin` and the `complete` task writes it at sector 64
-along with everything else. There is no separate bootloader step.
-
-Just the bootloader, leaving the filesystems alone:
+Bootloader only, leaving the filesystems alone:
 
     rkdeveloptool db uboot/rk3576_spl_loader_v1.09.108.bin
     rkdeveloptool wl 64 uboot/u-boot-rockchip.bin
     rkdeveloptool rd
 
-`db` loads a loader into RAM; without it, LBA commands on a true maskrom device
-silently do nothing and reads come back empty.
-
-Back up before overwriting anything you might want again:
+Back up first if anything on the eMMC matters:
 
     rkdeveloptool rl 0 32768 /tmp/backup-16MB.bin
+
+Notes:
+
+- The bootloader is inside the image. `fwup.conf` packages
+  `uboot/u-boot-rockchip.bin` and the `complete` task writes it at sector 64
+  with everything else, so there is no separate bootloader step.
+- `db` is what makes this fast. It puts Rockchip's SPL loader in RAM and
+  everything is written through that. Without it, LBA commands on a true
+  maskrom device do nothing and reads come back empty.
+- To confirm the loader is answering before committing to a write, read a
+  sector: `rkdeveloptool rl 64 1 /tmp/s.bin` shows `RKNS` if a bootloader is
+  there.
+- The image is sparse — 1808 MB apparent, ~140 MB stored — and `rkdeveloptool`
+  sends the apparent size. Through the maskrom loader that costs nothing; it is
+  the reason route 2 is unusable for a whole image, not a reason this one is
+  slow.
 
 ## Layout
 
@@ -158,30 +132,30 @@ From `fwup_include/fwup-common.conf`, in 512-byte sectors:
 
 | sector | what |
 | --- | --- |
-| 64 | bootloader (`u-boot-rockchip*.bin`) |
+| 64 | bootloader (`u-boot-rockchip.bin`) |
 | 30720 | U-Boot environment, 256 sectors |
 | 32768 | boot partition, 524288 |
 | 557056 | rootfs A, 1048576 |
 | 1605632 | rootfs B, 1048576 |
 | 2654208 | app, 1048576 |
 
-The eMMC is `mmc 0` / `mmc@2a330000` / `/dev/mmcblk0`, 58.2 GiB. `mmc info`
-from U-Boot also reports "Boot area 0 is not write protected" and a 4 MiB RPMB.
+The eMMC is `mmc 0` / `mmc@2a330000` / `/dev/mmcblk0`, 58.2 GiB, with a 4 MiB
+RPMB. The image is smaller than the disk; first boot grows the app partition to
+fill it.
 
 ## Which bootloader
 
 `scripts/build-uboot.sh` writes one file, `uboot/u-boot-rockchip.bin`, and fwup
-packages it. Which build is in it depends on how it was made:
+packages it:
 
 | build | secure world |
 | --- | --- |
-| `./scripts/build-uboot.sh` | none - rkbin BL31 only |
+| `./scripts/build-uboot.sh` | none — rkbin BL31 only |
 | `SECURE_WORLD=1 ./scripts/build-uboot.sh` | upstream TF-A + OP-TEE, fuses a HUK on first boot |
 
-`uboot/u-boot-rockchip.variant` records which, because a diff of the binary says
-only "binary files differ".
+`uboot/u-boot-rockchip.variant` records which build is in the file, since a
+diff of the binary says only "binary files differ".
 
-Since it is the packaged file, rebuilding the system and flashing normally is
-enough - there is no separate bootloader to write. Moving an already-running
-board between stacks is still a write at sector 64 and nothing else, which
-leaves its filesystem alone.
+Rebuilding the system and flashing normally is enough to change it. Moving an
+already-running board between stacks is a write at sector 64 and nothing else,
+which leaves its filesystem alone.

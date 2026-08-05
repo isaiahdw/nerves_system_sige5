@@ -245,8 +245,13 @@ normal-world writable - the last mattering most, since a warm reboot could
 otherwise carry a degraded setting into the next boot's seeding.
 
 The probe is kept behind `CFG_RK3576_TRNG_S_PROBE`, off by default, so the
-result can be re-run on another board or a later revision rather than resting
-on one measurement.
+result can be re-run rather than resting on one measurement - and it has been.
+A second die answers the same way:
+
+    board 2 (cpuid ...0e2612)   0x2a440000: RKRNG_S - fresh data on each request
+    board 1 (cpuid ...0d0c12)   0x2a440000: RKRNG_S - fresh data on each request
+
+So the address belongs to the SoC, not to one chip.
 
 ## The HUK index, confirmed
 
@@ -374,3 +379,25 @@ closes the gap.
 It also means the 64-byte seed length is conservative by a wide margin: at
 7.9998 bits/byte the assumption behind it - 4 bits/byte - is off by a factor of
 two, and 64 bytes carries far more than the 256 bits it was sized for.
+
+## Candidates across boards
+
+The dry run reports a hash of the key it would have burned. Across two dies and
+several boots:
+
+| board | candidate fnv1a |
+| --- | --- |
+| board 2, five boots | `0xe38d3809` `0x2cff638f` `0xcc2bbe5d` `0x100b0eb5` `0xf5501af3` |
+| board 1 | `0x26a596dd` |
+
+All distinct, and the gate passed on both boards. This is worth less than it
+looks: two random 16-byte values differ with overwhelming probability whatever
+the source, so a pass here would not distinguish a good generator from a
+mediocre one. It is a check that would catch a catastrophic failure - a
+generator returning a constant, or something derived from the die - and nothing
+finer. The 1 MB characterisation above is the real evidence, and the
+per-candidate gate is what guards the burn itself.
+
+Both boards also survey identically - `0x008`, `0x064` and `0x1c8` with the
+same hashes, and `0x080` blank in all four words - now read at the confirmed
+index rather than RK3588's.

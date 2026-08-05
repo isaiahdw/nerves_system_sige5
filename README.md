@@ -321,13 +321,15 @@ rkdeveloptool wl 0 disk.img
 rkdeveloptool rd
 ```
 
-That writes the whole image, which is mostly padding: a `complete` image is
-about 1.8 GB of which roughly 137 MB is data, and this transport runs under
-1 MB/s. Measured, a full write does not finish inside 50 minutes. It is the
-right shape for a factory jig that can run unattended and the wrong one for
-turning a board around. To do it quickly, expose the eMMC from U-Boot with
-`ums 0 mmc 0` and point `fwup` at the resulting disk, which skips the padding —
-see the doc.
+Note what that costs. `disk.img` is *sparse* — 1808 MB apparent, ~140 MB
+actually stored — because GPT puts its backup header at the end of the last
+partition and `complete` writes an invalidation marker at the app partition.
+`fwup` seeks past the holes; `rkdeveloptool wl` cannot, so it pushes all
+1808 MB over a link running under 1 MB/s, and measured, that does not finish
+inside 50 minutes. Every other route (`mix burn`, `mix upload`, `fwup -d` on a
+device) moves only the ~140 MB. To flash a bare board quickly, export the eMMC
+from U-Boot with `ums 0 mmc 0` and point `fwup` at the resulting disk — see the
+doc.
 
 The image is smaller than the eMMC; on the first boot the system grows
 the app partition to fill the disk automatically.

@@ -61,13 +61,27 @@ starting it.
 
 ## 3. Board has no OS and needs a filesystem
 
-Do **not** materialise a full disk image and write it end to end. `fwup`
-already writes sparsely, and a Sige5 `complete` image is about 7 percent data:
+The trap here is worth stating exactly, because the image is not the problem.
 
-    fwup -a -d /tmp/board.img -i firmware.fw -t complete    # 1808 MB
-    # of which only ~137 MB is non-zero
+    fwup -a -d /tmp/board.img -i firmware.fw -t complete
+    ls -l  ->  1895956480 bytes      (1808 MB apparent)
+    du -h  ->  140M                  (what is actually stored)
 
-The rest is partition padding that first boot fills in anyway.
+The file is **sparse**. Two things force it to span the whole layout: GPT puts
+its backup header at the end of the last partition, and the `complete` task
+ends with `raw_memset(${APP_PART_OFFSET}, 256, 0xff)` to invalidate the app
+partition, which lands at sector 2654208. Everything between is holes.
+
+`fwup` writing to a device seeks past those holes, so it moves ~140 MB and is
+quick. `rkdeveloptool wl` does not know what a hole is: it reads the apparent
+size and pushes all 1808 MB, 1.67 GB of which is zeros, over a link that runs
+under 1 MB/s. Measured, that does not finish inside 50 minutes.
+
+So the slowness is the pairing, not the image. Anything that writes through
+`fwup` - `mix burn`, `mix upload`, or `fwup -d` on a device - was always
+moving 140 MB.
+
+Expose the eMMC as a USB disk from U-Boot and let fwup do it properly:
 
 Expose the eMMC as a USB disk from U-Boot and let fwup do it properly:
 

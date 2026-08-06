@@ -69,7 +69,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  static struct mutex huk_mutex = MUTEX_INITIALIZER;
  static struct tee_hw_unique_key *huk;
  
-@@ -352,6 +378,7 @@ static void survey_secure_otp(void)
+@@ -351,6 +377,7 @@ static void survey_secure_otp(void)
  static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
  {
  	uint32_t buffer[ROCKCHIP_OTP_HUK_SIZE] = { };
@@ -77,7 +77,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	TEE_Result res = TEE_SUCCESS;
  	size_t written = 0;
  	size_t i = 0;
-@@ -390,6 +417,22 @@ static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
+@@ -389,6 +416,22 @@ static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
  		goto out;
  	}
  
@@ -100,7 +100,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	memcpy(hwkey->data, buffer, HW_UNIQUE_KEY_LENGTH);
  
  out:
-@@ -500,6 +543,7 @@ static void dry_run_persist_huk(void)
+@@ -499,6 +542,7 @@ static void dry_run_persist_huk(void)
  	uint32_t current[ROCKCHIP_OTP_HUK_SIZE] = { };
  	uint32_t cand[ROCKCHIP_OTP_HUK_SIZE] = { };
  	uint32_t again[ROCKCHIP_OTP_HUK_SIZE] = { };
@@ -108,7 +108,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	uint32_t hash = 2166136261u;
  	TEE_Result res = TEE_SUCCESS;
  	size_t blank = 0;
-@@ -514,7 +558,7 @@ static void dry_run_persist_huk(void)
+@@ -513,7 +557,7 @@ static void dry_run_persist_huk(void)
  				       ROCKCHIP_OTP_HUK_SIZE);
  	if (res) {
  		EMSG("  range rejected by the driver: %#"PRIx32, res);
@@ -117,7 +117,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	}
  
  	for (i = 0; i < ARRAY_SIZE(current); i++)
-@@ -522,6 +566,24 @@ static void dry_run_persist_huk(void)
+@@ -521,6 +565,24 @@ static void dry_run_persist_huk(void)
  			blank++;
  	IMSG("  slot blank in %zu of %zu words", blank, ARRAY_SIZE(current));
  
@@ -142,7 +142,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	res = hw_get_random_bytes(cand, sizeof(cand));
  	if (res) {
  		EMSG("  no candidate: TRNG returned %#"PRIx32, res);
-@@ -589,11 +651,32 @@ static TEE_Result persist_huk(struct tee_hw_unique_key *hwkey)
+@@ -588,11 +650,32 @@ static TEE_Result persist_huk(struct tee_hw_unique_key *hwkey)
  	uint32_t cand[ROCKCHIP_OTP_HUK_SIZE] = { };
  	uint32_t again[ROCKCHIP_OTP_HUK_SIZE] = { };
  	uint32_t back[ROCKCHIP_OTP_HUK_SIZE] = { };
@@ -175,7 +175,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	res = rockchip_otp_read_secure(back, ROCKCHIP_OTP_HUK_INDEX,
  				       ROCKCHIP_OTP_HUK_SIZE);
  	if (res) {
-@@ -657,8 +740,30 @@ static TEE_Result persist_huk(struct tee_hw_unique_key *hwkey)
+@@ -656,8 +739,30 @@ static TEE_Result persist_huk(struct tee_hw_unique_key *hwkey)
  		goto out;
  	}
  

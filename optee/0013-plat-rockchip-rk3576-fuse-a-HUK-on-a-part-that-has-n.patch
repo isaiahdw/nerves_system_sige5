@@ -29,12 +29,7 @@ Logs a hash and an outcome, never the key.
 
 Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 ---
- core/arch/arm/plat-rockchip/conf.mk           |   6 +
- core/arch/arm/plat-rockchip/platform_rk3576.c | 106 ++++++++++++++++++
- 2 files changed, 112 insertions(+)
 
-diff --git a/core/arch/arm/plat-rockchip/conf.mk b/core/arch/arm/plat-rockchip/conf.mk
-index f79bf22f..a156e774 100644
 --- a/core/arch/arm/plat-rockchip/conf.mk
 +++ b/core/arch/arm/plat-rockchip/conf.mk
 @@ -234,6 +234,12 @@ CFG_RK3576_HUK_DRY_RUN ?= n
@@ -50,11 +45,25 @@ index f79bf22f..a156e774 100644
  CFG_TZDRAM_START ?= 0x70000000
  CFG_TZDRAM_SIZE  ?= 0x02000000
  CFG_SHMEM_START  ?= 0x72000000
-diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
-index ad294a9d..6667bcd2 100644
 --- a/core/arch/arm/plat-rockchip/platform_rk3576.c
 +++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
-@@ -566,6 +566,109 @@ out:
+@@ -343,11 +343,10 @@ static void survey_secure_otp(void)
+ #endif /* CFG_RK3576_OTP_SURVEY */
+ 
+ /*
+- * Read-only, deliberately. RK3588 generates a HUK and burns it into the OTP
+- * when it finds none; that is a one-shot write and the index is not confirmed
+- * for RK3576, so this returns an error instead. Once it is confirmed - a key
+- * that is non-zero here and differs between boards would do it - the
+- * generate/persist half can follow.
++ * The read half. The index was unconfirmed when this was written - RK3588's
++ * value, with nothing to say it held for RK3576 - so it only ever read. It has
++ * since been confirmed on hardware, and CFG_RK3576_PERSIST_HUK below adds the
++ * one-shot write that fuses a key on a part that has none.
+  */
+ static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
+ {
+@@ -566,6 +565,109 @@ out:
  }
  #endif /* CFG_RK3576_HUK_DRY_RUN */
  
@@ -164,7 +173,7 @@ index ad294a9d..6667bcd2 100644
  TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
  {
  	TEE_Result res = TEE_SUCCESS;
-@@ -592,6 +695,9 @@ TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
+@@ -592,6 +694,9 @@ TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
  #endif
  #ifdef CFG_RK3576_HUK_DRY_RUN
  		dry_run_persist_huk();
@@ -174,6 +183,3 @@ index ad294a9d..6667bcd2 100644
  #endif
  	}
  
--- 
-2.55.0
-

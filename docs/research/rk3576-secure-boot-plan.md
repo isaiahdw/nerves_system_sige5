@@ -160,6 +160,6 @@ must not offer a prompt.
 - **Where the signing key lives**, given it cannot be rotated after fusing.
 - **Whether rollback is in scope**, since it changes stage 4 rather than being
   added afterwards.
-- **Whether this is for the example or a fleet.** For the example, stages 1-3
-  and 5 are the valuable part: they produce a signed, verified-all-the-way-up
-  image without touching a fuse.
+- **Whether this is for the example or a fleet.** For the example, stages 1-4
+  are the valuable part: they produce a signed, verified-all-the-way-up image
+  without touching a fuse. Stage 5 is the fusing.

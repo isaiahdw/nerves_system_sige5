@@ -12,7 +12,7 @@ everything else:
 
 The committed `u-boot-rockchip.bin` is mainline U-Boot v2026.01
 (`sige5-rk3576_defconfig`) plus the Rockchip rkbin blobs (RK3576 DDR init
-v1.12, BL31 v1.24 — there is no open-source DRAM init or BL31 for this
+v1.13, BL31 v1.25 — there is no open-source DRAM init or BL31 for this
 SoC), with the Nerves environment support added:
 `CONFIG_ENV_IS_IN_MMC=y`, `CONFIG_ENV_OFFSET=0xF00000`,
 `CONFIG_ENV_SIZE=0x20000`, `CONFIG_SYS_MMC_ENV_DEV=0` (the eMMC —

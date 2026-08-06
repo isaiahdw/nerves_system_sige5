@@ -9,6 +9,12 @@ USB 3.0, and a 40-pin GPIO header. Built on a mainline LTS kernel
 (6.18.y) and mainline U-Boot. The IEx console is on `ttyS0`, the
 1.5 Mbaud debug UART on header pins 8/10/6.
 
+**Board revision v1.2 or later.** The device tree drives the v1.2 WiFi/BT
+module (BCM43752 on SDIO, BCM4362A2 on uart4) directly, including its reset
+and wake GPIOs. Earlier boards carry an RTL8852BS instead, which has no
+mainline driver and does not share that wiring, so they are not supported
+here - not merely untested.
+
 Derived from the
 [nerves_system_rock_4d](https://github.com/isaiahdw/nerves_system_rock_4d)
 mainline branch (same SoC). Verified on a Sige5 v1.2 board: eMMC boot,
@@ -36,7 +42,6 @@ Not working:
 
 | | Why |
 | --- | --- |
-| Bluetooth | uart4 is disabled in the mainline dts |
 | CAN | No mainline driver |
 | Video decode | rkvdec2 for RK3576 lands in kernel 7.0 |
 | MIPI CSI/DSI | Not wired up in mainline for this board |
@@ -52,6 +57,23 @@ not a frequency —
 **Secure-world keys are bound to the board.** They are encrypted against a fuse
 in the SoC and stored on the app partition, so a data wipe loses them and the
 device re-enrols. Moving the eMMC to another board loses them too.
+
+**WiFi logs a recurring SDIO sleep error.** About three times an hour:
+
+```
+brcmfmac: brcmf_sdio_bus_sleep: error while changing bus sleep state -110
+```
+
+occasionally followed by `brcmf_sdio_txfail`, and once by
+`brcmf_sdio_dpc: failed backplane access over SDIO, halting operation`. The
+link recovers each time. It is six consecutive timeouts reading
+`SBSDIO_FUNC1_SLEEPCSR` - the driver's KSO handshake giving up - and the cause
+is not established. Wiring the out-of-band host wake (`0028`) did not change
+the rate; that handshake runs over SDIO function 1 either way. The open lead
+is the SDIO clock - mainline asks for 200 MHz, Rockchip's own board file caps
+the same controller at 150 - and the phase-map support Rockchip added
+upstream in 7.1 (commit cc1060a18e04, "multiple boards require different
+phase settings"), which is not in this kernel.
 
 ## Boot architecture
 
@@ -199,8 +221,13 @@ It only ever writes a blank slot and only after its checks pass, so booting it
 on a part that already has a key does nothing.
 
 A key burned before the completion marker existed reads as unmarked and is
-refused, so those parts re-provision - there is no way to tell such a slot
-apart from one left by an interrupted burn.
+refused. Such a part does **not** re-provision: the read path answers
+TEE_ERROR_CORRUPT_OBJECT, the burn path only runs on TEE_ERROR_NO_DATA, and it
+would refuse the non-blank slot anyway. The existing key stays fused and
+unusable, and HUK-derived secure storage on that device is gone. There is no
+way to tell such a slot from one left by an interrupted burn, which is why it
+is refused; recovering those devices needs a second key slot (0x88 or 0x8c are
+blank) and an operator-authorised migration that neither exists yet.
 
 It replaces BL31 as well. Both BL31 builds deliver identical GPU rates.
 
@@ -301,9 +328,9 @@ Verified on a Sige5 v1.2, 2026-08-05.
 | eMMC boot, A/B firmware slots | Yes | Boot ROM reads the bootloader from eMMC directly; HS400ES. App partition grows to fill the eMMC on first boot |
 | OTA updates (`mix upload`) | Yes | Delta updates supported (fwup >= 1.12 on device); validation + automatic revert verified |
 | Ethernet x2 | Yes | gmac0 + gmac1, RTL8211F each. `eth0` verified with DHCP + internet; `eth1` detected but not tested with a cable |
-| WiFi (onboard, board v1.2+) | Yes | BCM43752 (AP6275S) on SDIO via in-kernel brcmfmac; firmware from `package/brcmfmac43752-firmware`. Verified connected with DHCP. v1.0/1.1 boards (RTL8852BS) have no mainline driver |
+| WiFi (onboard, v1.2+ only) | Yes | BCM43752 (AP6275S) on SDIO via in-kernel brcmfmac; firmware from `package/brcmfmac43752-firmware`. Verified connected with DHCP. `linux/0028` names the module so brcmfmac takes the out-of-band host wake rather than signalling in band over SDIO. v1.0/1.1 boards (RTL8852BS) have no mainline driver |
 | microSD boot | Fallback | `mix burn` the same firmware to a card; it boots when the eMMC has no valid loader at sector 64, verified with the eMMC bootloader cleared. With a loader present the eMMC's U-Boot boots the eMMC and does not check the card |
-| Bluetooth | No | uart4 is deliberately disabled in the mainline dts; needs a serdev node + bring-up |
+| Bluetooth | Enumerates, untested | `linux/0028` enables uart4 and adds the `brcm,bcm43438-bt` serdev child, from mainline's own v1.2 overlay. The arm64 defconfig already carries `BT_HCIUART_BCM`. `hci0` appears and the controller identifies as BCM4362A2; `brcm/BCM4362A2.hcd` patchram ships in `package/brcmfmac43752-firmware`. Nothing has been paired yet |
 | HDMI display + console | Yes | VOP + dw-hdmi-qp, framebuffer console verified on a display. No GL/EGL userspace yet (see GPU row) |
 | GPU (Mali G52 MC3) | Yes | Kernel panfrost + Mesa (OpenGL ES 3.1, EGL/GBM, no X11/Wayland); kmscube runs vsync-locked at 60 fps on HDMI. devfreq drives 300-900 MHz off BL31's PVTPLL over SCMI (see GPU). Mesa is built without the LLVM draw module and the orphaned libLLVM is pruned from the image (see external.mk and post-build.sh), so the GL stack costs ~18 MB |
 | M.2 NVMe (PCIe 2.1) | Untested | pcie0 + NVMe drivers built in; no drive was fitted during bring-up |
@@ -388,7 +415,7 @@ sector 64, with one copy and no revert.
 ## Kernel
 
 Mainline LTS from kernel.org (6.18.40) with the upstream
-`rk3576-armsom-sige5` device tree and twenty-seven patches, each commented
+`rk3576-armsom-sige5` device tree and twenty-eight patches, each commented
 inline.
 
 NPU and board (`0001`-`0014`): bindings for the NPU MMU and the RKNPU OPP
@@ -413,6 +440,12 @@ BIU resets (`0022`), and the OP-TEE firmware node with its memory reservation
 PWM (`0024`-`0027`): the RK3576 controller binding (`0024`), v4 support in
 pwm-rockchip (`0025`), the pwm1 and pwm2 nodes (`0026`), and the fan on the
 header (`0027`).
+
+WiFi and Bluetooth (`0028`): the module named under the SDIO controller so
+brcmfmac takes the out-of-band host wake, and uart4 enabled with its
+Bluetooth child - the contents of mainline's
+`rk3576-armsom-sige5-v1.2-wifibt.dtso`, which this system cannot apply as an
+overlay because it builds a single device tree.
 
 Configuration is the arm64 `defconfig` plus `linux/nerves.config`,
 documented inline.

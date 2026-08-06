@@ -1,0 +1,119 @@
+dts: rk3576-armsom-sige5: wire the WiFi host wake and enable Bluetooth
+
+The board file brings the SDIO controller up but never names what is on it,
+so brcmfmac gets no out-of-band host wake: of.c sets oob_irq_supported only
+when a "host-wake" interrupt is present, and bcmsdh.c registers the OOB IRQ
+only when it is set. The pin was already described - wifi_wake_host, GPIO0_B0
+- and nothing referenced it.
+
+Mainline ships the wiring as an overlay,
+rk3576-armsom-sige5-v1.2-wifibt.dtso, for exactly this v1.2 module. This
+system builds one device tree and applies no overlays, so the same nodes go
+in the board file. The wiring is correct on that basis alone.
+
+What this does not explain is the fault that prompted it:
+
+  brcmfmac: brcmf_sdio_bus_sleep: error while changing bus sleep state -110
+
+seen about 3 times an hour, once followed by brcmf_sdio_txfail.
+brcmf_sdio_kso_control() does its handshake with brcmf_sdiod_readb/writeb on
+SBSDIO_FUNC1_SLEEPCSR whether or not an OOB interrupt exists - within sdio.c
+oob_irq_supported only gates wowl_supported - so the KSO exchange runs over
+SDIO either way and the mechanism is not "OOB moves the handshake off the
+bus". Any effect here is indirect and unproven.
+
+Measured after this patch: brcmf_oob_intr appears in /proc/interrupts on
+GPIO0_B0 and counts up, where before there was no brcmf line at all. Error
+counts over a long soak are the only thing that can decide whether the -110
+is affected; do not read this patch as a fix for it until that is done.
+
+The LPO clock the overlay also names is already reaching the module through
+sdio_pwrseq's ext_clock, so only the interrupt is new.
+
+Bluetooth comes with it, from the same overlay: uart4 goes to okay and gains
+the bcm43438-bt serdev child. The kernel side needs nothing - the arm64
+defconfig has BT_HCIUART_BCM, which selects BT_HCIUART_H4 and BT_BCM, and
+BT_HCIUART_SERDEV defaults on with SERIAL_DEV_BUS. The controller reports
+itself as BCM4362A2 and asks for brcm/BCM4362A2.hcd, which
+package/brcmfmac43752-firmware installs.
+
+This narrows the board file to v1.2 and later. Mainline keeps the same nodes
+in an overlay precisely so one DTB serves every revision; building a single
+device tree gives that up. Earlier boards carry an RTL8852BS, which has no
+mainline driver and does not share this wiring, so they would now get reset
+and wake GPIOs driven for a module that is not there. The README says v1.2 or
+later is required rather than leaving that implicit.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
++++ b/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
+@@ -7,6 +7,7 @@
+ /dts-v1/;
+ 
+ #include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/interrupt-controller/irq.h>
+ #include <dt-bindings/leds/common.h>
+ #include <dt-bindings/pinctrl/rockchip.h>
+ #include <dt-bindings/pwm/pwm.h>
+@@ -920,6 +921,8 @@ &sdhci {
+ };
+ 
+ &sdio {
++	#address-cells = <1>;
++	#size-cells = <0>;
+ 	bus-width = <4>;
+ 	cap-sdio-irq;
+ 	disable-wp;
+@@ -934,6 +937,28 @@ &sdio {
+ 	vqmmc-supply = <&vcc_1v8_s3>;
+ 	wakeup-source;
+ 	status = "okay";
++
++	/*
++	 * Naming the module is what gives brcmfmac an out-of-band host wake:
++	 * of.c sets oob_irq_supported only when this "host-wake" interrupt is
++	 * present, and bcmsdh.c registers the OOB IRQ only when it is set.
++	 * Without the node the driver falls back to MMC_PM_WAKE_SDIO_IRQ.
++	 *
++	 * This is upstream's own wiring for the v1.2 module, which is the
++	 * reason for it. It is not a fix for the KSO timeouts seen on this
++	 * board - that handshake runs over SDIO function 1 either way.
++	 */
++	wifi@1 {
++		compatible = "brcm,bcm4329-fmac";
++		reg = <1>;
++		clocks = <&hym8563>;
++		clock-names = "lpo";
++		interrupt-parent = <&gpio0>;
++		interrupts = <RK_PB0 IRQ_TYPE_LEVEL_HIGH>;
++		interrupt-names = "host-wake";
++		pinctrl-names = "default";
++		pinctrl-0 = <&wifi_wake_host>;
++	};
+ };
+ 
+ &sdmmc {
+@@ -977,6 +1002,22 @@ &uart4 {
+ 	pinctrl-0 = <&uart4m1_xfer &uart4m1_ctsn &uart4m1_rtsn>;
+ 	pinctrl-names = "default";
+ 	uart-has-rtscts;
++	status = "okay";
++
++	bluetooth {
++		compatible = "brcm,bcm43438-bt";
++		clocks = <&hym8563>;
++		clock-names = "lpo";
++		device-wakeup-gpios = <&gpio1 RK_PD7 GPIO_ACTIVE_HIGH>;
++		interrupt-parent = <&gpio0>;
++		interrupts = <RK_PB1 IRQ_TYPE_LEVEL_HIGH>;
++		interrupt-names = "host-wakeup";
++		pinctrl-names = "default";
++		pinctrl-0 = <&bt_reg_on>, <&bt_wake_host>, <&host_wake_bt>;
++		shutdown-gpios = <&gpio0 RK_PC6 GPIO_ACTIVE_HIGH>;
++		vbat-supply = <&vcc_3v3_s3>;
++		vddio-supply = <&vcc_1v8_s3>;
++	};
+ };
+ 
+ &usb_drd0_dwc3 {

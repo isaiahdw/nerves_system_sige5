@@ -318,7 +318,11 @@ if [ "${SECURE_WORLD:-0}" = 1 ]; then
         echo "=== creating a signing venv in $VENV"
         rm -rf "$VENV"
         python3 -m venv "$VENV"
-        "$VENV/bin/pip" install -q --require-hashes -r "$REQS" || {
+        # --only-binary bars source distributions: a hashed sdist still runs
+        # its own build backend here, beside the private key. --no-deps keeps
+        # pip to the closure the file already pins.
+        "$VENV/bin/pip" install -q --require-hashes --only-binary=:all: \
+            --no-deps -r "$REQS" || {
             echo "BUILD FAILED: could not install the pinned signing dependencies" >&2
             exit 1
         }
@@ -341,7 +345,19 @@ if [ "${SECURE_WORLD:-0}" = 1 ]; then
         --out "$REPO_DIR/rootfs_overlay/lib/optee_armtz/$PKCS11_UUID.ta" >/dev/null
 
     rm -f "$TA_WORK/digest" "$TA_WORK/digest.bin" "$TA_WORK/sig" "$TA_WORK/sig.bin"
-    echo "=== signed the PKCS#11 TA outside the build container"
+
+    # Prove the stitched TA verifies against the same public half the core was
+    # built with. Everything above can succeed and still produce something the
+    # secure world refuses at load time, where the only symptom is a TA that
+    # will not start.
+    if ! "$PY" "$SIGNER" verify --uuid "$PKCS11_UUID" \
+            --in "$REPO_DIR/rootfs_overlay/lib/optee_armtz/$PKCS11_UUID.ta" \
+            --key "$TA_PUBKEY" >/dev/null 2>&1; then
+        echo "BUILD FAILED: the stitched TA does not verify against the key" >&2
+        echo "  this core embeds. It would not load on the device." >&2
+        exit 1
+    fi
+    echo "=== signed the PKCS#11 TA outside the build container, verified"
 fi
 
 # A core and a TA from different builds cannot load each other, and the failure
@@ -369,11 +385,20 @@ fi
 
 VARIANT_FILE="$REPO_DIR/uboot/u-boot-rockchip.variant"
 if [ "${SECURE_WORLD:-0}" = 1 ]; then
+    # Digests, so a later firmware build can check it is packaging this
+    # bootloader with this TA rather than trusting the word "secure-world".
+    BOOTLOADER_SHA=$(shasum -a 256 "$OUT_BIN" | cut -d' ' -f1)
+    TA_SHA=$(shasum -a 256 "$PKCS11_TA" | cut -d' ' -f1)
+    TA_KEY_FP=$(openssl rsa -in "$TA_PUBKEY" -pubin -outform DER 2>/dev/null |
+                shasum -a 256 | cut -d' ' -f1)
     {
         echo "variant: secure-world"
         echo "built:   upstream TF-A + OP-TEE (PLATFORM=rockchip-rk3576, SPD=opteed)"
         echo "fuses:   yes - burns a HUK on first boot of an unprovisioned part"
         echo "debug:   ${SECURE_WORLD_DEBUG:-0}"
+        echo "bootloader-sha256: $BOOTLOADER_SHA"
+        echo "ta-sha256: $TA_SHA"
+        echo "ta-pubkey-sha256: $TA_KEY_FP"
     } > "$VARIANT_FILE"
     echo
     echo "=== uboot/u-boot-rockchip.bin now carries a SECURE WORLD."

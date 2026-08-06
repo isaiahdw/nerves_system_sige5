@@ -155,7 +155,8 @@ mask would have produced twelve hits, and a `0x1c0` period would have repeated
 `0x064` at `0x224`; neither appears.
 
 `0x080` is blank in all four words, and `0x184` is blank, consistent with secure
-boot being off.
+boot being off. That is the as-shipped state; `0x080` is no longer blank on
+board 1.
 
 The normal-world OTP is the opposite - fully readable, and holding the chip ID,
 a lot code, a serial and the PVTM/leakage values:
@@ -187,8 +188,9 @@ downstream appeared to work. A genuine random key trips that check with
 probability about 4 x 2^-32.
 
 Until a key is fused, `tee_fs_init_key_manager` fails and secure storage does
-not initialise. That is the current state on both boards, and it is why the
-PKCS#11 TA loads but cannot open a session.
+not initialise: the PKCS#11 TA loads but cannot open a session. That was the
+state of both boards when this was written. Board 1 has since had a HUK fused
+(see "Burning a HUK" below) and initialises normally; board 2 has not.
 
 ## Random numbers
 
@@ -270,7 +272,11 @@ already has a key does nothing.
 diff of the binary itself says only "binary files differ".
 
 `SECURE_WORLD_DEBUG=1` adds read-only diagnostics: an OTP survey, a search for
-`RKRNG_S`, and a dry run reporting what a burn would do without writing.
+`RKRNG_S`, and a dry run reporting what a burn would do without writing. Each
+is a build flag of its own — `CFG_RK3576_OTP_SURVEY`, `CFG_RK3576_TRNG_S_PROBE`
+and `CFG_RK3576_HUK_DRY_RUN` — all defaulting to `n`. They answer questions
+that are asked once per SoC, and a part with no HUK would otherwise print the
+survey every time a key is derived.
 
 ### Order of operations
 

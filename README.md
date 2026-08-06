@@ -100,9 +100,7 @@ the OP-TEE driver.
 One thing is not opt-in: the device tree reserves the secure world's memory
 unconditionally, because the same image has to boot on either bootloader and a
 reservation that disagrees with the running BL32 is worse than an unused one.
-That costs 50 MB of 8 GB whether or not a secure world is present — 36 MB for
-upstream OP-TEE and 14 MB for a Rockchip BL32 that is no longer built here and
-should be dropped.
+That costs 36 MB of 8 GB whether or not a secure world is present.
 
 There is no separate secure element on this board, so TrustZone is the only
 place a key can live that survives root or a desoldered eMMC.
@@ -180,8 +178,9 @@ Thirteen patches, applied to a pinned optee_os by `scripts/build-uboot.sh`:
   cannot be read is fatal rather than silently degraded
 - a secure-world console, without which OP-TEE's own diagnostics go nowhere and
   a TA that will not start looks identical to one that is missing
-- read-only diagnostics: an OTP survey, a search for the secure TRNG, and a dry
-  run reporting what a burn would do
+- read-only diagnostics behind `SECURE_WORLD_DEBUG=1`, off by default: an OTP
+  survey, a search for the secure TRNG, and a dry run reporting what a burn
+  would do
 - the burn itself, off by default
 
 Working on hardware: upstream TF-A v2.15.0 + OP-TEE 4.10 boot, the PKCS#11 TA
@@ -236,7 +235,9 @@ cannot be extracted". What holds is:
 Someone who can replace BL32 runs code at S-EL1 and can read the same secure
 OTP words OP-TEE reads, so they can take the key itself, not merely use it.
 Closing that means verified boot, which is more fuses — and the ones that
-enable it are the ones that can brick a part.
+enable it are the ones that can brick a part. What that would take, stage by
+stage, is in
+[docs/research/rk3576-secure-boot-plan.md](docs/research/rk3576-secure-boot-plan.md).
 
 Keys are also sealed against a fuse in this SoC and stored on the app
 partition, so a data wipe or a different board means re-enrolment.
@@ -286,7 +287,7 @@ Verified on a Sige5 v1.2, 2026-08-05.
 | GPIO/I2C/SPI/UART header | Expected | Via [Circuits.*](https://elixir-circuits.github.io/) |
 | NPU (6 TOPS) | Yes | Vendor rknpu driver built out-of-tree against the mainline kernel (`package/rknpu-driver`) + librknnrt 2.3.2. IOMMU-backed pageable buffers (no CMA cap), devfreq across 300-900 MHz. Both cores usable together. Verified with MobileNetV2 (250 inf/s, top-5 matching Rockchip's reference exactly), Qwen3-0.6B W4A16 through rkllm 1.3.0 at 17.8 tok/s, and an int8 matmul checked against the CPU. Same results with and without the secure world. Models are built on a host with rknn-toolkit2 |
 | Video decode | No | rkvdec2 for RK3576 lands in kernel 7.0 |
-| PWM / fan header | Yes | RK3576 has a fourth-generation PWM block that mainline 6.18 does not know; `linux/0023`-`0026` add the driver, the binding, the fourteen channels of pwm1 and pwm2, and a `pwm-fan` on PWM2 channel 7 (GPIO3_D7, mux m3) at 20 kHz. The fan steps 0/50/100/150/200/255 at 50, 55, 60, 65 and 70 °C off the package sensor, and is a normal hwmon device the rest of the time |
+| PWM / fan header | Yes | RK3576 has a fourth-generation PWM block that mainline 6.18 does not know; `linux/0024`-`0027` add the driver, the binding, the fourteen channels of pwm1 and pwm2, and a `pwm-fan` on PWM2 channel 7 (GPIO3_D7, mux m3) at 20 kHz. The fan steps 0/50/100/150/200/255 at 50, 55, 60, 65 and 70 °C off the package sensor, and is a normal hwmon device the rest of the time |
 | MIPI CSI/DSI | No | Not wired up in mainline for this board |
 
 ## Building
@@ -303,6 +304,9 @@ Editing anything in `linux/` costs a full kernel rebuild. Buildroot applies
 a hash of the patch set inside the extracted tree and discards the tree when
 the hash stops matching. Without that, an added or edited patch is ignored and
 the build still succeeds — the change is simply absent from the image.
+
+The same guard covers `package/rknpu-driver/*.patch` and
+`package/optee-key/src/`, which buildroot also reads once at extract time.
 
 ### Using in an application
 

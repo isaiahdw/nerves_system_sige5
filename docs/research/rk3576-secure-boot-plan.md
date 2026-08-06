@@ -16,6 +16,44 @@ blank on the boards here:
 Getting either wrong is unrecoverable. Enabling secure boot with no key burned
 leaves a part the boot ROM will not load anything into.
 
+## What the fuses cover
+
+The fuses buy one link: the boot ROM verifies the idblock — TPL plus SPL — at
+sector 64 against the burned key hash. Everything above that link is verified
+only if something in the chain is built to verify it.
+
+| stage | verified by | present today |
+| --- | --- | --- |
+| idblock (TPL + SPL) | boot ROM, against the fused hash | after stage 4 |
+| FIT: TF-A, OP-TEE, U-Boot proper | SPL, `CONFIG_SPL_FIT_SIGNATURE` | no |
+| kernel + DTB | U-Boot, `CONFIG_FIT_SIGNATURE` on a signed kernel FIT | no |
+| rootfs | dm-verity root hash carried in the signed FIT | no |
+| app partition | nothing — it is read-write by design | n/a |
+
+Stopping after the first row is a chain that verifies its own bootloader and
+then loads an unsigned kernel, which is worth nothing against an attacker who
+can write the eMMC. Every row down to the rootfs has to be closed for the
+extraction boundary in the README to widen.
+
+Two more things gate the same claim, neither of them a fuse:
+
+- **The U-Boot console.** An interactive prompt runs `bootm` on any image the
+  operator points it at, which walks around every row above. It has to be shut:
+  no console entry, no `bootcmd` override from the environment.
+- **The environment.** `fwup` and the running system can both write sector
+  30720. A boot command assembled from writable storage is an unsigned input to
+  a signed chain, so the environment has to be either read-only to the OS or
+  ignored in favour of a built-in `bootcmd`.
+
+## Rollback
+
+Fuses are not a version. A signed image stays signed after the bug in it is
+found, so anyone who can write the eMMC can put an older signed build back and
+attack that instead. Nothing in this plan prevents it. If it matters, the
+counter has to live somewhere the normal world cannot rewind — an RPMB counter
+checked by SPL, or an OTP word burned per revision — and that is a design of
+its own, not a step in this one.
+
 ## What signs what
 
 Rockchip's `rk_sign_tool` (rkbin, x86-64 static) is the tool that matches the
@@ -43,7 +81,8 @@ Nothing is fused until stage 4, and each stage has to pass before the next.
   accept an unsigned SPL loader once secure boot is on?** On some Rockchip
   parts it does not, which turns a bad signed image into a dead board rather
   than a reflash. If it does not, a signed loader has to exist and be kept
-  alongside the keys before stage 4.
+  alongside the keys before stage 4, and `rkdeveloptool db` has to be proven
+  against it — a recovery path that has never been run is not a recovery path.
 - Confirm the hash is 16 bytes as the driver's whitelist implies, and what it
   is a hash of, by comparing `sign_tool otp --hash` output against the key.
 
@@ -68,21 +107,31 @@ Nothing is fused until stage 4, and each stage has to pass before the next.
 - Key hash first, into `0x184`-`0x187`. Reuse the HUK write path from
   `optee/0013`: it already refuses a partially programmed slot, reads back
   what it wrote, and aborts if the read does not match.
-- Reboot and confirm the board still boots. The hash alone changes nothing -
-  the ROM does not check until the enable bit is set, so this is the reversible
-  half of the operation in practice.
+- Reboot, then read `0x184`-`0x187` back on the running system and compare
+  against the stage 3 output. The write path's own read-back happens while the
+  OTP controller is still hot from the burn; a value that only survives that
+  and not a power cycle is exactly the failure the enable bit makes permanent.
 - Only then set the enable bit in word `0x8`.
 - Confirm the signed image boots, and that an unsigned one is refused. The
   second half matters: a board that boots either image has secure boot fused
   but not working.
 
-### 5. Live with it
+### 5. Close the rest of the chain
+
+The fuses verify one link; the rows in "What the fuses cover" are the rest.
+Signed FIT for TF-A/OP-TEE/U-Boot, signed kernel FIT, dm-verity for the rootfs,
+console and environment locked. None of it needs a fuse, so it can be built and
+tested before stage 4 — and it has to be, because a fused board that cannot
+boot an updated bootloader has no way back.
+
+### 6. Live with it
 
 - Every bootloader update is now a signed build. `fwup`'s write at sector 64
   carries a signed idblock or the board stops booting, so the signing step
   belongs in `scripts/build-uboot.sh` rather than in someone's shell history.
 - Key loss is fleet loss. There is no path back on a fused part.
-- The extraction boundary in the README can then be widened, and only then.
+- The extraction boundary in the README can be widened once stage 5 is done,
+  not once stage 4 is.
 
 ## What this needs decided
 
@@ -90,6 +139,8 @@ Nothing is fused until stage 4, and each stage has to pass before the next.
   is best done on hardware nobody minds bricking. Both boards here are in use,
   and one has a fused HUK plus a provisioned NervesHub identity.
 - **Where the signing key lives**, given it cannot be rotated after fusing.
+- **Whether rollback is in scope**, since it changes stage 5 rather than being
+  added afterwards.
 - **Whether this is for the example or a fleet.** For the example, stages 1-3
-  are the valuable part: they produce a signed image and a verified fuse value
-  without touching a fuse.
+  and 5 are the valuable part: they produce a signed, verified-all-the-way-up
+  image without touching a fuse.

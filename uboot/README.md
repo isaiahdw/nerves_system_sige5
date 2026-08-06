@@ -18,8 +18,12 @@ SoC), with the Nerves environment support added:
 `CONFIG_ENV_SIZE=0x20000`, `CONFIG_SYS_MMC_ENV_DEV=0` (the eMMC —
 U-Boot's mmc0 is the eMMC on this board, mmc1 the microSD).
 
-Rebuild it reproducibly with `scripts/build-uboot.sh` (Docker; pinned
-U-Boot tag + rkbin commit).
+Rebuild it with `scripts/build-uboot.sh`. Its inputs are pinned - the U-Boot
+tag is checked against the commit it must resolve to, rkbin, TF-A and OP-TEE
+by commit, and the container by image digest - but the build is not
+reproducible: the container installs Debian packages from moving repositories
+and no build epoch is fixed. Pinned inputs make the output explainable, not
+byte-identical.
 
 Licensing of the committed binaries: U-Boot itself is GPL-2.0-or-later
 (corresponding source: the pinned tag at https://source.denx.de/u-boot/u-boot

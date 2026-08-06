@@ -99,68 +99,9 @@ complains once instead of retrying and logging for ever.
 
 Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
---- a/include/rknpu_devfreq.h
-+++ b/include/rknpu_devfreq.h
-@@ -8,8 +8,6 @@
- #define __LINUX_RKNPU_DEVFREQ_H
- 
- #ifdef CONFIG_ROCKCHIP_RKNPU_DEVFREQ
--void rknpu_devfreq_lock(struct rknpu_device *rknpu_dev);
--void rknpu_devfreq_unlock(struct rknpu_device *rknpu_dev);
- int rknpu_devfreq_init(struct rknpu_device *rknpu_dev);
- void rknpu_devfreq_remove(struct rknpu_device *rknpu_dev);
- int rknpu_devfreq_runtime_suspend(struct device *dev);
-@@ -25,14 +23,6 @@ static inline void rknpu_devfreq_remove(struct rknpu_device *rknpu_dev)
- {
- }
- 
--static inline void rknpu_devfreq_lock(struct rknpu_device *rknpu_dev)
--{
--}
--
--static inline void rknpu_devfreq_unlock(struct rknpu_device *rknpu_dev)
--{
--}
--
- static inline int rknpu_devfreq_runtime_suspend(struct device *dev)
- {
- 	return 0;
---- a/include/rknpu_drv.h
-+++ b/include/rknpu_drv.h
-@@ -160,6 +160,13 @@ struct rknpu_device {
- 	bool hw_powered;
- 	/* Bounds the power-off retry so a persistent failure cannot spin. */
- 	unsigned int power_off_retries;
-+	/*
-+	 * Set once an unwind stopped partway and left the suppliers enabled.
-+	 * A one-way latch: acquisitions are refused, the retry worker stands
-+	 * down, and teardown leaves the domains attached. See
-+	 * rknpu_power_wedge().
-+	 */
-+	bool power_wedged;
- 	int bypass_irq_handler;
- 	int bypass_soft_reset;
- 	bool soft_reseting;
---- a/rknpu_devfreq.c
-+++ b/rknpu_devfreq.c
-@@ -253,14 +253,6 @@ static struct devfreq_dev_profile npu_devfreq_profile = {
- 	.get_cur_freq = npu_devfreq_get_cur_freq,
- };
- 
--void rknpu_devfreq_lock(struct rknpu_device *rknpu_dev)
--{
--}
--
--void rknpu_devfreq_unlock(struct rknpu_device *rknpu_dev)
--{
--}
--
- /*
-  * Bin numbers as the vendor's rockchip_get_soc_info() assigns them, and one of
-  * ours. BIT(bin) is matched against the first cell of opp-supported-hw in the
 --- a/rknpu_drv.c
 +++ b/rknpu_drv.c
-@@ -326,6 +326,21 @@ static int rknpu_get_drv_version(uint32_t *version)
+@@ -326,6 +326,21 @@
  static int rknpu_power_on(struct rknpu_device *rknpu_dev);
  static int rknpu_power_off(struct rknpu_device *rknpu_dev);
  
@@ -182,7 +123,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  /* Floor for the debugfs-settable delay: zero would busy-loop the workqueue. */
  #define RKNPU_POWER_OFF_RETRY_MIN_MS 20
  #define RKNPU_POWER_OFF_RETRY_LIMIT 10
-@@ -345,6 +360,10 @@ static void rknpu_power_off_retry(struct rknpu_device *rknpu_dev)
+@@ -345,6 +360,10 @@
  	if (!rknpu_dev->power_off_wq)
  		return;
  
@@ -193,7 +134,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	if (++rknpu_dev->power_off_retries > RKNPU_POWER_OFF_RETRY_LIMIT) {
  		LOG_DEV_ERROR(
  			rknpu_dev->dev,
-@@ -383,8 +402,26 @@ int rknpu_power_get(struct rknpu_device *rknpu_dev)
+@@ -383,8 +402,26 @@
  	int ret = 0;
  
  	mutex_lock(&rknpu_dev->power_lock);
@@ -221,7 +162,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	mutex_unlock(&rknpu_dev->power_lock);
  
  	return ret;
-@@ -627,7 +664,9 @@ static long rknpu_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+@@ -627,7 +664,9 @@
  
  	rknpu_dev = ((struct rknpu_session *)file->private_data)->rknpu_dev;
  
@@ -232,7 +173,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  	switch (_IOC_NR(cmd)) {
  	case RKNPU_ACTION:
-@@ -688,8 +727,9 @@ static int rknpu_action_ioctl(struct drm_device *dev, void *data,
+@@ -688,8 +727,9 @@
  			    struct drm_file *file_priv)                     \
  	{                                                                   \
  		struct rknpu_device *rknpu_dev = dev_get_drvdata(dev->dev); \
@@ -244,7 +185,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		ret = func(dev, data, file_priv);                           \
  		rknpu_power_put_delay(rknpu_dev);                           \
  		return ret;                                                 \
-@@ -951,7 +991,8 @@ static void rknpu_drm_remove(struct rknpu_device *rknpu_dev)
+@@ -951,7 +991,8 @@
  static int rknpu_power_on(struct rknpu_device *rknpu_dev)
  {
  	struct device *dev = rknpu_dev->dev;
@@ -254,7 +195,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  #ifndef FPGA_PLATFORM
  	if (rknpu_dev->vdd) {
-@@ -972,7 +1013,7 @@ static int rknpu_power_on(struct rknpu_device *rknpu_dev)
+@@ -972,7 +1013,7 @@
  				dev,
  				"failed to enable mem reg for rknpu, ret: %d\n",
  				ret);
@@ -263,7 +204,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		}
  	}
  #endif
-@@ -981,85 +1022,119 @@ static int rknpu_power_on(struct rknpu_device *rknpu_dev)
+@@ -981,85 +1022,119 @@
  	if (ret) {
  		LOG_DEV_ERROR(dev, "failed to enable clk for rknpu, ret: %d\n",
  			      ret);
@@ -414,7 +355,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  #endif
  
  	return ret;
-@@ -1068,6 +1143,7 @@ out:
+@@ -1068,6 +1143,7 @@
  static int rknpu_power_off(struct rknpu_device *rknpu_dev)
  {
  	struct device *dev = rknpu_dev->dev;
@@ -422,7 +363,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  #ifndef FPGA_PLATFORM
  	int ret;
-@@ -1075,9 +1151,16 @@ static int rknpu_power_off(struct rknpu_device *rknpu_dev)
+@@ -1075,9 +1151,16 @@
  	bool val;
  #endif
  
@@ -440,7 +381,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  #ifndef FPGA_PLATFORM
  	/*
  	 * Shut the SCMI gate first. Doing it after the suspended check below
-@@ -1098,7 +1181,6 @@ static int rknpu_power_off(struct rknpu_device *rknpu_dev)
+@@ -1098,7 +1181,6 @@
  		WRITE_ONCE(rknpu_dev->hw_powered, true);
  		pm_runtime_get_noresume(dev);
  		LOG_DEV_ERROR(dev, "failed to suspend npu: %d\n", ret);
@@ -448,7 +389,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		return ret;
  	}
  	/*
-@@ -1112,7 +1194,6 @@ static int rknpu_power_off(struct rknpu_device *rknpu_dev)
+@@ -1112,7 +1194,6 @@
  	if (!pm_runtime_status_suspended(dev)) {
  		WRITE_ONCE(rknpu_dev->hw_powered, true);
  		pm_runtime_get_noresume(dev);
@@ -456,7 +397,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		return -EBUSY;
  	}
  #else
-@@ -1152,8 +1233,7 @@ static int rknpu_power_off(struct rknpu_device *rknpu_dev)
+@@ -1152,8 +1233,7 @@
  		if (ret) {
  			LOG_DEV_ERROR(dev, "iommu still enabled\n");
  			pm_runtime_get_sync(dev);
@@ -466,7 +407,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		}
  #endif
  #else
-@@ -1161,27 +1241,40 @@ static int rknpu_power_off(struct rknpu_device *rknpu_dev)
+@@ -1161,27 +1241,40 @@
  			msleep(20);
  #endif
  		if (rknpu_dev->genpd_dev_npu2)
@@ -517,7 +458,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	return 0;
  }
  
-@@ -1366,6 +1459,7 @@ static int rknpu_probe(struct platform_device *pdev)
+@@ -1366,6 +1459,7 @@
  	struct resource *res = NULL;
  	struct rknpu_device *rknpu_dev = NULL;
  	struct device *dev = &pdev->dev;
@@ -525,7 +466,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	struct device *virt_dev = NULL;
  	const struct of_device_id *match = NULL;
  	const struct rknpu_config *config = NULL;
-@@ -1576,33 +1670,52 @@ static int rknpu_probe(struct platform_device *pdev)
+@@ -1576,33 +1670,52 @@
  		rknpu_dev->multiple_domains = true;
  	}
  
@@ -589,7 +530,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		} else {
  			LOG_DEV_WARN(dev, "could not find sram resource!\n");
  		}
-@@ -1619,14 +1732,12 @@ static int rknpu_probe(struct platform_device *pdev)
+@@ -1619,14 +1732,12 @@
  		rknpu_iommu_init_domain(rknpu_dev);
  
  	/*
@@ -609,7 +550,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	atomic_set(&rknpu_dev->cmdline_power_refcount, 0);
  	atomic_set(&rknpu_dev->iommu_domain_refcount, 0);
  
-@@ -1635,14 +1746,46 @@ static int rknpu_probe(struct platform_device *pdev)
+@@ -1635,14 +1746,46 @@
  
  	return 0;
  
@@ -659,7 +600,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  err_remove_drv:
  #ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
  	rknpu_drm_remove(rknpu_dev);
-@@ -1657,10 +1800,44 @@ err_remove_drv:
+@@ -1657,10 +1800,44 @@
  static int rknpu_remove(struct platform_device *pdev)
  {
  	struct rknpu_device *rknpu_dev = platform_get_drvdata(pdev);
@@ -704,7 +645,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  	rknpu_debugger_remove(rknpu_dev);
  	rknpu_cancel_timer(rknpu_dev);
-@@ -1688,21 +1865,23 @@ static int rknpu_remove(struct platform_device *pdev)
+@@ -1688,21 +1865,23 @@
  		iommu_group_put(rknpu_dev->iommu_group);
  	}
  
@@ -739,7 +680,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  	if (rknpu_dev->multiple_domains) {
  		if (rknpu_dev->genpd_dev_npu0)
-@@ -1723,8 +1902,10 @@ static int rknpu_remove(struct platform_device *pdev)
+@@ -1723,10 +1902,16 @@
  static int rknpu_suspend(struct device *dev)
  {
  	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
@@ -748,6 +689,132 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -	rknpu_power_get(rknpu_dev);
 +	if (ret)
 +		return ret;
++
++	ret = pm_runtime_force_suspend(dev);
++	if (ret)
++		rknpu_power_put(rknpu_dev);
  
- 	return pm_runtime_force_suspend(dev);
+-	return pm_runtime_force_suspend(dev);
++	return ret;
  }
+ 
+ static int rknpu_resume(struct device *dev)
+--- a/rknpu_devfreq.c
++++ b/rknpu_devfreq.c
+@@ -253,14 +253,6 @@
+ 	.get_cur_freq = npu_devfreq_get_cur_freq,
+ };
+ 
+-void rknpu_devfreq_lock(struct rknpu_device *rknpu_dev)
+-{
+-}
+-
+-void rknpu_devfreq_unlock(struct rknpu_device *rknpu_dev)
+-{
+-}
+-
+ /*
+  * Bin numbers as the vendor's rockchip_get_soc_info() assigns them, and one of
+  * ours. BIT(bin) is matched against the first cell of opp-supported-hw in the
+--- a/rknpu_debugger.c
++++ b/rknpu_debugger.c
+@@ -107,8 +107,11 @@
+ 	buf[len - 1] = '\0';
+ 
+ 	if (strcmp(buf, "on") == 0) {
++		int ret = rknpu_power_get(rknpu_dev);
++
++		if (ret)
++			return ret;
+ 		atomic_inc(&rknpu_dev->cmdline_power_refcount);
+-		rknpu_power_get(rknpu_dev);
+ 		LOG_INFO("rknpu power is on!");
+ 	} else if (strcmp(buf, "off") == 0) {
+ 		if (atomic_read(&rknpu_dev->power_refcount) > 0 &&
+@@ -181,8 +184,10 @@
+ 	struct rknpu_device *rknpu_dev =
+ 		container_of(debugger, struct rknpu_device, debugger);
+ 	unsigned long current_freq = 0;
++	int ret = rknpu_power_get(rknpu_dev);
+ 
+-	rknpu_power_get(rknpu_dev);
++	if (ret)
++		return ret;
+ 
+ 	current_freq = clk_get_rate(rknpu_dev->clks[0].clk);
+ 
+@@ -222,7 +227,9 @@
+ 	if (!rknpu_dev->devfreq)
+ 		return -EFAULT;
+ 
+-	rknpu_power_get(rknpu_dev);
++	ret = rknpu_power_get(rknpu_dev);
++	if (ret)
++		return ret;
+ 
+ 	current_freq = clk_get_rate(rknpu_dev->clks[0].clk);
+ 	if (freq != current_freq) {
+--- a/rknpu_gem.c
++++ b/rknpu_gem.c
+@@ -1193,10 +1193,17 @@
+ void rknpu_gem_free_object(struct drm_gem_object *obj)
+ {
+ 	struct rknpu_device *rknpu_dev = obj->dev->dev_private;
++	int ret = rknpu_power_get(rknpu_dev);
+ 
+-	rknpu_power_get(rknpu_dev);
++	/*
++	 * Freeing cannot be declined, so a refused acquisition only means the
++	 * destroy runs without one - and without a put for a reference that
++	 * was never taken.
++	 */
+ 	rknpu_gem_object_destroy(to_rknpu_obj(obj));
+-	rknpu_power_put_delay(rknpu_dev);
++
++	if (!ret)
++		rknpu_power_put_delay(rknpu_dev);
+ }
+ 
+ int rknpu_gem_dumb_create(struct drm_file *file_priv, struct drm_device *drm,
+--- a/include/rknpu_devfreq.h
++++ b/include/rknpu_devfreq.h
+@@ -8,8 +8,6 @@
+ #define __LINUX_RKNPU_DEVFREQ_H
+ 
+ #ifdef CONFIG_ROCKCHIP_RKNPU_DEVFREQ
+-void rknpu_devfreq_lock(struct rknpu_device *rknpu_dev);
+-void rknpu_devfreq_unlock(struct rknpu_device *rknpu_dev);
+ int rknpu_devfreq_init(struct rknpu_device *rknpu_dev);
+ void rknpu_devfreq_remove(struct rknpu_device *rknpu_dev);
+ int rknpu_devfreq_runtime_suspend(struct device *dev);
+@@ -25,14 +23,6 @@
+ {
+ }
+ 
+-static inline void rknpu_devfreq_lock(struct rknpu_device *rknpu_dev)
+-{
+-}
+-
+-static inline void rknpu_devfreq_unlock(struct rknpu_device *rknpu_dev)
+-{
+-}
+-
+ static inline int rknpu_devfreq_runtime_suspend(struct device *dev)
+ {
+ 	return 0;
+--- a/include/rknpu_drv.h
++++ b/include/rknpu_drv.h
+@@ -160,6 +160,13 @@
+ 	bool hw_powered;
+ 	/* Bounds the power-off retry so a persistent failure cannot spin. */
+ 	unsigned int power_off_retries;
++	/*
++	 * Set once an unwind stopped partway and left the suppliers enabled.
++	 * A one-way latch: acquisitions are refused, the retry worker stands
++	 * down, and teardown leaves the domains attached. See
++	 * rknpu_power_wedge().
++	 */
++	bool power_wedged;
+ 	int bypass_irq_handler;
+ 	int bypass_soft_reset;
+ 	bool soft_reseting;

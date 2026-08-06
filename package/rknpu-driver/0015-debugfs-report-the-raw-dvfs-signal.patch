@@ -16,9 +16,29 @@ the way the governor does, rather than a second implementation that can drift.
 
 Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
+--- a/rknpu_devfreq.c
++++ b/rknpu_devfreq.c
+@@ -482,7 +482,7 @@
+  * been accounted yet. Monotonic, so the difference between two reads is the
+  * busy time between them. Caller holds irq_lock.
+  */
+-static ktime_t npu_core_busy_cum(struct rknpu_subcore_data *sd, ktime_t now)
++ktime_t rknpu_devfreq_core_busy_cum(struct rknpu_subcore_data *sd, ktime_t now)
+ {
+ 	ktime_t cum = ktime_add(sd->timer.busy_cum, sd->timer.busy_time);
+ 
+@@ -509,7 +509,7 @@
+ 	now = ktime_get();
+ 	for (i = 0; i < rknpu_dev->config->num_irqs; i++) {
+ 		struct rknpu_subcore_data *sd = &rknpu_dev->subcore_datas[i];
+-		ktime_t cum = npu_core_busy_cum(sd, now);
++		ktime_t cum = rknpu_devfreq_core_busy_cum(sd, now);
+ 		ktime_t delta = ktime_sub(cum, sd->timer.devfreq_prev);
+ 
+ 		sd->timer.devfreq_prev = cum;
 --- a/include/rknpu_devfreq.h
 +++ b/include/rknpu_devfreq.h
-@@ -13,6 +13,8 @@ void rknpu_devfreq_remove(struct rknpu_device *rknpu_dev);
+@@ -13,6 +13,8 @@
  int rknpu_devfreq_runtime_suspend(struct device *dev);
  int rknpu_devfreq_runtime_resume(struct device *dev);
  int rknpu_devfreq_sync_rate(struct device *dev);
@@ -27,7 +47,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  #else
  static inline int rknpu_devfreq_init(struct rknpu_device *rknpu_dev)
  {
-@@ -32,6 +34,12 @@ static inline int rknpu_devfreq_runtime_resume(struct device *dev)
+@@ -32,6 +34,12 @@
  {
  	return 0;
  }
@@ -50,7 +70,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  #define RKNPU_DEBUGGER_ROOT_NAME "rknpu"
  
-@@ -301,9 +302,50 @@ static ssize_t rknpu_reset_set(struct file *file, const char __user *ubuf,
+@@ -308,9 +309,50 @@
  	return len;
  }
  
@@ -101,23 +121,3 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	{ "power", rknpu_power_show, rknpu_power_set, NULL },
  	{ "freq", rknpu_freq_show, rknpu_freq_set, NULL },
  	{ "volt", rknpu_volt_show, NULL, NULL },
---- a/rknpu_devfreq.c
-+++ b/rknpu_devfreq.c
-@@ -482,7 +482,7 @@ EXPORT_SYMBOL(rknpu_devfreq_sync_rate);
-  * been accounted yet. Monotonic, so the difference between two reads is the
-  * busy time between them. Caller holds irq_lock.
-  */
--static ktime_t npu_core_busy_cum(struct rknpu_subcore_data *sd, ktime_t now)
-+ktime_t rknpu_devfreq_core_busy_cum(struct rknpu_subcore_data *sd, ktime_t now)
- {
- 	ktime_t cum = ktime_add(sd->timer.busy_cum, sd->timer.busy_time);
- 
-@@ -509,7 +509,7 @@ static int npu_devfreq_get_dev_status(struct device *dev,
- 	now = ktime_get();
- 	for (i = 0; i < rknpu_dev->config->num_irqs; i++) {
- 		struct rknpu_subcore_data *sd = &rknpu_dev->subcore_datas[i];
--		ktime_t cum = npu_core_busy_cum(sd, now);
-+		ktime_t cum = rknpu_devfreq_core_busy_cum(sd, now);
- 		ktime_t delta = ktime_sub(cum, sd->timer.devfreq_prev);
- 
- 		sd->timer.devfreq_prev = cum;

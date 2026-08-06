@@ -739,3 +739,332 @@ sub("""	struct rknpu_device *rknpu_dev = platform_get_drvdata(pdev);
 	 * Close the ioctl paths first.""", "remove powered flag")
 open(p,"w").write(s)
 print("stage F ok")
+
+s=open(p).read()
+
+# ---- the wedge ----
+#
+# Holding the count across a failed unwind is only half an answer: nothing owns
+# that reference, and a retry cannot resume from where those paths stop - it
+# would put a runtime PM reference power-on had already released, or a domain
+# that is already down. Latch it instead.
+
+sub("""static int rknpu_power_on(struct rknpu_device *rknpu_dev);
+static int rknpu_power_off(struct rknpu_device *rknpu_dev);
+""",
+"""static int rknpu_power_on(struct rknpu_device *rknpu_dev);
+static int rknpu_power_off(struct rknpu_device *rknpu_dev);
+
+/*
+ * Latch a failed unwind. The power paths stop short of pulling suppliers out
+ * from under hardware they could not bring down, which leaves the NPU powered
+ * with a reference held and no owner for it - resuming the transition would
+ * put a runtime PM reference that was already released, or a domain that is
+ * already down. Rather than retry into that, record it once: acquisitions are
+ * refused from here, the retry worker stands down, and teardown leaves the
+ * domains attached and runtime PM enabled.
+ */
+static void rknpu_power_wedge(struct rknpu_device *rknpu_dev, const char *what)
+{
+	WRITE_ONCE(rknpu_dev->power_wedged, true);
+	LOG_DEV_ERROR(rknpu_dev->dev, "%s; the npu stays powered\\n", what);
+}
+""", "wedge helper")
+
+sub("""	/* Absent early in probe and once remove has quiesced it. */
+	if (!rknpu_dev->power_off_wq)
+		return;
+""",
+"""	/* Absent early in probe and once remove has quiesced it. */
+	if (!rknpu_dev->power_off_wq)
+		return;
+
+	/* A wedged device has no state to retry from. */
+	if (READ_ONCE(rknpu_dev->power_wedged))
+		return;
+""", "retry stands down")
+
+sub("""		ret = rknpu_power_on(rknpu_dev);
+		/*
+		 * -EBUSY is rknpu_power_on() reporting that it could not unwind
+		 * and left resources enabled. Releasing the count there would
+		 * describe powered hardware as off and let the next get enable
+		 * it a second time, so the count stays held.
+		 */
+		if (ret && ret != -EBUSY)
+			atomic_dec(&rknpu_dev->power_refcount);
+	}
+	mutex_unlock(&rknpu_dev->power_lock);""",
+"""		ret = rknpu_power_on(rknpu_dev);
+		/*
+		 * The count follows the hardware: it goes back when power-on
+		 * unwound cleanly, and stays held when the unwind stopped
+		 * partway and left resources enabled. Releasing it there would
+		 * describe powered hardware as off and let the next get enable
+		 * it a second time.
+		 */
+		if (ret && !READ_ONCE(rknpu_dev->power_wedged))
+			atomic_dec(&rknpu_dev->power_refcount);
+	} else if (READ_ONCE(rknpu_dev->power_wedged)) {
+		/*
+		 * Powered, but a transition stopped half-done, so the count
+		 * describes one thing and the hardware another. Refuse rather
+		 * than hand out a device whose state is not known.
+		 */
+		atomic_dec(&rknpu_dev->power_refcount);
+		ret = -EBUSY;
+	}
+	mutex_unlock(&rknpu_dev->power_lock);""", "power_get refuses when wedged")
+
+sub("""		pmret = pm_runtime_put_sync(dev);
+		if (pmret < 0 || !pm_runtime_status_suspended(dev)) {
+			LOG_DEV_ERROR(
+				dev,
+				"npu still active after failed resume, leaving it powered\\n");
+			return -EBUSY;
+		}""",
+"""		pmret = pm_runtime_put_sync(dev);
+		if (pmret < 0 || !pm_runtime_status_suspended(dev)) {
+			rknpu_power_wedge(
+				rknpu_dev,
+				"npu still active after failed resume");
+			return -EBUSY;
+		}""", "power_on resume wedge")
+
+sub("""	if (domain_err) {
+		LOG_DEV_ERROR(
+			dev,
+			"npu domains did not go down, leaving clocks and rails up\\n");
+		return -EBUSY;
+	}""",
+"""	if (domain_err) {
+		rknpu_power_wedge(rknpu_dev,
+				  "npu domains did not go down, leaving clocks and rails up");
+		return -EBUSY;
+	}""", "power_on domain wedge")
+
+sub("""static int rknpu_power_off(struct rknpu_device *rknpu_dev)
+{
+	struct device *dev = rknpu_dev->dev;
+
+#ifndef FPGA_PLATFORM
+	int ret;""",
+"""static int rknpu_power_off(struct rknpu_device *rknpu_dev)
+{
+	struct device *dev = rknpu_dev->dev;
+	bool domain_err = false;
+
+#ifndef FPGA_PLATFORM
+	int ret;""", "power_off domain_err decl")
+
+sub("""#ifndef FPGA_PLATFORM
+	/*
+	 * Shut the SCMI gate first.""",
+"""	/*
+	 * A wedged device is powered with a transition half-done, and this
+	 * path cannot resume from there: it would put a runtime PM reference
+	 * power-on had already released, or a domain that is already down.
+	 */
+	if (READ_ONCE(rknpu_dev->power_wedged))
+		return -EBUSY;
+
+#ifndef FPGA_PLATFORM
+	/*
+	 * Shut the SCMI gate first.""", "power_off refuses when wedged")
+
+sub("""		if (rknpu_dev->genpd_dev_npu2)
+			pm_runtime_put_sync(rknpu_dev->genpd_dev_npu2);
+		if (rknpu_dev->genpd_dev_npu1)
+			pm_runtime_put_sync(rknpu_dev->genpd_dev_npu1);
+		if (rknpu_dev->genpd_dev_npu0)
+			pm_runtime_put_sync(rknpu_dev->genpd_dev_npu0);
+	}
+
+	clk_bulk_disable_unprepare(rknpu_dev->num_clks, rknpu_dev->clks);
+
+#ifndef FPGA_PLATFORM
+	if (rknpu_dev->vdd)
+		regulator_disable(rknpu_dev->vdd);
+
+	if (rknpu_dev->mem)
+		regulator_disable(rknpu_dev->mem);
+#endif""",
+"""		if (rknpu_dev->genpd_dev_npu2)
+			domain_err |= pm_runtime_put_sync(
+					      rknpu_dev->genpd_dev_npu2) < 0;
+		if (rknpu_dev->genpd_dev_npu1)
+			domain_err |= pm_runtime_put_sync(
+					      rknpu_dev->genpd_dev_npu1) < 0;
+		if (rknpu_dev->genpd_dev_npu0)
+			domain_err |= pm_runtime_put_sync(
+					      rknpu_dev->genpd_dev_npu0) < 0;
+
+		/*
+		 * Same rule as the power-on unwind: a domain that would not go
+		 * down still has registers behind the clocks and rails below,
+		 * so stop rather than pull them.
+		 */
+		if (domain_err) {
+			rknpu_power_wedge(rknpu_dev,
+					  "npu domains did not go down, leaving clocks and rails up");
+			return -EBUSY;
+		}
+	}
+
+	clk_bulk_disable_unprepare(rknpu_dev->num_clks, rknpu_dev->clks);
+
+	/* Reverse of the enable order in rknpu_power_on(). */
+#ifndef FPGA_PLATFORM
+	if (rknpu_dev->mem)
+		regulator_disable(rknpu_dev->mem);
+
+	if (rknpu_dev->vdd)
+		regulator_disable(rknpu_dev->vdd);
+#endif""", "power_off checks its own unwind")
+
+sub("""	ret = rknpu_power_get(rknpu_dev);
+	if (ret)
+		goto err_remove_wq;""",
+"""	ret = rknpu_power_get(rknpu_dev);
+	if (ret) {
+		if (READ_ONCE(rknpu_dev->power_wedged))
+			powered = true;
+		goto err_remove_wq;
+	}""", "probe keeps suppliers when wedged")
+
+sub("""	mutex_lock(&rknpu_dev->power_lock);
+	if (atomic_read(&rknpu_dev->power_refcount) > 0) {
+		if (rknpu_power_off(rknpu_dev))
+			powered = true;
+		else
+			atomic_set(&rknpu_dev->power_refcount, 0);
+	}
+	mutex_unlock(&rknpu_dev->power_lock);""",
+"""	mutex_lock(&rknpu_dev->power_lock);
+	if (READ_ONCE(rknpu_dev->power_wedged)) {
+		powered = true;
+	} else if (atomic_read(&rknpu_dev->power_refcount) > 0) {
+		if (rknpu_power_off(rknpu_dev))
+			powered = true;
+		else
+			atomic_set(&rknpu_dev->power_refcount, 0);
+	}
+	mutex_unlock(&rknpu_dev->power_lock);""", "remove keeps suppliers when wedged")
+
+# System suspend: a refused acquisition has no matching put in resume, and a
+# failed pm_runtime_force_suspend() leaves the one it did take with no owner.
+sub("""	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
+
+	rknpu_power_get(rknpu_dev);
+
+	return pm_runtime_force_suspend(dev);""",
+"""	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
+	int ret = rknpu_power_get(rknpu_dev);
+
+	if (ret)
+		return ret;
+
+	ret = pm_runtime_force_suspend(dev);
+	if (ret)
+		rknpu_power_put(rknpu_dev);
+
+	return ret;""", "suspend owns its reference")
+open(p,"w").write(s)
+print("stage G ok")
+
+# ---- include/rknpu_drv.h: the latch itself ----
+h="/tmp/b/include/rknpu_drv.h"
+s=open(h).read()
+old = """	/* Bounds the power-off retry so a persistent failure cannot spin. */
+	unsigned int power_off_retries;"""
+new = """	/* Bounds the power-off retry so a persistent failure cannot spin. */
+	unsigned int power_off_retries;
+	/*
+	 * Set once an unwind stopped partway and left the suppliers enabled.
+	 * A one-way latch: acquisitions are refused, the retry worker stands
+	 * down, and teardown leaves the domains attached. See
+	 * rknpu_power_wedge().
+	 */
+	bool power_wedged;"""
+assert s.count(old)==1, ("power_wedged field", s.count(old))
+open(h,"w").write(s.replace(old,new))
+print("header ok")
+
+# ---- callers that ignored the result ----
+#
+# Each took a reference it never checked and then put one it may not hold, and
+# went on to touch registers on a device that refused to power up.
+
+d="/tmp/b/rknpu_debugger.c"
+s=open(d).read()
+def dsub(old,new,tag):
+    global s
+    assert s.count(old)==1, (tag, s.count(old))
+    s=s.replace(old,new)
+
+dsub("""	if (strcmp(buf, "on") == 0) {
+		atomic_inc(&rknpu_dev->cmdline_power_refcount);
+		rknpu_power_get(rknpu_dev);
+		LOG_INFO("rknpu power is on!");""",
+"""	if (strcmp(buf, "on") == 0) {
+		int ret = rknpu_power_get(rknpu_dev);
+
+		if (ret)
+			return ret;
+		atomic_inc(&rknpu_dev->cmdline_power_refcount);
+		LOG_INFO("rknpu power is on!");""", "debugfs power on")
+
+dsub("""	unsigned long current_freq = 0;
+
+	rknpu_power_get(rknpu_dev);
+
+	current_freq = clk_get_rate(rknpu_dev->clks[0].clk);
+
+	rknpu_power_put(rknpu_dev);""",
+"""	unsigned long current_freq = 0;
+	int ret = rknpu_power_get(rknpu_dev);
+
+	if (ret)
+		return ret;
+
+	current_freq = clk_get_rate(rknpu_dev->clks[0].clk);
+
+	rknpu_power_put(rknpu_dev);""", "debugfs freq show")
+
+dsub("""	if (!rknpu_dev->devfreq)
+		return -EFAULT;
+
+	rknpu_power_get(rknpu_dev);
+""",
+"""	if (!rknpu_dev->devfreq)
+		return -EFAULT;
+
+	ret = rknpu_power_get(rknpu_dev);
+	if (ret)
+		return ret;
+""", "debugfs freq set")
+open(d,"w").write(s)
+print("debugger ok")
+
+g="/tmp/b/rknpu_gem.c"
+s=open(g).read()
+old = """	struct rknpu_device *rknpu_dev = obj->dev->dev_private;
+
+	rknpu_power_get(rknpu_dev);
+	rknpu_gem_object_destroy(to_rknpu_obj(obj));
+	rknpu_power_put_delay(rknpu_dev);"""
+new = """	struct rknpu_device *rknpu_dev = obj->dev->dev_private;
+	int ret = rknpu_power_get(rknpu_dev);
+
+	/*
+	 * Freeing cannot be declined, so a refused acquisition only means the
+	 * destroy runs without one - and without a put for a reference that
+	 * was never taken.
+	 */
+	rknpu_gem_object_destroy(to_rknpu_obj(obj));
+
+	if (!ret)
+		rknpu_power_put_delay(rknpu_dev);"""
+assert s.count(old)==1, ("gem free", s.count(old))
+open(g,"w").write(s.replace(old,new))
+print("gem ok")

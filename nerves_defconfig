@@ -126,7 +126,20 @@ BR2_PACKAGE_ALSA_UTILS_SPEAKER_TEST=y
 # secure-world section of the README.
 #
 # optee-test (xtest) is deliberately not enabled: it depends on
-# BR2_TARGET_OPTEE_OS, i.e. on buildroot building OP-TEE from source for the
-# TA dev kit. This system runs Rockchip's prebuilt BL32 instead, because that
-# is the one with real OTP backing behind tee_otp_get_hw_unique_key().
+# BR2_TARGET_OPTEE_OS, i.e. on buildroot building OP-TEE from source, which
+# scripts/build-uboot.sh does outside buildroot.
 BR2_PACKAGE_OPTEE_CLIENT=y
+
+# optee-key: generate and use a device key inside the PKCS#11 TA. Its serve
+# mode holds one TEE session open for a caller that keeps the process running.
+# See package/optee-key/src/optee-key.c.
+BR2_PACKAGE_OPTEE_KEY=y
+
+# libp11 is OpenSSL's engine for PKCS#11 modules, at engines-3/pkcs11.so.
+# Selecting it is also what turns the ENGINE API on in libopenssl, which
+# erlang's crypto needs before it will load any engine at all.
+#
+# The application talks to the secure world through package/optee-key instead;
+# this is here for code that wants OpenSSL to do it.
+BR2_PACKAGE_LIBP11=y
+

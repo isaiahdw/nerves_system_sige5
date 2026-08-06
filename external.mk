@@ -30,6 +30,25 @@ $(shell if [ -d "$(LINUX_DIR)" ] && \
 		rm -rf "$(LINUX_DIR)"; \
 	fi)
 
+# optee-key's source lives in this tree (SITE_METHOD = local), and buildroot
+# copies it once at extract time - editing it afterwards changes nothing until
+# the build directory is thrown away. Same hash-and-discard trick as the kernel
+# patches above.
+NERVES_OPTEE_KEY_SRC = $(sort $(wildcard $(NERVES_DEFCONFIG_DIR)/package/optee-key/src/*))
+NERVES_OPTEE_KEY_HASH = $(shell cat /dev/null $(NERVES_OPTEE_KEY_SRC) | sha256sum | cut -d' ' -f1)
+NERVES_OPTEE_KEY_DIR = $(BUILD_DIR)/optee-key-$(OPTEE_KEY_VERSION)
+NERVES_OPTEE_KEY_STAMP = $(NERVES_OPTEE_KEY_DIR)/.nerves-src-hash
+
+$(shell if [ -d "$(NERVES_OPTEE_KEY_DIR)" ] && \
+	   [ "$$(cat $(NERVES_OPTEE_KEY_STAMP) 2>/dev/null)" != "$(NERVES_OPTEE_KEY_HASH)" ]; then \
+		rm -rf "$(NERVES_OPTEE_KEY_DIR)"; \
+	fi)
+
+define OPTEE_KEY_RECORD_SRC_HASH
+	echo $(NERVES_OPTEE_KEY_HASH) > $(NERVES_OPTEE_KEY_STAMP)
+endef
+OPTEE_KEY_POST_EXTRACT_HOOKS += OPTEE_KEY_RECORD_SRC_HASH
+
 define NERVES_LINUX_RECORD_PATCH_HASH
 	echo $(NERVES_LINUX_PATCH_HASH) > $(NERVES_LINUX_PATCH_STAMP)
 endef

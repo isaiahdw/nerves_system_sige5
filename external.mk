@@ -34,10 +34,25 @@ MESA3D_CONF_OPTS += -Ddraw-use-llvm=false
 # An empty MAKECMDGOALS is the default goal, which builds - and plain `make` in
 # the build directory is what buildroot itself tells you to run, so it has to be
 # covered. -n and -q ask what would happen rather than doing it, and must not
-# delete anything; GNU make puts those single-letter flags in the first word of
-# MAKEFLAGS.
+# delete anything.
+#
+# A dry run appears in MAKEFLAGS two different ways, and both have to be read.
+# GNU make packs short flags into the first word with no leading dash, so -n
+# among others shows up as a letter in something like "rRn". But it can also
+# arrive as a separate word: `make -n --no-print-directory` yields
+# " --no-print-directory -n", where the first word is the long option and the
+# -n is at the end. Searching only the first word misses that, and searching it
+# without excluding long options matches the "n" in --no-print-directory and
+# disables the check on every real build. Both mistakes have been made here.
+#
+# So: letters from the first word only when it is not a long option, plus the
+# exact spellings anywhere in the list.
 NERVES_BUILD_GOALS = all world
-NERVES_DRY_RUN = $(strip $(foreach f,n q,$(findstring $(f),$(firstword $(MAKEFLAGS)))))
+NERVES_DRY_RUN_WORDS = -n -q --dry-run --just-print --recon --question
+NERVES_SHORT_FLAGS = $(filter-out -%,$(firstword $(MAKEFLAGS)))
+NERVES_DRY_RUN = $(strip \
+	$(foreach f,n q,$(findstring $(f),$(NERVES_SHORT_FLAGS))) \
+	$(filter $(NERVES_DRY_RUN_WORDS),$(MAKEFLAGS)))
 NERVES_WANTS_BUILD = \
 	$(if $(MAKECMDGOALS),$(filter $(NERVES_BUILD_GOALS),$(MAKECMDGOALS)),default)
 NERVES_STALE_CHECK := \
@@ -67,6 +82,16 @@ NERVES_RKNPU_PATCH_HASH = \
 NERVES_RKNPU_DIR = $(BUILD_DIR)/rknpu-driver-$(RKNPU_DRIVER_VERSION)
 NERVES_RKNPU_STAMP = $(NERVES_RKNPU_DIR)/.nerves-patch-hash
 
+# The WiFi/BT firmware: the files are downloads, but which files and where they
+# are installed is decided by the package makefile in this tree, so that is the
+# input to hash. Adding a firmware blob to it otherwise changes nothing until
+# the build directory is thrown away.
+NERVES_BRCMFW_HASH = \
+	$(call nerves-hash,$(sort $(wildcard $(NERVES_DEFCONFIG_DIR)/package/brcmfmac43752-firmware/*)))
+NERVES_BRCMFW_DIR = \
+	$(BUILD_DIR)/brcmfmac43752-firmware-$(BRCMFMAC43752_FIRMWARE_VERSION)
+NERVES_BRCMFW_STAMP = $(NERVES_BRCMFW_DIR)/.nerves-pkg-hash
+
 # optee-key: its source lives in this tree (SITE_METHOD = local), so extract is
 # a copy.
 NERVES_OPTEE_KEY_HASH = \
@@ -77,6 +102,7 @@ NERVES_OPTEE_KEY_STAMP = $(NERVES_OPTEE_KEY_DIR)/.nerves-src-hash
 NERVES_STALE_DISCARDED := \
 	$(call nerves-discard-if-stale,$(LINUX_DIR),$(NERVES_LINUX_PATCH_STAMP),$(NERVES_LINUX_PATCH_HASH)) \
 	$(call nerves-discard-if-stale,$(NERVES_RKNPU_DIR),$(NERVES_RKNPU_STAMP),$(NERVES_RKNPU_PATCH_HASH)) \
+	$(call nerves-discard-if-stale,$(NERVES_BRCMFW_DIR),$(NERVES_BRCMFW_STAMP),$(NERVES_BRCMFW_HASH)) \
 	$(call nerves-discard-if-stale,$(NERVES_OPTEE_KEY_DIR),$(NERVES_OPTEE_KEY_STAMP),$(NERVES_OPTEE_KEY_HASH))
 
 define OPTEE_KEY_RECORD_SRC_HASH
@@ -93,3 +119,8 @@ define NERVES_RKNPU_RECORD_PATCH_HASH
 	echo $(NERVES_RKNPU_PATCH_HASH) > $(NERVES_RKNPU_STAMP)
 endef
 RKNPU_DRIVER_POST_PATCH_HOOKS += NERVES_RKNPU_RECORD_PATCH_HASH
+
+define NERVES_BRCMFW_RECORD_HASH
+	echo $(NERVES_BRCMFW_HASH) > $(NERVES_BRCMFW_STAMP)
+endef
+BRCMFMAC43752_FIRMWARE_POST_EXTRACT_HOOKS += NERVES_BRCMFW_RECORD_HASH

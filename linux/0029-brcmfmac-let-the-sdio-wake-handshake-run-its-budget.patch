@@ -1,0 +1,199 @@
+brcmfmac: let the SDIO wake handshake run its full retry budget
+
+Waking the 43752 over SDIO means writing KSO in SBSDIO_FUNC1_SLEEPCSR and
+reading back until both KSO and DEVON are set. brcmf_sdio_kso_control sizes
+that loop for a slow device - MAX_KSO_ATTEMPTS is PMU_MAX_TRANSITION_DLY/50,
+20000 tries, a full second - and then gives it away:
+
+	if (err && (err_cnt++ > BRCMF_SDIO_MAX_ACCESS_ERRORS))
+		break;
+
+BRCMF_SDIO_MAX_ACCESS_ERRORS is 5, so seven consecutive failed reads end the
+loop after about 350us of the second it was allowed. A device that is still
+waking returns errors, not wrong values, so this is the path it takes. The
+caller gets -ETIMEDOUT and brcmf_sdio_bus_sleep logs
+
+	brcmf_sdio_bus_sleep: error while changing bus sleep state -110
+
+after which whatever the DPC was doing fails too: an aborted TX frame
+(brcmf_sdio_txfail), a backplane read issued anyway (failed backplane
+access), or nothing further if the pass had no more work. One wake failure,
+three signatures.
+
+The handshake takes 3-4ms on this part, so 350us is not a timeout, it is a
+premature abort. Two other drivers for the same silicon agree:
+
+  - Broadcom's own bcmdhd (dhdsdio_clk_kso_enab) sleeps 3ms and then runs its
+    retry loop to CUSTOM_MAX_KSO_ATTEMPTS without any error-count bail-out.
+    Its loop tests err only as part of the success condition.
+
+  - Infineon removed the bail-out from their brcmfmac, and their commit
+    message gives the reason directly: "Ideally time for kso_sequence in HW
+    is 3-4 msec, but 1 msec is too less for wait time before bail out". They
+    were describing a limit of 20 errors. Ours is 5.
+
+	93523766d94e ("brcmfmac: Increase the kso_sequence bail out timer")
+	20e6c2fdf8f0 ("brcmfmac: kso sequence sleep/delay enhancement")
+
+Take both changes, in that order:
+
+Count access errors instead of bailing on them. The loop still ends at
+MAX_KSO_ATTEMPTS, so the bound is the one the code already declared.
+
+Drop the unconditional usleep_range(2000, 3000) before the first read and
+delay after it instead, sized by try_cnt: a device that is already awake now
+answers the first read and pays nothing, and one that is asleep waits about
+a wake time before polling tightly. This applies to the sleep direction too,
+as it does upstream; that path reaches the delay only when the first read
+does not already show KSO clear.
+
+Then measure it, because whether any of this helps is a question about
+hardware and can only be answered on the board. Four counters on the bus
+record how many handshakes needed a retry, how many exhausted the budget,
+and the worst error count and duration seen.
+
+Reporting them needs care. CONFIG_BRCMDBG is off here, so brcmf_dbg compiles
+out - the existing try_cnt trace has never been visible - and brcmf_err sits
+behind net_ratelimit(), ten lines per five seconds. The bus sleeps after
+about 20ms idle (BRCMF_WD_POLL is 10ms, idletime is 1), so under light
+traffic a wake happens many times a second. A line per handshake would
+therefore flood the log and then be dropped from it, and the drops would
+land exactly on the counts being measured.
+
+So only a new worst case prints, which stops happening once the bus has been
+exercised, and every line carries the cumulative totals. A dropped message
+then costs no information, and a healthy bus is silent. Timing uses ktime
+rather than the jiffies upstream used, because at HZ=250 a jiffy is 4ms and
+would quantise away the whole interval.
+
+Worst case cost is the one the loop was always written for: a device that
+never answers now holds the caller for up to a second instead of 350us.
+That is deliberate, and it is the same budget bcmdhd and Infineon accept.
+
+This does not touch brcmf_sdio_dpc, which still ignores the return from
+brcmf_sdio_bus_sleep and reads the backplane after a failed wake. That is a
+separate hardening change: returning early there needs the OOB IRQ
+re-enabled on the way out, or the device stops waking at all.
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
+index a0e88db..c7cdb2b 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
+@@ -11,6 +11,7 @@
+ #include <linux/pci_ids.h>
+ #include <linux/netdevice.h>
+ #include <linux/interrupt.h>
++#include <linux/ktime.h>
+ #include <linux/sched/signal.h>
+ #include <linux/mmc/sdio.h>
+ #include <linux/mmc/sdio_ids.h>
+@@ -324,8 +325,12 @@ struct rte_console {
+ #define BRCMF_IDLE_INTERVAL	1
+ 
+ #define KSO_WAIT_US 50
++/* A sleeping device answers the wake handshake in 3-4ms, so poll for one
++ * wake time before settling into a tight loop.
++ */
++#define KSO_WAKE_WAIT_US 1000
++#define KSO_WAKE_WAIT_MAX_US 1500
+ #define MAX_KSO_ATTEMPTS (PMU_MAX_TRANSITION_DLY/KSO_WAIT_US)
+-#define BRCMF_SDIO_MAX_ACCESS_ERRORS	5
+ 
+ #ifdef DEBUG
+ /* Device console log buffer state */
+@@ -482,6 +487,11 @@ struct brcmf_sdio {
+ 	uint pollrate;		/* Ticks between device polls */
+ 	uint polltick;		/* Tick counter */
+ 
++	u32 kso_slow;		/* Wake handshakes that needed a retry */
++	u32 kso_fail;		/* Wake handshakes that used the whole budget */
++	int kso_err_max;	/* Most access errors seen in one handshake */
++	s64 kso_us_max;		/* Longest handshake, microseconds */
++
+ #ifdef DEBUG
+ 	uint console_interval;
+ 	struct brcmf_console console;	/* Console output polling support */
+@@ -701,6 +711,8 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
+ 	int err = 0;
+ 	int err_cnt = 0;
+ 	int try_cnt = 0;
++	s64 elapsed_us;
++	ktime_t start;
+ 
+ 	brcmf_dbg(TRACE, "Enter: on=%d\n", on);
+ 
+@@ -711,6 +723,7 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
+ 		sdio_retune_hold_now(bus->sdiodev->func1);
+ 
+ 	wr_val = (on << SBSDIO_FUNC1_SLEEPCSR_KSO_SHIFT);
++	start = ktime_get();
+ 	/* 1st KSO write goes to AOS wake up core if device is asleep  */
+ 	brcmf_sdiod_writeb(bus->sdiodev, SBSDIO_FUNC1_SLEEPCSR, wr_val, &err);
+ 
+@@ -730,7 +743,6 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
+ 		cmp_val = SBSDIO_FUNC1_SLEEPCSR_KSO_MASK |
+ 			  SBSDIO_FUNC1_SLEEPCSR_DEVON_MASK;
+ 		bmask = cmp_val;
+-		usleep_range(2000, 3000);
+ 	} else {
+ 		/* Put device to sleep, turn off KSO */
+ 		cmp_val = 0;
+@@ -751,24 +763,48 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
+ 		if (!err) {
+ 			if ((rd_val & bmask) == cmp_val)
+ 				break;
+-			err_cnt = 0;
++		} else {
++			err_cnt++;
+ 		}
+-		/* bail out upon subsequent access errors */
+-		if (err && (err_cnt++ > BRCMF_SDIO_MAX_ACCESS_ERRORS))
+-			break;
+ 
+-		udelay(KSO_WAIT_US);
++		/* The first read is issued with no delay, so a device that is
++		 * already awake costs nothing. Getting here means it was
++		 * asleep: wait about one wake time, then poll tightly.
++		 */
++		if (!try_cnt)
++			usleep_range(KSO_WAKE_WAIT_US, KSO_WAKE_WAIT_MAX_US);
++		else
++			usleep_range(KSO_WAIT_US / 2, KSO_WAIT_US);
++
+ 		brcmf_sdiod_writeb(bus->sdiodev, SBSDIO_FUNC1_SLEEPCSR, wr_val,
+ 				   &err);
+ 
+ 	} while (try_cnt++ < MAX_KSO_ATTEMPTS);
+ 
+-	if (try_cnt > 2)
+-		brcmf_dbg(SDIO, "try_cnt=%d rd_val=0x%x err=%d\n", try_cnt,
+-			  rd_val, err);
++	elapsed_us = ktime_us_delta(ktime_get(), start);
++	if (try_cnt || err_cnt)
++		bus->kso_slow++;
+ 
+-	if (try_cnt > MAX_KSO_ATTEMPTS)
+-		brcmf_err("max tries: rd_val=0x%x err=%d\n", rd_val, err);
++	/* brcmf_err is behind net_ratelimit() unless CONFIG_BRCMDBG is on, so
++	 * anything printed once per handshake would both flood the log and be
++	 * dropped from it. Print only a new worst case - which stops happening
++	 * once the bus has been exercised - and carry the cumulative counts in
++	 * the line, so a dropped message costs no information.
++	 */
++	if (try_cnt > MAX_KSO_ATTEMPTS) {
++		bus->kso_fail++;
++		brcmf_err("kso %d failed: try=%d err_cnt=%d elapsed=%lldus slow=%u fail=%u rd_val=0x%x err=%d\n",
++			  on, try_cnt, err_cnt, elapsed_us, bus->kso_slow,
++			  bus->kso_fail, rd_val, err);
++	} else if (err_cnt > bus->kso_err_max || elapsed_us > bus->kso_us_max) {
++		if (err_cnt > bus->kso_err_max)
++			bus->kso_err_max = err_cnt;
++		if (elapsed_us > bus->kso_us_max)
++			bus->kso_us_max = elapsed_us;
++		brcmf_err("kso %d worst: try=%d err_cnt=%d elapsed=%lldus slow=%u fail=%u\n",
++			  on, try_cnt, err_cnt, elapsed_us, bus->kso_slow,
++			  bus->kso_fail);
++	}
+ 
+ 	if (on)
+ 		sdio_retune_release(bus->sdiodev->func1);

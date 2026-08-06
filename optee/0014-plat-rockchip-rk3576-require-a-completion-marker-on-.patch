@@ -22,20 +22,21 @@ a part, because OTP bits only go one way; refusing is the whole of what is
 available.
 
 A part whose HUK was burned before this existed reads as unmarked and is
-refused, which means re-provisioning it. There is no way to tell that slot
-apart from a torn one, so accepting it would keep exactly the hole this
-closes.
+refused. It cannot be re-provisioned: the read path answers
+TEE_ERROR_CORRUPT_OBJECT, the burn path runs only on TEE_ERROR_NO_DATA, and
+it would refuse the non-blank slot regardless. The fused key stays there,
+unusable, and HUK-derived storage on that device is gone. Recovering such a
+part needs a second key slot - 0x88 and 0x8c are blank - and a migration
+that does not exist here. Refusing is still right: the slot cannot be told
+apart from one left by a torn burn, so accepting it would keep the hole
+this closes.
 
 Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 ---
- core/arch/arm/plat-rockchip/platform_rk3576.c | 63 ++++++++++++++++++-
- 1 file changed, 62 insertions(+), 1 deletion(-)
 
-diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
-index 6667bcd2..2d6b9371 100644
 --- a/core/arch/arm/plat-rockchip/platform_rk3576.c
 +++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
-@@ -281,6 +281,27 @@ void plat_init_soft_prng(void)
+@@ -281,6 +281,32 @@ void plat_init_soft_prng(void)
  }
  #endif /* CFG_WITH_SOFTWARE_PRNG */
  
@@ -53,8 +54,13 @@ index 6667bcd2..2d6b9371 100644
 + * it unwritten, and an unmarked slot is refused.
 + *
 + * A part whose HUK was burned before this existed reads as unmarked and is
-+ * refused. That is deliberate - there is no way to tell such a slot apart from
-+ * a torn one - and it means re-provisioning those devices.
++ * refused. That is deliberate - such a slot cannot be told apart from a torn
++ * one - but it is not recoverable here: the read path answers
++ * TEE_ERROR_CORRUPT_OBJECT, the burn path runs only on TEE_ERROR_NO_DATA, and
++ * it would refuse the non-blank slot anyway. The fused key stays there,
++ * unusable, and HUK-derived storage on that device is gone. Recovering one
++ * needs a second key slot - 0x88 and 0x8c are blank - and a migration that
++ * does not exist.
 + */
 +#define ROCKCHIP_OTP_HUK_DONE_INDEX	(ROCKCHIP_OTP_HUK_INDEX + \
 +					 ROCKCHIP_OTP_HUK_SIZE)
@@ -63,7 +69,7 @@ index 6667bcd2..2d6b9371 100644
  static struct mutex huk_mutex = MUTEX_INITIALIZER;
  static struct tee_hw_unique_key *huk;
  
-@@ -352,6 +373,7 @@ static void survey_secure_otp(void)
+@@ -352,6 +378,7 @@ static void survey_secure_otp(void)
  static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
  {
  	uint32_t buffer[ROCKCHIP_OTP_HUK_SIZE] = { };
@@ -71,7 +77,7 @@ index 6667bcd2..2d6b9371 100644
  	TEE_Result res = TEE_SUCCESS;
  	size_t written = 0;
  	size_t i = 0;
-@@ -390,6 +412,22 @@ static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
+@@ -390,6 +417,22 @@ static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
  		goto out;
  	}
  
@@ -94,7 +100,7 @@ index 6667bcd2..2d6b9371 100644
  	memcpy(hwkey->data, buffer, HW_UNIQUE_KEY_LENGTH);
  
  out:
-@@ -500,6 +538,7 @@ static void dry_run_persist_huk(void)
+@@ -500,6 +543,7 @@ static void dry_run_persist_huk(void)
  	uint32_t current[ROCKCHIP_OTP_HUK_SIZE] = { };
  	uint32_t cand[ROCKCHIP_OTP_HUK_SIZE] = { };
  	uint32_t again[ROCKCHIP_OTP_HUK_SIZE] = { };
@@ -102,7 +108,74 @@ index 6667bcd2..2d6b9371 100644
  	uint32_t hash = 2166136261u;
  	TEE_Result res = TEE_SUCCESS;
  	size_t blank = 0;
-@@ -657,8 +696,30 @@ static TEE_Result persist_huk(struct tee_hw_unique_key *hwkey)
+@@ -514,7 +558,7 @@ static void dry_run_persist_huk(void)
+ 				       ROCKCHIP_OTP_HUK_SIZE);
+ 	if (res) {
+ 		EMSG("  range rejected by the driver: %#"PRIx32, res);
+-		return;
++		goto out;
+ 	}
+ 
+ 	for (i = 0; i < ARRAY_SIZE(current); i++)
+@@ -522,6 +566,24 @@ static void dry_run_persist_huk(void)
+ 			blank++;
+ 	IMSG("  slot blank in %zu of %zu words", blank, ARRAY_SIZE(current));
+ 
++	/*
++	 * Stop here on a marker that is not blank. Carrying on would run the
++	 * entropy checks and end with "passes every check a burn requires",
++	 * which is false: the burn would be refused before it drew a candidate.
++	 */
++	res = rockchip_otp_read_secure(&done, ROCKCHIP_OTP_HUK_DONE_INDEX, 1);
++	if (res) {
++		IMSG("  completion marker unreadable: %#"PRIx32
++		     " - a burn would be refused", res);
++		goto out;
++	}
++	if (done) {
++		IMSG("  completion marker already set to %#"PRIx32
++		     " - a burn would be refused", done);
++		goto out;
++	}
++	IMSG("  completion marker blank, as a burn requires");
++
+ 	res = hw_get_random_bytes(cand, sizeof(cand));
+ 	if (res) {
+ 		EMSG("  no candidate: TRNG returned %#"PRIx32, res);
+@@ -589,11 +651,32 @@ static TEE_Result persist_huk(struct tee_hw_unique_key *hwkey)
+ 	uint32_t cand[ROCKCHIP_OTP_HUK_SIZE] = { };
+ 	uint32_t again[ROCKCHIP_OTP_HUK_SIZE] = { };
+ 	uint32_t back[ROCKCHIP_OTP_HUK_SIZE] = { };
++	uint32_t done = 0;
+ 	TEE_Result res = TEE_SUCCESS;
+ 	size_t i = 0;
+ 
+ 	static_assert(sizeof(cand) == sizeof(hwkey->data));
+ 
++	/*
++	 * The marker has to be blank before anything is written. A word that
++	 * already holds bits cannot be made to hold the magic afterwards - OTP
++	 * only goes one way - so burning the key first would leave a slot that
++	 * is programmed, verified, and permanently refused by the read path.
++	 * Check it before the irreversible half, not after.
++	 */
++	res = rockchip_otp_read_secure(&done, ROCKCHIP_OTP_HUK_DONE_INDEX, 1);
++	if (res) {
++		EMSG("HUK burn: cannot read the completion marker (%#"PRIx32")",
++		     res);
++		goto out;
++	}
++	if (done) {
++		EMSG("HUK burn: marker word already holds %#"PRIx32
++		     " - refusing, this part cannot take a marked key", done);
++		res = TEE_ERROR_BAD_STATE;
++		goto out;
++	}
++
+ 	res = rockchip_otp_read_secure(back, ROCKCHIP_OTP_HUK_INDEX,
+ 				       ROCKCHIP_OTP_HUK_SIZE);
+ 	if (res) {
+@@ -657,8 +740,30 @@ static TEE_Result persist_huk(struct tee_hw_unique_key *hwkey)
  		goto out;
  	}
  
@@ -134,6 +207,3 @@ index 6667bcd2..2d6b9371 100644
  
  out:
  	memzero_explicit(cand, sizeof(cand));
--- 
-2.55.0
-

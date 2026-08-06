@@ -1091,8 +1091,12 @@ new = """	struct rknpu_device *rknpu_dev = obj->dev->dev_private;
 		return;
 	}
 
-	rknpu_gem_drain_deferred(rknpu_dev);
-	rknpu_gem_object_destroy(to_rknpu_obj(obj));
+	if (rknpu_gem_object_destroy(to_rknpu_obj(obj))) {
+		mutex_lock(&rknpu_dev->deferred_free_lock);
+		list_add_tail(&to_rknpu_obj(obj)->deferred,
+			      &rknpu_dev->deferred_free);
+		mutex_unlock(&rknpu_dev->deferred_free_lock);
+	}
 	rknpu_power_put_delay(rknpu_dev);"""
 assert s.count(old)==1, ("gem free", s.count(old))
 open(g,"w").write(s.replace(old,new))
@@ -1101,10 +1105,59 @@ print("gem ok")
 # ---- the drain, the list head it needs, and its teardown ----
 g="/tmp/b/rknpu_gem.c"
 s=open(g).read()
+
+# rknpu_gem_object_destroy() gives up after three failed domain switches and
+# returns without freeing anything. As a void function the caller cannot tell,
+# so a deferred object dropped there would be lost for good. Report it.
+old = """	do {
+		ret = rknpu_iommu_domain_get_and_switch(
+			rknpu_dev, rknpu_obj->iommu_domain_id);
+
+		if (ret && ++wait_count >= 3) {
+			LOG_DEV_ERROR(
+				rknpu_dev->dev,
+				"failed to destroy dma addr: %pad, size: %lu\\n",
+				&rknpu_obj->dma_addr, rknpu_obj->size);
+			return;
+		}
+	} while (ret);"""
+new = """	do {
+		ret = rknpu_iommu_domain_get_and_switch(
+			rknpu_dev, rknpu_obj->iommu_domain_id);
+
+		if (ret && ++wait_count >= 3) {
+			LOG_DEV_ERROR(
+				rknpu_dev->dev,
+				"failed to destroy dma addr: %pad, size: %lu\\n",
+				&rknpu_obj->dma_addr, rknpu_obj->size);
+			return ret;
+		}
+	} while (ret);"""
+assert s.count(old)==1, ("destroy bail", s.count(old))
+s = s.replace(old,new)
+
+s = s.replace("void rknpu_gem_object_destroy(struct rknpu_gem_object *rknpu_obj)\n{",
+              "int rknpu_gem_object_destroy(struct rknpu_gem_object *rknpu_obj)\n{", 1)
+
+# ...and the success path has to say so now that it returns one.
+old_tail = """	rknpu_gem_release(rknpu_obj);
+	rknpu_iommu_domain_put(rknpu_dev);
+}"""
+new_tail = """	rknpu_gem_release(rknpu_obj);
+	rknpu_iommu_domain_put(rknpu_dev);
+
+	return 0;
+}"""
+assert s.count(old_tail)==1, ("destroy tail", s.count(old_tail))
+s = s.replace(old_tail, new_tail)
+
 old = """void rknpu_gem_free_object(struct drm_gem_object *obj)"""
 new = """/*
- * Destroy everything queued by a free that could not power the NPU. Called
- * with a reference held, so the IOMMU work the destroy does is safe here.
+ * Destroy everything queued by a free that could not power the NPU. The caller
+ * holds a reference, so the IOMMU work the destroy does is safe here. Anything
+ * that still fails goes back on the list rather than being dropped - the
+ * destroy can give up after three domain switches without freeing, and an
+ * object removed from the list at that point would have no owner left.
  */
 void rknpu_gem_drain_deferred(struct rknpu_device *rknpu_dev)
 {
@@ -1117,14 +1170,44 @@ void rknpu_gem_drain_deferred(struct rknpu_device *rknpu_dev)
 
 	list_for_each_entry_safe(rknpu_obj, tmp, &ready, deferred) {
 		list_del(&rknpu_obj->deferred);
-		rknpu_gem_object_destroy(rknpu_obj);
+		if (rknpu_gem_object_destroy(rknpu_obj)) {
+			mutex_lock(&rknpu_dev->deferred_free_lock);
+			list_add_tail(&rknpu_obj->deferred,
+				      &rknpu_dev->deferred_free);
+			mutex_unlock(&rknpu_dev->deferred_free_lock);
+		}
 	}
+}
+
+/*
+ * Last chance on the way out. Nothing will drain the list after this, so say
+ * plainly what is being abandoned instead of leaving it to be inferred.
+ */
+void rknpu_gem_flush_deferred(struct rknpu_device *rknpu_dev)
+{
+	struct rknpu_gem_object *rknpu_obj, *tmp;
+	size_t lost = 0;
+
+	rknpu_gem_drain_deferred(rknpu_dev);
+
+	mutex_lock(&rknpu_dev->deferred_free_lock);
+	list_for_each_entry_safe(rknpu_obj, tmp, &rknpu_dev->deferred_free,
+				 deferred) {
+		list_del(&rknpu_obj->deferred);
+		lost++;
+	}
+	mutex_unlock(&rknpu_dev->deferred_free_lock);
+
+	if (lost)
+		LOG_DEV_ERROR(rknpu_dev->dev,
+			      "%zu gem object(s) never destroyed; leaking them\\n",
+			      lost);
 }
 
 void rknpu_gem_free_object(struct drm_gem_object *obj)"""
 assert s.count(old)==1, ("drain anchor", s.count(old))
 open(g,"w").write(s.replace(old,new))
-print("gem drain ok")
+print("gem drain + flush ok")
 
 h="/tmp/b/include/rknpu_gem.h"
 s=open(h).read()
@@ -1134,9 +1217,12 @@ new = """struct rknpu_gem_object {
 	struct list_head deferred;"""
 assert s.count(old)==1, ("gem obj field", s.count(old))
 s = s.replace(old,new)
+s = s.replace("void rknpu_gem_object_destroy(struct rknpu_gem_object *rknpu_obj);",
+              "int rknpu_gem_object_destroy(struct rknpu_gem_object *rknpu_obj);", 1)
 old2 = """void rknpu_gem_free_object(struct drm_gem_object *obj);"""
 new2 = """void rknpu_gem_free_object(struct drm_gem_object *obj);
-void rknpu_gem_drain_deferred(struct rknpu_device *rknpu_dev);"""
+void rknpu_gem_drain_deferred(struct rknpu_device *rknpu_dev);
+void rknpu_gem_flush_deferred(struct rknpu_device *rknpu_dev);"""
 assert s.count(old2)==1, ("gem decl", s.count(old2))
 open(h,"w").write(s.replace(old2,new2))
 print("gem header ok")
@@ -1149,3 +1235,59 @@ sub("""	mutex_init(&rknpu_dev->power_lock);""",
 	INIT_LIST_HEAD(&rknpu_dev->deferred_free);""", "list init")
 open(p,"w").write(s)
 print("probe init ok")
+
+# ---- drain on ordinary use, and flush on the way out ----
+#
+# A free that could not power the NPU leaves work queued, and only another
+# free would ever have looked at it - a device that stops allocating would
+# keep those objects for ever. The ioctl paths already take a reference and
+# check it, so they are where the backlog gets cleared.
+s=open(p).read()
+sub("""	ret = rknpu_power_get(rknpu_dev);
+	if (ret)
+		return ret;
+
+	switch (_IOC_NR(cmd)) {""",
+"""	ret = rknpu_power_get(rknpu_dev);
+	if (ret)
+		return ret;
+
+	/* The hardware is up and this caller holds a reference, which is what
+	 * a deferred destroy has been waiting for.
+	 */
+	rknpu_gem_drain_deferred(rknpu_dev);
+
+	switch (_IOC_NR(cmd)) {""", "drain in ioctl")
+
+sub("""		int ret = rknpu_power_get(rknpu_dev);                       \\
+		if (ret)                                                    \\
+			return ret;                                         \\
+		ret = func(dev, data, file_priv);                           \\""",
+"""		int ret = rknpu_power_get(rknpu_dev);                       \\
+		if (ret)                                                    \\
+			return ret;                                         \\
+		rknpu_gem_drain_deferred(rknpu_dev);                        \\
+		ret = func(dev, data, file_priv);                           \\""", "drain in drm ioctl")
+
+sub("""	mutex_lock(&rknpu_dev->power_lock);
+	if (READ_ONCE(rknpu_dev->power_wedged)) {
+		powered = true;
+	} else if (atomic_read(&rknpu_dev->power_refcount) > 0) {""",
+"""	/*
+	 * Before the power goes away for good: destroy what can still be
+	 * destroyed and account for anything that cannot. Nothing drains the
+	 * list after this.
+	 */
+	if (!rknpu_power_get(rknpu_dev)) {
+		rknpu_gem_flush_deferred(rknpu_dev);
+		rknpu_power_put(rknpu_dev);
+	} else {
+		rknpu_gem_flush_deferred(rknpu_dev);
+	}
+
+	mutex_lock(&rknpu_dev->power_lock);
+	if (READ_ONCE(rknpu_dev->power_wedged)) {
+		powered = true;
+	} else if (atomic_read(&rknpu_dev->power_refcount) > 0) {""", "flush on remove")
+open(p,"w").write(s)
+print("ioctl drains + remove flush wired")

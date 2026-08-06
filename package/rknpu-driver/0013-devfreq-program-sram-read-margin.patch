@@ -400,7 +400,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	if (IS_ERR(opp))
 --- a/rknpu_drv.c
 +++ b/rknpu_drv.c
-@@ -1061,8 +1061,15 @@
+@@ -1067,8 +1067,15 @@
  		}
  	}
  

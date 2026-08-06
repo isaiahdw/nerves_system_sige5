@@ -275,7 +275,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  	if (ret)
  		rknpu_power_off_retry(rknpu_dev);
-@@ -1575,6 +1641,7 @@
+@@ -1581,6 +1647,7 @@
  	spin_lock_init(&rknpu_dev->lock);
  	spin_lock_init(&rknpu_dev->irq_lock);
  	mutex_init(&rknpu_dev->power_lock);

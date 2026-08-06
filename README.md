@@ -97,6 +97,13 @@ The default image has no BL32. The boot chain runs BL31 and nothing in
 TrustZone above it, so `/dev/tee0` never appears even though the kernel carries
 the OP-TEE driver.
 
+One thing is not opt-in: the device tree reserves the secure world's memory
+unconditionally, because the same image has to boot on either bootloader and a
+reservation that disagrees with the running BL32 is worse than an unused one.
+That costs 50 MB of 8 GB whether or not a secure world is present — 36 MB for
+upstream OP-TEE and 14 MB for a Rockchip BL32 that is no longer built here and
+should be dropped.
+
 There is no separate secure element on this board, so TrustZone is the only
 place a key can live that survives root or a desoldered eMMC.
 
@@ -140,8 +147,8 @@ Rockchip's own BL32 blob is not an option here; see
 
 Thirteen patches, applied to a pinned optee_os by `scripts/build-uboot.sh`:
 
-- a HUK read from the secure OTP at the confirmed index, refusing a partially
-  programmed slot rather than accepting a short key
+- a HUK read from the secure OTP at the confirmed index, rejecting a slot with
+  an all-zero word rather than accepting a short key
 - `hw_get_random_bytes()` driving RKRNG, and PRNG seeding from it — a TRNG that
   cannot be read is fatal rather than silently degraded
 - a secure-world console, without which OP-TEE's own diagnostics go nowhere and
@@ -176,11 +183,15 @@ draw from the TRNG differs from the first. It then reads the value back and
 refuses to use it unless it matches. A later boot on a provisioned part does
 nothing.
 
-Fusing is irreversible, but it is not a brick risk: the write is bounded at
-about 4 ms, and losing power inside that window leaves a slot the read path
-refuses — the board boots normally and simply cannot hold a key. The fuses that
-can brick an RK3576 are the secure-boot control word and the RSA hash, and
-nothing here touches either.
+Fusing is irreversible, but it is not a brick risk: the four words are written
+in a short window, and the fuses that can brick an RK3576 are the secure-boot
+control word and the RSA hash, neither of which this touches.
+
+Losing power mid-write is not fully guarded, though. The read path rejects a
+slot with an all-zero word, which catches an interruption between words but not
+one inside the last word — a partly programmed word that happens to be non-zero
+reads as a complete key. Treat an interrupted burn as suspect rather than as
+guaranteed-rejected.
 
 Verified end to end on hardware: key fused and read back, surviving power
 cycles, secure storage initialising, and an EC P-256 keypair generated inside
@@ -189,11 +200,19 @@ Linux.
 
 ### What it does not protect against
 
-Someone who can boot their own image can ask the secure world to sign for them.
-The key is safe from extraction, not from use by whoever controls the device;
-closing that needs verified boot, which is more fuses. And because keys are
-sealed against a fuse in this SoC and stored on the app partition, a data wipe
-or a different board means re-enrolment.
+The boot chain is not verified, so the boundary is narrower than "the key
+cannot be extracted". What holds is:
+
+> Protects against compromised normal-world software, and against storage
+> removed from the board, for as long as the bootloader and BL32 are intact.
+
+Someone who can replace BL32 runs code at S-EL1 and can read the same secure
+OTP words OP-TEE reads, so they can take the key itself, not merely use it.
+Closing that means verified boot, which is more fuses — and the ones that
+enable it are the ones that can brick a part.
+
+Keys are also sealed against a fuse in this SoC and stored on the app
+partition, so a data wipe or a different board means re-enrolment.
 
 ### RPMB
 
@@ -310,7 +329,7 @@ sector 64, with one copy and no revert.
 ## Kernel
 
 Mainline LTS from kernel.org (6.18.40) with the upstream
-`rk3576-armsom-sige5` device tree and nineteen patches, each commented
+`rk3576-armsom-sige5` device tree and twenty-six patches, each commented
 inline.
 
 NPU and board (`0001`-`0014`): bindings for the NPU MMU and the RKNPU OPP

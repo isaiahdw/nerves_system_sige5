@@ -61,7 +61,9 @@ BL31_ELF="bin/rk35/rk3576_bl31_v1.25.elf"
 OPTEE_GIT="https://github.com/OP-TEE/optee_os.git"
 OPTEE_COMMIT="5a53776"
 TFA_GIT="https://github.com/ARM-software/arm-trusted-firmware.git"
-TFA_BRANCH="master"
+# Pinned, like OP-TEE above: master moves, and a bootloader that cannot be
+# rebuilt byte for byte is not much use for working out what is on a board.
+TFA_COMMIT="9ad327a8d124ce82002614c23e33992d4de6f7cf"
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -74,8 +76,13 @@ trap 'rm -f "$BUILD_STAMP"' EXIT
 # silently run a truncated script - building fine, copying nothing, exiting 0.
 # In this heredoc quotes are just characters. Host expansion still happens, so
 # \$ still defers a variable to the container.
+# Pinned by digest for the same reason the sources are pinned by commit: the
+# bookworm tag moves, and a toolchain that changes underneath makes the output
+# unexplainable.
+BUILD_IMAGE="debian:bookworm@sha256:813017f3d62be4b5891a7acca6a01bdcd4b8513daa81b1ab99d3a50385b26931"
+
 docker run --rm -i -v "$REPO_DIR/uboot":/out -v "$REPO_DIR/optee":/optee-patches \
-    debian:bookworm bash -s <<CONTAINER_SCRIPT
+    "$BUILD_IMAGE" bash -s <<CONTAINER_SCRIPT
 set -e
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git make gcc \
@@ -104,7 +111,8 @@ if [ '${SECURE_WORLD:-0}' = 1 ]; then
         CFG_RK3576_PERSIST_HUK=y \
         -j\$(nproc)
 
-    git clone --depth 1 --branch $TFA_BRANCH $TFA_GIT /tfa
+    git clone $TFA_GIT /tfa
+    git -C /tfa checkout --detach $TFA_COMMIT
     make -C /tfa PLAT=rk3576 \
         CROSS_COMPILE=aarch64-linux-gnu- \
         SPD=opteed BL32=/optee_os/out/arm-plat-rockchip/core/tee.bin \

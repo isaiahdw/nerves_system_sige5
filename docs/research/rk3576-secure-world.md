@@ -67,10 +67,14 @@ package to attack.
 
 ### What neither protects against
 
-Someone who can boot their own image on the board can ask the secure world to
-sign for them. The key is safe from *extraction*; it is not safe from *use* by
-whoever controls the device. Closing that means verified boot, which is more
-fuses - and the ones that enable it are the ones that can brick a part.
+The boot chain here is not verified, so the boundary is: protects against
+compromised normal-world software, and against storage removed from the board,
+for as long as the bootloader and BL32 are intact.
+
+A replacement BL32 runs at S-EL1 and can read the same secure OTP words
+`plat_rockchip_get_huk()` reads, so whoever can replace the firmware takes the
+key rather than merely using it. Closing that means verified boot, which is
+more fuses - and the ones that enable it are the ones that can brick a part.
 
 This is not specific to TrustZone: anyone who can talk to an ATECC608 can ask it
 to sign too, unless its slots and I/O protection are configured to prevent it.

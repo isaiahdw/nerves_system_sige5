@@ -92,14 +92,15 @@ gen 0010 0011-scmi-gate rknpu_drv.c
 place "$PD/0011-power-gate-scmi-on-driver-power-state.patch" \
 	rknpu_drv.c=h_rknpu_drv.c.hunk
 
-gen 0011 0012-power-lifecycle rknpu_drv.c rknpu_devfreq.c rknpu_debugger.c rknpu_gem.c include/rknpu_devfreq.h include/rknpu_drv.h
+gen 0011 0012-power-lifecycle rknpu_drv.c rknpu_devfreq.c rknpu_debugger.c rknpu_gem.c include/rknpu_devfreq.h include/rknpu_drv.h include/rknpu_gem.h
 place "$PD/0012-power-transactional-lifecycle.patch" \
 	rknpu_drv.c=h_rknpu_drv.c.hunk \
 	rknpu_devfreq.c=h_rknpu_devfreq.c.hunk \
 	rknpu_debugger.c=h_rknpu_debugger.c.hunk \
 	rknpu_gem.c=h_rknpu_gem.c.hunk \
 	include/rknpu_devfreq.h=h_rknpu_devfreq.h.hunk \
-	include/rknpu_drv.h=h_rknpu_drv.h.hunk
+	include/rknpu_drv.h=h_rknpu_drv.h.hunk \
+	include/rknpu_gem.h=h_rknpu_gem.h.hunk
 
 gen 0012 0013-read-margin rknpu_devfreq.c rknpu_drv.c include/rknpu_drv.h
 place "$PD/0013-devfreq-program-sram-read-margin.patch" \

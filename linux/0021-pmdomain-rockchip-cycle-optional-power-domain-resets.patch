@@ -121,16 +121,38 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		rockchip_pmu_restore_qos(pd);
  	}
  
-@@ -697,7 +765,7 @@ static int rockchip_pd_power_on(struct generic_pm_domain *domain)
+@@ -690,6 +758,15 @@ static int rockchip_pd_power_on(struct generic_pm_domain *domain)
+ 	struct rockchip_pm_domain *pd = to_rockchip_pd(domain);
+ 	int ret;
+ 
++	/*
++	 * A domain already latched is powered with its supply deliberately held
++	 * on. Enabling the regulator again here would take a second reference
++	 * that the error path below then declines to drop - once per retry - so
++	 * the wedge has to be rejected before anything is acquired.
++	 */
++	if (pd->wedged)
++		return -EBUSY;
++
+ 	ret = rockchip_pd_regulator_enable(pd);
+ 	if (ret) {
+ 		dev_err(pd->pmu->dev, "Failed to enable supply: %d\n", ret);
+@@ -697,7 +774,13 @@ static int rockchip_pd_power_on(struct generic_pm_domain *domain)
  	}
  
  	ret = rockchip_pd_power(pd, true);
 -	if (ret)
++
++	/*
++	 * Drop the supply unless this call is the one that latched the domain:
++	 * that one leaves it on deliberately, and holds the only reference the
++	 * wedge keeps.
++	 */
 +	if (ret && !pd->wedged)
  		rockchip_pd_regulator_disable(pd);
  
  	return ret;
-@@ -823,6 +891,14 @@ static int rockchip_pm_add_one_domain(struct rockchip_pmu *pmu,
+@@ -823,6 +906,14 @@ static int rockchip_pm_add_one_domain(struct rockchip_pmu *pmu,
  	if (error)
  		goto err_put_clocks;
  
@@ -145,7 +167,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	pd->num_qos = of_count_phandle_with_args(node, "pm_qos",
  						 NULL);
  
-@@ -893,6 +969,7 @@ static int rockchip_pm_add_one_domain(struct rockchip_pmu *pmu,
+@@ -893,6 +984,7 @@ static int rockchip_pm_add_one_domain(struct rockchip_pmu *pmu,
  	clk_bulk_unprepare(pd->num_clks, pd->clks);
  err_put_clocks:
  	clk_bulk_put(pd->num_clks, pd->clks);
@@ -153,7 +175,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	return error;
  }
  
-@@ -911,6 +988,7 @@ static void rockchip_pm_remove_one_domain(struct rockchip_pm_domain *pd)
+@@ -911,6 +1003,7 @@ static void rockchip_pm_remove_one_domain(struct rockchip_pm_domain *pd)
  
  	clk_bulk_unprepare(pd->num_clks, pd->clks);
  	clk_bulk_put(pd->num_clks, pd->clks);

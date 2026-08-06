@@ -985,7 +985,14 @@ new = """	/* Bounds the power-off retry so a persistent failure cannot spin. */
 	 * down, and teardown leaves the domains attached. See
 	 * rknpu_power_wedge().
 	 */
-	bool power_wedged;"""
+	bool power_wedged;
+	/*
+	 * GEM objects whose destroy could not run because the NPU could not be
+	 * powered. Drained by rknpu_gem_drain_deferred() on the next successful
+	 * acquisition. See rknpu_gem_free_object().
+	 */
+	struct list_head deferred_free;
+	struct mutex deferred_free_lock;"""
 assert s.count(old)==1, ("power_wedged field", s.count(old))
 open(h,"w").write(s.replace(old,new))
 print("header ok")
@@ -1057,14 +1064,88 @@ new = """	struct rknpu_device *rknpu_dev = obj->dev->dev_private;
 	int ret = rknpu_power_get(rknpu_dev);
 
 	/*
-	 * Freeing cannot be declined, so a refused acquisition only means the
-	 * destroy runs without one - and without a put for a reference that
-	 * was never taken.
+	 * rknpu_gem_object_destroy() calls rknpu_iommu_domain_get_and_switch(),
+	 * which detaches and reattaches the IOMMU when the object's domain is
+	 * not the current one - register access that needs the NPU powered.
+	 * Without a reference there is no way to do that safely, and freeing
+	 * cannot be declined, so the object is left alone instead. Leaking a
+	 * mapping is recoverable; programming an unpowered or wedged IOMMU is
+	 * not.
 	 */
-	rknpu_gem_object_destroy(to_rknpu_obj(obj));
+	if (ret) {
+		/*
+		 * Queue it instead of dropping it. Freeing cannot be declined,
+		 * but the destroy needs the hardware, so the object waits for
+		 * an acquisition that succeeds rather than being abandoned -
+		 * a transient failure would otherwise leak every object freed
+		 * while it lasted.
+		 */
+		mutex_lock(&rknpu_dev->deferred_free_lock);
+		list_add_tail(&to_rknpu_obj(obj)->deferred,
+			      &rknpu_dev->deferred_free);
+		mutex_unlock(&rknpu_dev->deferred_free_lock);
+		LOG_DEV_ERROR(
+			rknpu_dev->dev,
+			"npu unavailable (%d), deferring a gem destroy\\n",
+			ret);
+		return;
+	}
 
-	if (!ret)
-		rknpu_power_put_delay(rknpu_dev);"""
+	rknpu_gem_drain_deferred(rknpu_dev);
+	rknpu_gem_object_destroy(to_rknpu_obj(obj));
+	rknpu_power_put_delay(rknpu_dev);"""
 assert s.count(old)==1, ("gem free", s.count(old))
 open(g,"w").write(s.replace(old,new))
 print("gem ok")
+
+# ---- the drain, the list head it needs, and its teardown ----
+g="/tmp/b/rknpu_gem.c"
+s=open(g).read()
+old = """void rknpu_gem_free_object(struct drm_gem_object *obj)"""
+new = """/*
+ * Destroy everything queued by a free that could not power the NPU. Called
+ * with a reference held, so the IOMMU work the destroy does is safe here.
+ */
+void rknpu_gem_drain_deferred(struct rknpu_device *rknpu_dev)
+{
+	struct rknpu_gem_object *rknpu_obj, *tmp;
+	LIST_HEAD(ready);
+
+	mutex_lock(&rknpu_dev->deferred_free_lock);
+	list_splice_init(&rknpu_dev->deferred_free, &ready);
+	mutex_unlock(&rknpu_dev->deferred_free_lock);
+
+	list_for_each_entry_safe(rknpu_obj, tmp, &ready, deferred) {
+		list_del(&rknpu_obj->deferred);
+		rknpu_gem_object_destroy(rknpu_obj);
+	}
+}
+
+void rknpu_gem_free_object(struct drm_gem_object *obj)"""
+assert s.count(old)==1, ("drain anchor", s.count(old))
+open(g,"w").write(s.replace(old,new))
+print("gem drain ok")
+
+h="/tmp/b/include/rknpu_gem.h"
+s=open(h).read()
+old = """struct rknpu_gem_object {"""
+new = """struct rknpu_gem_object {
+	/* Queued on rknpu_device.deferred_free when a destroy could not run. */
+	struct list_head deferred;"""
+assert s.count(old)==1, ("gem obj field", s.count(old))
+s = s.replace(old,new)
+old2 = """void rknpu_gem_free_object(struct drm_gem_object *obj);"""
+new2 = """void rknpu_gem_free_object(struct drm_gem_object *obj);
+void rknpu_gem_drain_deferred(struct rknpu_device *rknpu_dev);"""
+assert s.count(old2)==1, ("gem decl", s.count(old2))
+open(h,"w").write(s.replace(old2,new2))
+print("gem header ok")
+
+# probe initialises the list; remove drains it with a reference held
+s=open(p).read()
+sub("""	mutex_init(&rknpu_dev->power_lock);""",
+"""	mutex_init(&rknpu_dev->power_lock);
+	mutex_init(&rknpu_dev->deferred_free_lock);
+	INIT_LIST_HEAD(&rknpu_dev->deferred_free);""", "list init")
+open(p,"w").write(s)
+print("probe init ok")

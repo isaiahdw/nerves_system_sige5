@@ -280,9 +280,9 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	spin_lock_init(&rknpu_dev->irq_lock);
  	mutex_init(&rknpu_dev->power_lock);
 +	mutex_init(&rknpu_dev->power_transition_lock);
+ 	mutex_init(&rknpu_dev->deferred_free_lock);
+ 	INIT_LIST_HEAD(&rknpu_dev->deferred_free);
  	mutex_init(&rknpu_dev->reset_lock);
- 	mutex_init(&rknpu_dev->domain_lock);
- 	for (i = 0; i < config->num_irqs; i++) {
 --- a/include/rknpu_drv.h
 +++ b/include/rknpu_drv.h
 @@ -17,6 +17,7 @@

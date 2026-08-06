@@ -466,7 +466,16 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	struct device *virt_dev = NULL;
  	const struct of_device_id *match = NULL;
  	const struct rknpu_config *config = NULL;
-@@ -1576,33 +1670,52 @@
+@@ -1471,6 +1565,8 @@
+ 	spin_lock_init(&rknpu_dev->lock);
+ 	spin_lock_init(&rknpu_dev->irq_lock);
+ 	mutex_init(&rknpu_dev->power_lock);
++	mutex_init(&rknpu_dev->deferred_free_lock);
++	INIT_LIST_HEAD(&rknpu_dev->deferred_free);
+ 	mutex_init(&rknpu_dev->reset_lock);
+ 	mutex_init(&rknpu_dev->domain_lock);
+ 	for (i = 0; i < config->num_irqs; i++) {
+@@ -1576,33 +1672,52 @@
  		rknpu_dev->multiple_domains = true;
  	}
  
@@ -530,7 +539,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		} else {
  			LOG_DEV_WARN(dev, "could not find sram resource!\n");
  		}
-@@ -1619,14 +1732,12 @@
+@@ -1619,14 +1734,12 @@
  		rknpu_iommu_init_domain(rknpu_dev);
  
  	/*
@@ -550,7 +559,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	atomic_set(&rknpu_dev->cmdline_power_refcount, 0);
  	atomic_set(&rknpu_dev->iommu_domain_refcount, 0);
  
-@@ -1635,14 +1746,46 @@
+@@ -1635,14 +1748,46 @@
  
  	return 0;
  
@@ -600,7 +609,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  err_remove_drv:
  #ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
  	rknpu_drm_remove(rknpu_dev);
-@@ -1657,10 +1800,44 @@
+@@ -1657,10 +1802,44 @@
  static int rknpu_remove(struct platform_device *pdev)
  {
  	struct rknpu_device *rknpu_dev = platform_get_drvdata(pdev);
@@ -645,7 +654,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  	rknpu_debugger_remove(rknpu_dev);
  	rknpu_cancel_timer(rknpu_dev);
-@@ -1688,21 +1865,23 @@
+@@ -1688,21 +1867,23 @@
  		iommu_group_put(rknpu_dev->iommu_group);
  	}
  
@@ -680,7 +689,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  	if (rknpu_dev->multiple_domains) {
  		if (rknpu_dev->genpd_dev_npu0)
-@@ -1723,10 +1902,16 @@
+@@ -1723,10 +1904,16 @@
  static int rknpu_suspend(struct device *dev)
  {
  	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
@@ -756,26 +765,67 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	if (freq != current_freq) {
 --- a/rknpu_gem.c
 +++ b/rknpu_gem.c
-@@ -1193,10 +1193,17 @@
+@@ -1190,11 +1190,59 @@
+ 	return 0;
+ }
+ 
++/*
++ * Destroy everything queued by a free that could not power the NPU. Called
++ * with a reference held, so the IOMMU work the destroy does is safe here.
++ */
++void rknpu_gem_drain_deferred(struct rknpu_device *rknpu_dev)
++{
++	struct rknpu_gem_object *rknpu_obj, *tmp;
++	LIST_HEAD(ready);
++
++	mutex_lock(&rknpu_dev->deferred_free_lock);
++	list_splice_init(&rknpu_dev->deferred_free, &ready);
++	mutex_unlock(&rknpu_dev->deferred_free_lock);
++
++	list_for_each_entry_safe(rknpu_obj, tmp, &ready, deferred) {
++		list_del(&rknpu_obj->deferred);
++		rknpu_gem_object_destroy(rknpu_obj);
++	}
++}
++
  void rknpu_gem_free_object(struct drm_gem_object *obj)
  {
  	struct rknpu_device *rknpu_dev = obj->dev->dev_private;
 +	int ret = rknpu_power_get(rknpu_dev);
++
++	/*
++	 * rknpu_gem_object_destroy() calls rknpu_iommu_domain_get_and_switch(),
++	 * which detaches and reattaches the IOMMU when the object's domain is
++	 * not the current one - register access that needs the NPU powered.
++	 * Without a reference there is no way to do that safely, and freeing
++	 * cannot be declined, so the object is left alone instead. Leaking a
++	 * mapping is recoverable; programming an unpowered or wedged IOMMU is
++	 * not.
++	 */
++	if (ret) {
++		/*
++		 * Queue it instead of dropping it. Freeing cannot be declined,
++		 * but the destroy needs the hardware, so the object waits for
++		 * an acquisition that succeeds rather than being abandoned -
++		 * a transient failure would otherwise leak every object freed
++		 * while it lasted.
++		 */
++		mutex_lock(&rknpu_dev->deferred_free_lock);
++		list_add_tail(&to_rknpu_obj(obj)->deferred,
++			      &rknpu_dev->deferred_free);
++		mutex_unlock(&rknpu_dev->deferred_free_lock);
++		LOG_DEV_ERROR(
++			rknpu_dev->dev,
++			"npu unavailable (%d), deferring a gem destroy\n",
++			ret);
++		return;
++	}
  
 -	rknpu_power_get(rknpu_dev);
-+	/*
-+	 * Freeing cannot be declined, so a refused acquisition only means the
-+	 * destroy runs without one - and without a put for a reference that
-+	 * was never taken.
-+	 */
++	rknpu_gem_drain_deferred(rknpu_dev);
  	rknpu_gem_object_destroy(to_rknpu_obj(obj));
--	rknpu_power_put_delay(rknpu_dev);
-+
-+	if (!ret)
-+		rknpu_power_put_delay(rknpu_dev);
+ 	rknpu_power_put_delay(rknpu_dev);
  }
- 
- int rknpu_gem_dumb_create(struct drm_file *file_priv, struct drm_device *drm,
 --- a/include/rknpu_devfreq.h
 +++ b/include/rknpu_devfreq.h
 @@ -8,8 +8,6 @@
@@ -804,7 +854,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	return 0;
 --- a/include/rknpu_drv.h
 +++ b/include/rknpu_drv.h
-@@ -160,6 +160,13 @@
+@@ -160,6 +160,20 @@
  	bool hw_powered;
  	/* Bounds the power-off retry so a persistent failure cannot spin. */
  	unsigned int power_off_retries;
@@ -815,6 +865,32 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	 * rknpu_power_wedge().
 +	 */
 +	bool power_wedged;
++	/*
++	 * GEM objects whose destroy could not run because the NPU could not be
++	 * powered. Drained by rknpu_gem_drain_deferred() on the next successful
++	 * acquisition. See rknpu_gem_free_object().
++	 */
++	struct list_head deferred_free;
++	struct mutex deferred_free_lock;
  	int bypass_irq_handler;
  	int bypass_soft_reset;
  	bool soft_reseting;
+--- a/include/rknpu_gem.h
++++ b/include/rknpu_gem.h
+@@ -44,6 +44,8 @@
+  *	user can access the buffer through kms_bo.handle.
+  */
+ struct rknpu_gem_object {
++	/* Queued on rknpu_device.deferred_free when a destroy could not run. */
++	struct list_head deferred;
+ 	struct drm_gem_object base;
+ 	unsigned int flags;
+ 	unsigned long size;
+@@ -145,6 +147,7 @@
+ 
+ /* free gem object. */
+ void rknpu_gem_free_object(struct drm_gem_object *obj);
++void rknpu_gem_drain_deferred(struct rknpu_device *rknpu_dev);
+ 
+ /* create memory region for drm framebuffer. */
+ int rknpu_gem_dumb_create(struct drm_file *file_priv, struct drm_device *dev,

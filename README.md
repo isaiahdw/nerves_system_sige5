@@ -323,6 +323,16 @@ ATECC608.
 
 Verified on a Sige5 v1.2, 2026-08-05.
 
+> **Proprietary firmware.** The WiFi firmware, its CLM regulatory blob and the
+> Bluetooth patch RAM in `package/brcmfmac43752-firmware` are Broadcom/Infineon
+> binaries. They are redistributed unmodified and are not covered by this
+> repository's licence; Buildroot marks the package `PROPRIETARY`, so
+> `make legal-info` reports it. Neither of the upstreams these come from
+> (armbian/firmware, Rockchip's `rkwifibt`) ships the vendor licence text
+> alongside the binaries, so this repository cannot state their terms - if you
+> are shipping a product, get the applicable licence from Infineon or your
+> module vendor rather than inferring it from here.
+
 | Feature | Status | Notes |
 | --- | --- | --- |
 | eMMC boot, A/B firmware slots | Yes | Boot ROM reads the bootloader from eMMC directly; HS400ES. App partition grows to fill the eMMC on first boot |

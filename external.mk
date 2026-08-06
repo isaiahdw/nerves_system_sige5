@@ -17,18 +17,26 @@ MESA3D_CONF_OPTS += -Ddraw-use-llvm=false
 #
 # Hash the patch set and keep the hash inside the extracted tree. When it no
 # longer matches, the tree is stale: delete it and the next step extracts and
-# patches a fresh one. This is parsed on every make invocation, including the
-# recursive ones, which is harmless - once the tree is gone or the hash agrees
-# there is nothing left to do.
+# patches a fresh one.
+#
+# Both checks below only run for goals that actually build something. They
+# delete a build directory, which is not a thing to do while parsing a makefile
+# for `make source`, `make legal-info` or a variable query - and not something
+# to leave reachable from a recursive invocation either.
+NERVES_BUILD_GOALS = all world
+NERVES_STALE_CHECK = $(if $(MAKECMDGOALS),$(filter $(NERVES_BUILD_GOALS),$(MAKECMDGOALS)),yes)
+
 # /dev/null keeps cat off stdin when there are no patches at all.
 NERVES_LINUX_PATCHES = $(sort $(wildcard $(NERVES_DEFCONFIG_DIR)/linux/*.patch))
 NERVES_LINUX_PATCH_HASH = $(shell cat /dev/null $(NERVES_LINUX_PATCHES) | sha256sum | cut -d' ' -f1)
 NERVES_LINUX_PATCH_STAMP = $(LINUX_DIR)/.nerves-linux-patch-hash
 
+ifneq ($(NERVES_STALE_CHECK),)
 $(shell if [ -d "$(LINUX_DIR)" ] && \
 	   [ "$$(cat $(NERVES_LINUX_PATCH_STAMP) 2>/dev/null)" != "$(NERVES_LINUX_PATCH_HASH)" ]; then \
 		rm -rf "$(LINUX_DIR)"; \
 	fi)
+endif
 
 # optee-key's source lives in this tree (SITE_METHOD = local), and buildroot
 # copies it once at extract time - editing it afterwards changes nothing until
@@ -39,10 +47,12 @@ NERVES_OPTEE_KEY_HASH = $(shell cat /dev/null $(NERVES_OPTEE_KEY_SRC) | sha256su
 NERVES_OPTEE_KEY_DIR = $(BUILD_DIR)/optee-key-$(OPTEE_KEY_VERSION)
 NERVES_OPTEE_KEY_STAMP = $(NERVES_OPTEE_KEY_DIR)/.nerves-src-hash
 
+ifneq ($(NERVES_STALE_CHECK),)
 $(shell if [ -d "$(NERVES_OPTEE_KEY_DIR)" ] && \
 	   [ "$$(cat $(NERVES_OPTEE_KEY_STAMP) 2>/dev/null)" != "$(NERVES_OPTEE_KEY_HASH)" ]; then \
 		rm -rf "$(NERVES_OPTEE_KEY_DIR)"; \
 	fi)
+endif
 
 define OPTEE_KEY_RECORD_SRC_HASH
 	echo $(NERVES_OPTEE_KEY_HASH) > $(NERVES_OPTEE_KEY_STAMP)

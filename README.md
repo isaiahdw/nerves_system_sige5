@@ -43,8 +43,6 @@ Not working:
 
 Untested: M.2 NVMe. The drivers are built in; no drive was fitted.
 
-Two behaviours that look like bugs and are not:
-
 **GPU and NPU frequency labels are nominal.** Ask the GPU for 300 MHz and you
 get about 423; ask for 900 and you get about 815. The clock is a PVTPLL that
 tracks the silicon rather than a divider, so an OPP names an operating point,
@@ -62,10 +60,9 @@ Everything lives on the soldered eMMC. The RK3576 boot ROM on this board
 fwup's factory `complete` task writes the bootloader there as part of the
 disk image, and upgrades never touch it.
 
-A microSD card boots when the eMMC has no valid loader at sector 64 — verified
-by clearing the eMMC bootloader first. With one present, the eMMC's U-Boot runs
-and boots the eMMC; it does not check the card. Maskrom is the recovery path
-when neither will boot:
+A microSD card boots when the eMMC has no valid loader at sector 64. With one
+present, the eMMC's U-Boot runs and boots the eMMC; it does not check the card.
+Maskrom is the recovery path when neither will boot:
 
 ```sh
 # board in maskrom, USB-C on the OTG port
@@ -97,20 +94,14 @@ The default image has no BL32. The boot chain runs BL31 and nothing in
 TrustZone above it, so `/dev/tee0` never appears even though the kernel carries
 the OP-TEE driver.
 
-One thing is not opt-in: the device tree reserves the secure world's memory
-unconditionally, because the same image has to boot on either bootloader and a
-reservation that disagrees with the running BL32 is worse than an unused one.
-That costs 36 MB of 8 GB whether or not a secure world is present.
+The device tree reserves the secure world's memory unconditionally so one image
+boots on either bootloader. That costs 36 MB of 8 GB.
 
 There is no separate secure element on this board, so TrustZone is the only
-place a key can live that survives root or a desoldered eMMC.
-
-Take a private key for NervesHub. Without a secure world it is a file on the
-data partition: anyone who gets root once, or unsolders the eMMC, reads it and
-can impersonate the device forever. With one, the key lives inside OP-TEE
-sealed by a per-device hardware key and the application never sees it — it asks
-the secure world to sign a challenge and gets a signature back. Pulling the
-eMMC yields ciphertext.
+place a key can live that survives root or a desoldered eMMC. A NervesHub
+private key lives inside OP-TEE, sealed by a per-device hardware key. The
+application asks the secure world to sign and gets a signature back; it never
+sees the key, and pulling the eMMC yields ciphertext.
 
 ```
 BL31 (TF-A)  ── loads ──▶  BL32 (OP-TEE)
@@ -133,28 +124,23 @@ openssl genrsa -out ~/.config/nerves_system_sige5/ta-sign.pem 2048
 chmod 600 ~/.config/nerves_system_sige5/ta-sign.pem
 ```
 
-OP-TEE embeds the public half and loads only trusted applications signed by
-the private half. Its own default key is published in their repository, so
-building with that would let anyone sign a TA carrying the PKCS#11 UUID — and
-because a TA's secure-storage key is derived from the HUK and its UUID, that
-TA reads the device key. The key is separate from secure boot: secure boot
-decides what firmware may run, this decides what the secure world will load.
+OP-TEE embeds the public half and loads only trusted applications signed by the
+private half. A TA's secure-storage key is derived from the HUK and the TA's
+UUID, so this key controls what can read the device key. It is separate from
+secure boot: secure boot decides what firmware may run, this decides what the
+secure world will load.
 
 Keep it, and keep it off devices. A rebuilt core will not load TAs signed with
 a different key, so losing it means reflashing every device with a matched
 pair.
 
-Only the public half goes into the build container. That container installs
-packages, clones repositories and runs their build systems with the network
-up, so a private key mounted there is readable by all of it. OP-TEE builds
-against `TA_PUBLIC_KEY`, and the trusted application is signed afterwards, on
-this machine, by a step that runs nothing but openssl and OP-TEE's stitching
-script. For a fleet the same split is what lets the private half live in an
-HSM.
+Only the public half enters the build container. OP-TEE builds against
+`TA_PUBLIC_KEY`; the trusted application is signed afterwards on this machine,
+by a step that runs openssl and OP-TEE's stitching script. For a fleet, the
+same split lets the private half live in an HSM.
 
-That writes `uboot/u-boot-rockchip.bin` — the file fwup packages — so rebuild
-the system, build firmware, and flash normally. There is no second bootloader
-and nothing to swap in at flash time.
+That writes `uboot/u-boot-rockchip.bin`, the file fwup packages: rebuild the
+system, build firmware, and flash normally.
 `uboot/u-boot-rockchip.variant` records which build is in the binary.
 
 An image built this way **fuses a hardware unique key on the first boot of a
@@ -162,44 +148,27 @@ part that has none**, because a secure world without one cannot store anything.
 It only ever writes a blank slot and only after its checks pass, so booting it
 on a part that already has a key does nothing.
 
-It replaces BL31 as well. The GPU measurements below were taken on Rockchip's
-BL31; both firmwares deliver identical rates, verified rather than assumed.
-
-Rockchip's own BL32 blob is not an option here; see
-[docs/research/rk3576-firmware-versions.md](docs/research/rk3576-firmware-versions.md).
+It replaces BL31 as well. Both BL31 builds deliver identical GPU rates.
 
 ### What the patches add
 
 Thirteen patches, applied to a pinned optee_os by `scripts/build-uboot.sh`:
 
-- a HUK read from the secure OTP at the confirmed index, rejecting a slot with
-  an all-zero word rather than accepting a short key
-- `hw_get_random_bytes()` driving RKRNG, and PRNG seeding from it — a TRNG that
-  cannot be read is fatal rather than silently degraded
-- a secure-world console, without which OP-TEE's own diagnostics go nowhere and
-  a TA that will not start looks identical to one that is missing
+- a HUK read from the secure OTP, rejecting a slot with an all-zero word
+- `hw_get_random_bytes()` driving RKRNG, and PRNG seeding from it; an unreadable
+  TRNG is fatal
+- a secure-world console on the debug UART
 - read-only diagnostics behind `SECURE_WORLD_DEBUG=1`, off by default: an OTP
   survey, a search for the secure TRNG, and a dry run reporting what a burn
   would do
 - the burn itself, off by default
 
-Working on hardware: upstream TF-A v2.15.0 + OP-TEE 4.10 boot, the PKCS#11 TA
-loads from the rootfs signed with the key the core was built with, and
-`/dev/tee0` appears. Secure storage initialises once a HUK is fused; the part
-ships without one, so an unprovisioned board gets one on first boot — see
-below.
-
-The full investigation is in
-[docs/research/rk3576-secure-world.md](docs/research/rk3576-secure-world.md):
-where the HUK lives and how that was confirmed against Rockchip's own driver,
-that the secure OTP really is unreachable from the normal world, where the
-secure TRNG is, what the burn checks before committing anything, and what a
-power cut during it actually costs.
+Upstream TF-A v2.15.0 with OP-TEE 4.10. The PKCS#11 TA loads from the rootfs
+and `/dev/tee0` appears; secure storage initialises once a HUK is fused.
 
 ### The per-device key
 
-The RK3576 secure OTP ships with no hardware unique key — Rockchip expects the
-OEM to burn one, which is why `trusty_write_oem_huk` exists in their stack.
+The RK3576 secure OTP ships with no hardware unique key; the OEM burns one.
 Without it secure storage cannot initialise, so a `SECURE_WORLD=1` image fuses
 one on the first boot of an unprovisioned part.
 
@@ -218,11 +187,6 @@ slot with an all-zero word, which catches an interruption between words but not
 one inside the last word — a partly programmed word that happens to be non-zero
 reads as a complete key. Treat an interrupted burn as suspect rather than as
 guaranteed-rejected.
-
-Verified end to end on hardware: key fused and read back, surviving power
-cycles, secure storage initialising, and an EC P-256 keypair generated inside
-OP-TEE, persisted, and used to sign — with the private key never entering
-Linux.
 
 ### What it does not protect against
 
@@ -244,17 +208,28 @@ partition, so a data wipe or a different board means re-enrolment.
 
 ### RPMB
 
-`CONFIG_RPMB` is on and enumerates `/sys/class/rpmb/rpmb0`, which the OP-TEE
-driver binds to — the secure world reaches the replay-protected partition
-through the kernel rather than proxying every frame through `tee-supplicant`.
+Three separate things. Only the first is on.
 
-The RPMB key is one-shot and OP-TEE derives it from the HUK, so the order
-matters: fuse the HUK, validate it, and only then provision RPMB — otherwise
-one mistake strands the eMMC as well.
+| | State |
+| --- | --- |
+| Kernel RPMB subsystem | `CONFIG_RPMB=y`. `/sys/class/rpmb/rpmb0` enumerates and the OP-TEE driver binds to it |
+| OP-TEE storing anything there | Off. `CFG_RPMB_FS` defaults to `n` and nothing here sets it |
+| The eMMC's RPMB key | Never programmed |
+
+Secure storage runs on `CFG_REE_FS`: keys are encrypted against the HUK and
+written to the app partition through `tee-supplicant`. That is what "sealed
+against a fuse and stored on the app partition" above means. RPMB would add
+rollback protection — stopping someone who holds the eMMC from restoring an
+older copy of secure storage — and nothing else.
+
+Enabling it means `CFG_RPMB_FS` and `CFG_RPMB_WRITE_KEY`. The key write is
+one-shot and the key is derived from the HUK, so fuse the HUK and confirm it
+works first; a key written from the wrong HUK strands the eMMC's RPMB
+permanently.
 
 [docs/research/rk3576-secure-world.md](docs/research/rk3576-secure-world.md)
-has the secure address map, the OTP layout, how this compares to a Trust&GO
-ATECC608, and why RPMB is optional rather than required.
+has the secure address map, the OTP layout, and how this compares to a Trust&GO
+ATECC608.
 
 ## Hardware support
 
@@ -281,7 +256,7 @@ Verified on a Sige5 v1.2, 2026-08-05.
 | Hardware RNG | Yes | Two instances. `/dev/hwrng` (`rng@2a410000`) feeds the kernel entropy pool; a second, secure-only block at `0x2a440000` seeds OP-TEE. 1 MB sampled: 7.99981 bits/byte, chi-square 278.9 on 255 df |
 | Secure world (OP-TEE) | Opt-in | `SECURE_WORLD=1 ./scripts/build-uboot.sh` builds upstream TF-A + OP-TEE 4.10 in place of rkbin's BL31. Fuses a per-device key on first boot of an unprovisioned part. Verified: key burned, survives power cycles, secure storage initialises |
 | PKCS#11 key storage | Opt-in | With the secure world: EC P-256 generated inside OP-TEE, persisted encrypted against the fused key, signed with. The private key never enters Linux. Needs `tee-supplicant` running |
-| RPMB | Available, unused | 4 MiB, reached through the kernel RPMB subsystem. Adds rollback protection only; not needed for key storage. Its key is one-shot and derived from the HUK, so provision it only after the HUK is settled |
+| RPMB | Kernel side only | 4 MiB. `CONFIG_RPMB=y` and the OP-TEE driver binds to it, but `CFG_RPMB_FS` is off, so secure storage uses the app partition instead. Adds rollback protection only. Its key is one-shot and derived from the HUK, so provision it only after the HUK is settled |
 | ADC (SARADC) | Yes | Enabled by `linux/0013` (upstream leaves it disabled); header ADC inputs, vref from vcca_1v8_s0 |
 | CAN | No | RK3576 CAN-FD has no mainline driver or dts nodes |
 | GPIO/I2C/SPI/UART header | Expected | Via [Circuits.*](https://elixir-circuits.github.io/) |
@@ -299,14 +274,10 @@ mix deps.get
 mix compile
 ```
 
-Editing anything in `linux/` costs a full kernel rebuild. Buildroot applies
-`linux/*.patch` only when it first extracts the kernel, so `external.mk` keeps
-a hash of the patch set inside the extracted tree and discards the tree when
-the hash stops matching. Without that, an added or edited patch is ignored and
-the build still succeeds — the change is simply absent from the image.
-
-The same guard covers `package/rknpu-driver/*.patch` and
-`package/optee-key/src/`, which buildroot also reads once at extract time.
+Editing anything in `linux/` costs a full kernel rebuild. `external.mk` hashes
+the patch set and keeps the hash inside the extracted tree; a changed hash
+discards the tree so the next step extracts and patches a fresh one. The same
+guard covers `package/rknpu-driver/*.patch` and `package/optee-key/src/`.
 
 ### Using in an application
 
@@ -334,13 +305,9 @@ rkdeveloptool wl 0 disk.img
 rkdeveloptool rd
 ```
 
-- The bootloader is inside that image. There is no separate write at sector 64.
-- 88 seconds for the whole 1.8 GB image, measured.
-- `db` is load-bearing: it puts Rockchip's SPL loader in RAM and everything is
-  written through that. U-Boot's own `rockusb` gadget takes the same commands
-  and runs about 35× slower — the same image did not finish in 3000 s.
-  `rkdeveloptool ld` prints `Maskrom` for both, so a crawling write means the
-  wrong transport.
+- The bootloader is inside that image; there is no separate write at sector 64.
+- `db` puts Rockchip's SPL loader in RAM and everything is written through it.
+  88 seconds for the whole 1.8 GB image.
 - The image is smaller than the eMMC. First boot grows the app partition to
   fill the disk.
 
@@ -360,7 +327,7 @@ sector 64, with one copy and no revert.
 ## Kernel
 
 Mainline LTS from kernel.org (6.18.40) with the upstream
-`rk3576-armsom-sige5` device tree and twenty-six patches, each commented
+`rk3576-armsom-sige5` device tree and twenty-seven patches, each commented
 inline.
 
 NPU and board (`0001`-`0014`): bindings for the NPU MMU and the RKNPU OPP
@@ -376,6 +343,15 @@ GPU (`0015`-`0019`): a binding conditional requiring the RK3576 clock trio
 (`0016`), the clocks BL31 needs held by panfrost (`0017`), DVFS coordinated
 with runtime PM (`0018`), and the SCMI clock with its per-variant OPP
 selection (`0019`).
+
+Power domains and the secure world (`0020`-`0023`): optional resets in the
+Rockchip power-domain binding and driver (`0020`, `0021`), the NPU domains'
+BIU resets (`0022`), and the OP-TEE firmware node with its memory reservation
+(`0023`).
+
+PWM (`0024`-`0027`): the RK3576 controller binding (`0024`), v4 support in
+pwm-rockchip (`0025`), the pwm1 and pwm2 nodes (`0026`), and the fan on the
+header (`0027`).
 
 Configuration is the arm64 `defconfig` plus `linux/nerves.config`,
 documented inline.
@@ -453,19 +429,16 @@ stable per chip, and rkbin's BL31 and upstream TF-A produce identical results.
 Why, and how to measure it again, is in
 [docs/research/rk3576-gpu-clocks.md](docs/research/rk3576-gpu-clocks.md).
 
-Other things worth knowing:
-
 - **Three clocks.** SCMI `CLK_GPU` carries the rate; `PCLK_GPU_ROOT` and CRU
-  `CLK_GPU` reach the registers BL31 programs PVTPLL through. BL31 does not
-  enable those two itself and nothing else claims the gate, so without naming
-  them in the DT the clock framework disables them as unused during boot.
+  `CLK_GPU` reach the registers BL31 programs PVTPLL through. The DT names all
+  three, which is what keeps the clock framework from gating them at boot.
 - **Runtime PM.** A rate request only reaches PVTPLL with the power domain up,
   so the clock parks at 200 MHz before suspend and the requested rate is
   reapplied on resume.
 - **Per-chip OPP set.** An OTP cell picks it: 900 MHz on the RK3576, 800 MHz on
   the S, J and M parts. Unreadable OTP falls back to a restricted table.
-- **950 MHz is dropped.** BL31's rate table has no entry for it and table 3-2
-  of the datasheet (rev 1.5) gives 900 MHz as the GPU maximum.
+- **The OPP table stops at 900 MHz**, which table 3-2 of the datasheet
+  (rev 1.5) gives as the GPU maximum.
 
 ### Benchmarks
 

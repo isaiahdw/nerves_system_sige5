@@ -27,9 +27,8 @@ Verify against the image's own size:
     iex> cmd("dd if=/dev/mmcblk0 bs=512 skip=64 count=<sectors> of=/tmp/rb.bin")
     iex> :crypto.hash(:md5, File.read!("/tmp/rb.bin")) |> Base.encode16(case: :lower)
 
-`<sectors>` is `ceil(bytes / 512)` for the file just written, and it changes
-between builds. A count carried over from a previous image reads a short buffer
-and reports a mismatch that is not real.
+`<sectors>` is `ceil(bytes / 512)` for the file just written; recompute it for
+each image.
 
 The bootloader has no A/B safety net. One copy; a bad one means maskrom.
 
@@ -44,21 +43,7 @@ Then from the host:
     rkdeveloptool rl 64 <sectors> /tmp/verify.bin    # md5 must match the source
     rkdeveloptool rd                                 # reset
 
-**`mmc dev 0` comes first.** Without it the gadget enumerates and reads work,
-but every write fails with `failed writing to device mmc: 0` on the console and
-the session then wedges — reads stop too, and `rkdeveloptool db` reports
-"Downloading bootloader failed!". The board is fine: Ctrl-C on the console
-returns the prompt, no power cycle.
-
-This route is for the bootloader only. Speed, same board and same 1.8 GB image:
-
-| transport | time |
-| --- | --- |
-| maskrom + `db` SPL loader (route 4) | 88 s |
-| rockusb gadget (this route) | did not finish in 3000 s |
-
-`rkdeveloptool ld` prints `Maskrom` for both true maskrom and a rockusb gadget,
-so the mode string does not tell you which you have. A read does.
+This route is for the bootloader only; use route 4 for a whole image.
 
 ## 3. ums + fwup
 
@@ -82,8 +67,8 @@ Write:
 `/dev/rdiskN`, not `/dev/diskN` — the raw node is minutes instead of a long
 wait. macOS offers to initialise the Linux partitions; ignore it.
 
-Without sudo, the same regions can go over rockusb by writing only the non-zero
-spans at their sector offsets. Slow, but it needs no privileges.
+Without sudo, write the same regions over rockusb, sending only the non-zero
+spans at their sector offsets.
 
 ## 4. Maskrom
 
@@ -115,16 +100,13 @@ Notes:
 - The bootloader is inside the image. `fwup.conf` packages
   `uboot/u-boot-rockchip.bin` and the `complete` task writes it at sector 64
   with everything else, so there is no separate bootloader step.
-- `db` is what makes this fast. It puts Rockchip's SPL loader in RAM and
-  everything is written through that. Without it, LBA commands on a true
-  maskrom device do nothing and reads come back empty.
+- `db` is what makes this fast: it puts Rockchip's SPL loader in RAM, and
+  everything is written through that.
 - To confirm the loader is answering before committing to a write, read a
   sector: `rkdeveloptool rl 64 1 /tmp/s.bin` shows `RKNS` if a bootloader is
   there.
 - The image is sparse — 1808 MB apparent, ~140 MB stored — and `rkdeveloptool`
-  sends the apparent size. Through the maskrom loader that costs nothing; it is
-  the reason route 2 is unusable for a whole image, not a reason this one is
-  slow.
+  sends the apparent size. Through the maskrom loader that costs nothing.
 
 ## Layout
 

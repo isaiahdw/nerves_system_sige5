@@ -1,0 +1,235 @@
+brcmfmac: refuse SDIO access a sleeping device was never going to answer
+
+With KSO off the 43752 answers for SBSDIO_FUNC1_SLEEPCSR and ignores
+everything else. brcmfmac does not know that: brcmf_sdio_dpc() discards the
+return from brcmf_sdio_bus_sleep() and reads the backplane whatever it said,
+so a wake that failed is followed by a window write and a read to a device
+that is not listening. That is where
+
+	brcmf_sdio_dpc: failed backplane access
+
+comes from - not a second fault, just the first one being acted on.
+
+Infineon fixed this in their brcmfmac by checking the bus state inside the
+register accessors rather than at the call sites:
+
+	351627364a00 ("brcmfmac: Restrict SDIO CMD52 access when bus in sleep")
+
+Doing it there is what makes it safe. Returning early from brcmf_sdio_dpc()
+instead would have to unwind whatever the pass had already claimed, and get
+the OOB interrupt re-enabled on the way out or the device never wakes again.
+An accessor that reports -EPERM changes no control flow: every one of these
+callers already has an error path, because a real SDIO transfer can fail.
+
+The four CMD52 accessors stop being macros and become functions that consult
+the bus first, with the old bodies kept as the _ext forms. brcmf_sdiod_readl
+and brcmf_sdiod_writel get the same check - they are the backplane, and the
+one the DPC actually trips over.
+
+Three things differ from the reference, because mainline is not the tree it
+was written against:
+
+  - sdiodev->bus is NULL until brcmf_sdio_probe() links the two, and again
+    once brcmf_sdio_remove() clears it. Registers are accessed in both
+    windows - chip identification runs before the bus exists - so the state
+    query returns false for a NULL bus rather than dereferencing it.
+
+  - The query also requires sr_enabled. Without save/restore the driver
+    still sets bus->sleeping, but it means the clock was stopped, which is a
+    different state that this whitelist does not describe. Reading it as KSO
+    sleep would refuse accesses on hardware that never had a KSO rule.
+
+  - bus->sleeping is now assigned as soon as the handshake succeeds instead
+    of at the end of brcmf_sdio_bus_sleep(). The clock control between those
+    two points reads and writes CHIPCLKCSR, so with the old ordering every
+    wake would have refused its own clock and the interface would never have
+    come up. A failed handshake still leaves the state alone, which is
+    exactly the case this patch exists to catch.
+
+Infineon's ignore_bus_error escape is not carried over. It exists there for
+DDR50 and bus-width paths this kernel does not have, and nothing here needs
+to bypass the rule.
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bcmsdh.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bcmsdh.c
+index 13952df..eba3a54 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bcmsdh.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bcmsdh.c
+@@ -246,6 +246,18 @@ u32 brcmf_sdiod_readl(struct brcmf_sdio_dev *sdiodev, u32 addr, int *ret)
+ 	u32 data = 0;
+ 	int retval;
+ 
++	/*
++	 * The backplane is behind the device being awake, and no address here
++	 * is one it answers for while KSO is off. brcmf_sdio_dpc() reaches
++	 * this with a failed wake behind it - that is where "failed backplane
++	 * access" comes from - so the window write below would be the first of
++	 * several transfers nothing is listening to.
++	 */
++	if (brcmf_sdio_bus_sleep_state(sdiodev->bus)) {
++		retval = -EPERM;
++		goto out;
++	}
++
+ 	retval = brcmf_sdiod_set_backplane_window(sdiodev, addr);
+ 	if (retval)
+ 		goto out;
+@@ -267,6 +279,11 @@ void brcmf_sdiod_writel(struct brcmf_sdio_dev *sdiodev, u32 addr,
+ {
+ 	int retval;
+ 
++	if (brcmf_sdio_bus_sleep_state(sdiodev->bus)) {
++		retval = -EPERM;
++		goto out;
++	}
++
+ 	retval = brcmf_sdiod_set_backplane_window(sdiodev, addr);
+ 	if (retval)
+ 		goto out;
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
+index c7cdb2b..1234a5a 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
+@@ -673,6 +673,82 @@ static const struct brcmf_firmware_mapping brcmf_sdio_fwnames[] = {
+ 
+ #define TXCTL_CREDITS	2
+ 
++/*
++ * Whether the device is parked with KSO off.
++ *
++ * Only meaningful when save/restore is in use: without it "sleeping" means the
++ * clock has been stopped, which is a different state with different rules, and
++ * the KSO whitelist below does not describe it.
++ *
++ * bus is NULL until brcmf_sdio_probe() links it and again after
++ * brcmf_sdio_remove() clears it, and registers are accessed in both windows.
++ */
++bool brcmf_sdio_bus_sleep_state(struct brcmf_sdio *bus)
++{
++	return bus && bus->sr_enabled && bus->sleeping;
++}
++
++/*
++ * With KSO off the device answers for one register and ignores the rest, so a
++ * transfer to anything else is not a read that might fail - it is a request
++ * the bus was never going to serve. Refusing it locally is both faster and
++ * quieter than letting the controller time out.
++ */
++static inline bool brcmf_sdio_bus_access_allowed(u32 addr)
++{
++	return addr == SBSDIO_FUNC1_SLEEPCSR;
++}
++
++u8 brcmf_sdiod_readb(struct brcmf_sdio_dev *sdiodev, u32 addr, int *ret)
++{
++	if (!brcmf_sdio_bus_sleep_state(sdiodev->bus) ||
++	    brcmf_sdio_bus_access_allowed(addr))
++		return brcmf_sdiod_readb_ext(sdiodev, addr, ret);
++
++	brcmf_dbg(SDIO, "refused read of 0x%x with the bus asleep\n", addr);
++	if (ret)
++		*ret = -EPERM;
++	return 0xff;
++}
++
++void brcmf_sdiod_writeb(struct brcmf_sdio_dev *sdiodev, u32 addr, u32 data,
++			int *ret)
++{
++	if (!brcmf_sdio_bus_sleep_state(sdiodev->bus) ||
++	    brcmf_sdio_bus_access_allowed(addr)) {
++		brcmf_sdiod_writeb_ext(sdiodev, addr, data, ret);
++		return;
++	}
++
++	brcmf_dbg(SDIO, "refused write of 0x%x with the bus asleep\n", addr);
++	if (ret)
++		*ret = -EPERM;
++}
++
++u8 brcmf_sdiod_func0_rb(struct brcmf_sdio_dev *sdiodev, u32 addr, int *ret)
++{
++	if (!brcmf_sdio_bus_sleep_state(sdiodev->bus))
++		return brcmf_sdiod_func0_rb_ext(sdiodev, addr, ret);
++
++	brcmf_dbg(SDIO, "refused f0 read of 0x%x with the bus asleep\n", addr);
++	if (ret)
++		*ret = -EPERM;
++	return 0xff;
++}
++
++void brcmf_sdiod_func0_wb(struct brcmf_sdio_dev *sdiodev, u32 addr, u32 data,
++			  int *ret)
++{
++	if (!brcmf_sdio_bus_sleep_state(sdiodev->bus)) {
++		brcmf_sdiod_func0_wb_ext(sdiodev, addr, data, ret);
++		return;
++	}
++
++	brcmf_dbg(SDIO, "refused f0 write of 0x%x with the bus asleep\n", addr);
++	if (ret)
++		*ret = -EPERM;
++}
++
+ static void pkt_align(struct sk_buff *p, int len, int align)
+ {
+ 	uint datalign;
+@@ -1033,6 +1109,19 @@ brcmf_sdio_bus_sleep(struct brcmf_sdio *bus, bool sleep, bool pendok)
+ 				  err);
+ 			goto done;
+ 		}
++
++		/*
++		 * The handshake is what makes the state true, so record it
++		 * here rather than at the end. The clock control below reads
++		 * and writes CHIPCLKCSR, which is not a register the device
++		 * answers for while KSO is off: leaving the state set until
++		 * afterwards would have every wake refuse its own clock.
++		 *
++		 * A failed handshake takes the goto above and leaves the state
++		 * alone, which is the point - the device did not wake, so the
++		 * accesses that follow are the ones worth refusing.
++		 */
++		bus->sleeping = sleep;
+ 	}
+ 
+ end:
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.h b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.h
+index 80180d5..8089920 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.h
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.h
+@@ -289,20 +289,32 @@ int brcmf_sdiod_intr_register(struct brcmf_sdio_dev *sdiodev);
+ void brcmf_sdiod_intr_unregister(struct brcmf_sdio_dev *sdiodev);
+ 
+ /* SDIO device register access interface */
++/*
++ * The _ext forms issue the transfer. Everything outside this header calls the
++ * wrappers below instead, which refuse an access the device is not listening
++ * for - see brcmf_sdio_bus_access_allowed() in sdio.c.
++ */
+ /* Accessors for SDIO Function 0 */
+-#define brcmf_sdiod_func0_rb(sdiodev, addr, r) \
++#define brcmf_sdiod_func0_rb_ext(sdiodev, addr, r) \
+ 	sdio_f0_readb((sdiodev)->func1, (addr), (r))
+ 
+-#define brcmf_sdiod_func0_wb(sdiodev, addr, v, ret) \
++#define brcmf_sdiod_func0_wb_ext(sdiodev, addr, v, ret) \
+ 	sdio_f0_writeb((sdiodev)->func1, (v), (addr), (ret))
+ 
+ /* Accessors for SDIO Function 1 */
+-#define brcmf_sdiod_readb(sdiodev, addr, r) \
++#define brcmf_sdiod_readb_ext(sdiodev, addr, r) \
+ 	sdio_readb((sdiodev)->func1, (addr), (r))
+ 
+-#define brcmf_sdiod_writeb(sdiodev, addr, v, ret) \
++#define brcmf_sdiod_writeb_ext(sdiodev, addr, v, ret) \
+ 	sdio_writeb((sdiodev)->func1, (v), (addr), (ret))
+ 
++bool brcmf_sdio_bus_sleep_state(struct brcmf_sdio *bus);
++u8 brcmf_sdiod_func0_rb(struct brcmf_sdio_dev *sdiodev, u32 addr, int *ret);
++void brcmf_sdiod_func0_wb(struct brcmf_sdio_dev *sdiodev, u32 addr, u32 data,
++			  int *ret);
++u8 brcmf_sdiod_readb(struct brcmf_sdio_dev *sdiodev, u32 addr, int *ret);
++void brcmf_sdiod_writeb(struct brcmf_sdio_dev *sdiodev, u32 addr, u32 data,
++			int *ret);
+ u32 brcmf_sdiod_readl(struct brcmf_sdio_dev *sdiodev, u32 addr, int *ret);
+ void brcmf_sdiod_writel(struct brcmf_sdio_dev *sdiodev, u32 addr, u32 data,
+ 			int *ret);

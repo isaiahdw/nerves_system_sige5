@@ -127,6 +127,25 @@ BL31 (TF-A)  ── loads ──▶  BL32 (OP-TEE)
 SECURE_WORLD=1 ./scripts/build-uboot.sh
 ```
 
+That needs a TA signing key, which the build refuses to run without:
+
+```sh
+mkdir -p ~/.config/nerves_system_sige5
+openssl genrsa -out ~/.config/nerves_system_sige5/ta-sign.pem 2048
+chmod 600 ~/.config/nerves_system_sige5/ta-sign.pem
+```
+
+OP-TEE embeds the public half and loads only trusted applications signed by
+the private half. Its own default key is published in their repository, so
+building with that would let anyone sign a TA carrying the PKCS#11 UUID — and
+because a TA's secure-storage key is derived from the HUK and its UUID, that
+TA reads the device key. The key is separate from secure boot: secure boot
+decides what firmware may run, this decides what the secure world will load.
+
+Keep it, and keep it off devices. A rebuilt core will not load TAs signed with
+a different key, so losing it means reflashing every device with a matched
+pair.
+
 That writes `uboot/u-boot-rockchip.bin` — the file fwup packages — so rebuild
 the system, build firmware, and flash normally. There is no second bootloader
 and nothing to swap in at flash time.

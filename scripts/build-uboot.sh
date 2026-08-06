@@ -65,6 +65,15 @@ TFA_GIT="https://github.com/ARM-software/arm-trusted-firmware.git"
 # rebuilt byte for byte is not much use for working out what is on a board.
 TFA_COMMIT="9ad327a8d124ce82002614c23e33992d4de6f7cf"
 
+# The key OP-TEE embeds to decide which trusted applications it will load.
+# It must not live in this repository: whoever holds the private half can sign
+# a TA carrying the PKCS#11 UUID, and OP-TEE derives a TA's secure-storage key
+# from the HUK and that UUID - so such a TA reads the real one's stored objects,
+# the device key included. OP-TEE's built-in default key is published in their
+# repository, which is why it cannot be used here.
+TA_KEY="${TA_KEY:-$HOME/.config/nerves_system_sige5/ta-sign.pem}"
+PKCS11_UUID="fd02c9da-306c-48c7-a49c-bbd827ae86ee"
+
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 OUT_BIN="$REPO_DIR/uboot/u-boot-rockchip.bin"
@@ -81,8 +90,32 @@ trap 'rm -f "$BUILD_STAMP"' EXIT
 # unexplainable.
 BUILD_IMAGE="debian:bookworm@sha256:813017f3d62be4b5891a7acca6a01bdcd4b8513daa81b1ab99d3a50385b26931"
 
+if [ "${SECURE_WORLD:-0}" = 1 ] && [ ! -f "$TA_KEY" ]; then
+    cat >&2 <<MISSING_KEY
+BUILD REFUSED: no TA signing key at $TA_KEY
+
+A secure world needs its own key for signing trusted applications. Without one
+OP-TEE embeds its published development key, and anyone can then sign a TA that
+reads this device's stored keys.
+
+Make one, keep it off devices and out of this repository:
+
+    mkdir -p "\$(dirname "$TA_KEY")"
+    openssl genrsa -out "$TA_KEY" 2048
+    chmod 600 "$TA_KEY"
+
+Back it up. Losing it means a rebuilt core will not load the TAs already
+deployed, and every device has to be reflashed with a matched pair.
+MISSING_KEY
+    exit 1
+fi
+
+TA_KEY_MOUNT=""
+[ -f "$TA_KEY" ] && TA_KEY_MOUNT="-v $TA_KEY:/ta-sign.pem:ro"
+
 docker run --rm -i -v "$REPO_DIR/uboot":/out -v "$REPO_DIR/optee":/optee-patches \
-    "$BUILD_IMAGE" bash -s <<CONTAINER_SCRIPT
+    -v "$REPO_DIR/rootfs_overlay":/overlay \
+    $TA_KEY_MOUNT "$BUILD_IMAGE" bash -s <<CONTAINER_SCRIPT
 set -e
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git make gcc \
@@ -102,10 +135,14 @@ if [ '${SECURE_WORLD:-0}' = 1 ]; then
     git clone --filter=blob:none $OPTEE_GIT /optee_os
     git -C /optee_os checkout $OPTEE_COMMIT
     git -C /optee_os apply /optee-patches/*.patch
+    # TA_SIGN_KEY does both halves: the public key is embedded in the core, and
+    # the trusted applications built here are signed with the private one. The
+    # key is mounted read-only and never enters the image.
     make -C /optee_os PLATFORM=rockchip-rk3576 \
         CROSS_COMPILE64=aarch64-linux-gnu- \
         CFG_USER_TA_TARGETS=ta_arm64 \
         CFG_PKCS11_TA=y \
+        TA_SIGN_KEY=/ta-sign.pem \
         CFG_RK3576_HUK_DRY_RUN=$([ "${SECURE_WORLD_DEBUG:-0}" = 1 ] && echo y || echo n) \
         CFG_RK3576_TRNG_S_PROBE=$([ "${SECURE_WORLD_DEBUG:-0}" = 1 ] && echo y || echo n) \
         CFG_RK3576_PERSIST_HUK=y \
@@ -152,11 +189,15 @@ make -j\$(nproc) CROSS_COMPILE=aarch64-linux-gnu-
 if [ '${SECURE_WORLD:-0}' = 1 ]; then
     cp u-boot-rockchip.bin /out/u-boot-rockchip.bin
     # The PKCS#11 TA is a filesystem TA, not an early one: OP-TEE loads it
-    # through tee-supplicant from /lib/optee_armtz. It is signed with the key
-    # the core was built with - ours - so it will be trusted. Export it so the
-    # rootfs can install it.
-    mkdir -p /out/optee-ta
+    # through tee-supplicant from /lib/optee_armtz, and verifies its signature
+    # against the key embedded in the core. Install the TA this core was built
+    # with, so the two always match - a core and a TA from different builds
+    # cannot load each other.
+    mkdir -p /out/optee-ta /overlay/lib/optee_armtz
     cp /optee_os/out/arm-plat-rockchip/export-ta_arm64/ta/*.ta /out/optee-ta/
+    # Only the one that is used. The others OP-TEE builds are its own examples
+    # and test applications, and an image is not the place for them.
+    cp /out/optee-ta/$PKCS11_UUID.ta /overlay/lib/optee_armtz/
 else
     cp u-boot-rockchip.bin /out/
 fi
@@ -193,6 +234,29 @@ fi
 if [ "${SECURE_WORLD:-0}" = 1 ] && ! grep -qa "HUK burn" "$OUT_BIN"; then
     echo "BUILD FAILED: secure world built without the HUK provisioning path" >&2
     exit 1
+fi
+
+# A core and a TA from different builds cannot load each other, and the failure
+# only shows up on the device as a TA that will not start. Check the pair here.
+TA_DIR="$REPO_DIR/rootfs_overlay/lib/optee_armtz"
+PKCS11_TA="$TA_DIR/fd02c9da-306c-48c7-a49c-bbd827ae86ee.ta"
+
+if [ "${SECURE_WORLD:-0}" = 1 ]; then
+    if [ ! -f "$PKCS11_TA" ]; then
+        echo "BUILD FAILED: the PKCS#11 TA was not installed into the image" >&2
+        exit 1
+    fi
+    if [ ! "$PKCS11_TA" -nt "$BUILD_STAMP" ]; then
+        echo "BUILD FAILED: $PKCS11_TA is left over from an earlier build." >&2
+        echo "  It was signed with a different key than this core embeds and" >&2
+        echo "  will not load." >&2
+        exit 1
+    fi
+elif [ -f "$PKCS11_TA" ]; then
+    # A plain build leaves no secure world to load it, and keeping it invites
+    # pairing it with a core it was not built for.
+    rm -f "$PKCS11_TA"
+    rmdir "$TA_DIR" 2>/dev/null || true
 fi
 
 VARIANT_FILE="$REPO_DIR/uboot/u-boot-rockchip.variant"

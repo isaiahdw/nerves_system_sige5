@@ -10,12 +10,17 @@
  * the caller needs it - see the serve command.
  *
  * Commands, all writing to stdout:
- *   info                       tokens, and whether each is initialised
- *   init <label> <so> <pin>    initialise a token and set its user PIN
- *   generate <label> <pin> <k> generate an EC P-256 keypair as token objects
- *   pubkey <label> <pin> <k>   the public key, DER SubjectPublicKeyInfo, hex
- *   sign <label> <pin> <k> <digest>  sign a hex digest, DER ECDSA, hex
- *   serve <label> <pin> <k>          answer commands on stdin until EOF
+ *   info                    tokens, and whether each is initialised
+ *   init <label>            initialise a token and set its user PIN
+ *   generate <label> <k>    generate an EC P-256 keypair as token objects
+ *   pubkey <label> <k>      the public key, DER SubjectPublicKeyInfo, hex
+ *   sign <label> <k> <digest>  sign a hex digest, DER ECDSA, hex
+ *   serve <label> <k>          answer commands on stdin until EOF
+ *
+ * PINs come from the environment - OPTEE_KEY_PIN, and OPTEE_KEY_SO_PIN for
+ * init - not from the command line. /proc/<pid>/cmdline is readable by every
+ * process on the system, and serve holds its arguments there for as long as
+ * it runs; /proc/<pid>/environ is readable only by the process's own user.
  *
  * Hex in and out so the caller does not have to care about binary framing.
  *
@@ -546,17 +551,39 @@ static void usage(const char *me)
 {
 	fprintf(stderr,
 		"usage: %s info\n"
-		"       %s init     <token> <so-pin> <pin>\n"
-		"       %s reinit   <token> <so-pin> <pin>   # destroys every key\n"
-		"       %s generate <token> <pin> <key-label>\n"
-		"       %s pubkey   <token> <pin> <key-label>\n"
-		"       %s sign     <token> <pin> <key-label> <hex-digest>\n"
-		"       %s serve    <token> <pin> <key-label>\n",
+		"       %s init     <token>\n"
+		"       %s reinit   <token>              # destroys every key\n"
+		"       %s generate <token> <key-label>\n"
+		"       %s pubkey   <token> <key-label>\n"
+		"       %s sign     <token> <key-label> <hex-digest>\n"
+		"       %s serve    <token> <key-label>\n"
+		"\n"
+		"PINs come from the environment, never the command line:\n"
+		"  OPTEE_KEY_PIN     the user PIN, for every command but info\n"
+		"  OPTEE_KEY_SO_PIN  the security officer PIN, for init and reinit\n",
 		me, me, me, me, me, me, me);
+}
+
+/*
+ * An empty PIN is not a PIN.  getenv() returning "" would otherwise reach
+ * C_Login as a zero-length credential, which some tokens accept.
+ */
+static const char *pin_from_env(const char *name)
+{
+	const char *v = getenv(name);
+
+	if (!v || !*v) {
+		fprintf(stderr, "%s is not set\n", name);
+		return NULL;
+	}
+
+	return v;
 }
 
 int main(int argc, char **argv)
 {
+	const char *pin = NULL;
+	const char *so_pin = NULL;
 	int rc;
 
 	if (argc < 2) {
@@ -564,23 +591,36 @@ int main(int argc, char **argv)
 		return 2;
 	}
 
+	/* info is the one command that opens no session. */
+	if (strcmp(argv[1], "info")) {
+		pin = pin_from_env("OPTEE_KEY_PIN");
+		if (!pin)
+			return 2;
+	}
+
+	if (!strcmp(argv[1], "init") || !strcmp(argv[1], "reinit")) {
+		so_pin = pin_from_env("OPTEE_KEY_SO_PIN");
+		if (!so_pin)
+			return 2;
+	}
+
 	CHECK(C_GetFunctionList(&fn), "C_GetFunctionList");
 	CHECK(fn->C_Initialize(NULL), "C_Initialize");
 
 	if (!strcmp(argv[1], "info") && argc == 2)
 		rc = cmd_info();
-	else if (!strcmp(argv[1], "init") && argc == 5)
-		rc = cmd_init(argv[2], argv[3], argv[4], 0);
-	else if (!strcmp(argv[1], "reinit") && argc == 5)
-		rc = cmd_init(argv[2], argv[3], argv[4], 1);
-	else if (!strcmp(argv[1], "generate") && argc == 5)
-		rc = cmd_generate(argv[2], argv[3], argv[4]);
-	else if (!strcmp(argv[1], "pubkey") && argc == 5)
-		rc = cmd_pubkey(argv[2], argv[3], argv[4]);
-	else if (!strcmp(argv[1], "sign") && argc == 6)
-		rc = cmd_sign(argv[2], argv[3], argv[4], argv[5]);
-	else if (!strcmp(argv[1], "serve") && argc == 5)
-		rc = cmd_serve(argv[2], argv[3], argv[4]);
+	else if (!strcmp(argv[1], "init") && argc == 3)
+		rc = cmd_init(argv[2], so_pin, pin, 0);
+	else if (!strcmp(argv[1], "reinit") && argc == 3)
+		rc = cmd_init(argv[2], so_pin, pin, 1);
+	else if (!strcmp(argv[1], "generate") && argc == 4)
+		rc = cmd_generate(argv[2], pin, argv[3]);
+	else if (!strcmp(argv[1], "pubkey") && argc == 4)
+		rc = cmd_pubkey(argv[2], pin, argv[3]);
+	else if (!strcmp(argv[1], "sign") && argc == 5)
+		rc = cmd_sign(argv[2], pin, argv[3], argv[4]);
+	else if (!strcmp(argv[1], "serve") && argc == 4)
+		rc = cmd_serve(argv[2], pin, argv[3]);
 	else {
 		usage(argv[0]);
 		rc = 2;

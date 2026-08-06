@@ -108,15 +108,10 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  	clk_disable(pc->clk);
  	clk_disable(pc->pclk);
-@@ -185,8 +220,76 @@
- 	writel_relaxed(val, pc->base + pc->data->regs.ctrl);
+@@ -190,6 +225,77 @@
+ 	return 0;
+ }
  
- 	if (!enable)
-+		clk_disable(pc->clk);
-+
-+	return 0;
-+}
-+
 +/*
 + * v4 wants the channel enabled before its parameters are written, and the
 + * update bit last: programming a disabled channel and enabling afterwards
@@ -141,18 +136,21 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +		if (!curstate.enabled)
 +			return 0;
 +
-+		writel(PWM_V4_EN(false) | PWM_V4_CLK_EN(false),
-+		       pc->base + pc->data->regs.enable);
-+
 +		/*
 +		 * Disabling takes effect at the end of the current period, so
-+		 * the clock has to outlive it.
++		 * the clock has to outlive it - gate it in the same write and
++		 * the output freezes wherever it happened to be. Drop EN,
++		 * wait out the period, then gate.
 +		 */
++		writel(PWM_V4_EN(false), pc->base + pc->data->regs.enable);
++
 +		fsleep(DIV_ROUND_UP_ULL(curstate.period, NSEC_PER_USEC));
- 		clk_disable(pc->clk);
++
++		writel(PWM_V4_CLK_EN(false), pc->base + pc->data->regs.enable);
++		clk_disable(pc->clk);
 +		return 0;
 +	}
- 
++
 +	if (!curstate.enabled) {
 +		ret = clk_enable(pc->clk);
 +		if (ret)
@@ -182,10 +180,13 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	/* nothing above takes effect until this is written */
 +	writel(PWM_V4_CTRL_UPDATE(true), pc->base + pc->data->regs.enable);
 +
- 	return 0;
- }
- 
-@@ -206,6 +309,11 @@
++	return 0;
++}
++
+ static int rockchip_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
+ 			      const struct pwm_state *state)
+ {
+@@ -206,6 +312,11 @@
  	if (ret)
  		return ret;
  
@@ -197,7 +198,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	pwm_get_state(pwm, &curstate);
  	enabled = curstate.enabled;
  
-@@ -291,11 +399,26 @@
+@@ -291,11 +402,26 @@
  		       PWM_CONTINUOUS,
  };
  
@@ -224,7 +225,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	{ /* sentinel */ }
  };
  MODULE_DEVICE_TABLE(of, rockchip_pwm_dt_ids);
-@@ -304,7 +427,7 @@
+@@ -304,7 +430,7 @@
  {
  	struct pwm_chip *chip;
  	struct rockchip_pwm_chip *pc;
@@ -233,7 +234,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	bool enabled;
  	int ret, count;
  
-@@ -351,8 +474,11 @@
+@@ -351,8 +477,11 @@
  	chip->ops = &rockchip_pwm_ops;
  
  	enable_conf = pc->data->enable_conf;

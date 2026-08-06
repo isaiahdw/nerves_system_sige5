@@ -20,6 +20,16 @@ the bootloader left the channel running, for the same reason: on v4 the
 control register holds the mode there, and mode 3 does not exist, so the old
 read would call a running channel idle and gate its clock.
 
+This extends pwm-rockchip rather than following the structure Collabora's
+posting for this block uses, where an MFD parent owns the register range and
+the PWM output, capture, counter, IR and wave generator become children. That
+shape is the right one for the whole block; this system uses the output and
+nothing else, and the driver already carries three generations behind one
+compatible-selected data table, so a fourth entry is a smaller change than a
+new subsystem layout. Anyone tracking the block upstream should expect the
+binding here - rockchip,rk3576-pwm on the channel - to be replaced by the MFD
+form rather than extended into it.
+
 Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/drivers/pwm/pwm-rockchip.c

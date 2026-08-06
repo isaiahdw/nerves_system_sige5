@@ -110,8 +110,20 @@ MISSING_KEY
     exit 1
 fi
 
+# Only the public half goes into the container. The container installs
+# packages, clones repositories and runs their build systems, all with the
+# network up; a private key mounted there is readable by every one of them,
+# and read-only stops modification, not exfiltration. OP-TEE builds against
+# TA_PUBLIC_KEY and emits a digest, which is signed out here and stitched back.
+TA_PUBKEY=""
+if [ "${SECURE_WORLD:-0}" = 1 ]; then
+    TA_PUBKEY="$(mktemp -t ta-pub.XXXXXX)"
+    trap 'rm -f "$TA_PUBKEY"' EXIT
+    openssl rsa -in "$TA_KEY" -pubout -out "$TA_PUBKEY" 2>/dev/null
+fi
+
 TA_KEY_MOUNT=""
-[ -f "$TA_KEY" ] && TA_KEY_MOUNT="-v $TA_KEY:/ta-sign.pem:ro"
+[ -n "$TA_PUBKEY" ] && TA_KEY_MOUNT="-v $TA_PUBKEY:/ta-public.pem:ro"
 
 docker run --rm -i -v "$REPO_DIR/uboot":/out -v "$REPO_DIR/optee":/optee-patches \
     -v "$REPO_DIR/rootfs_overlay":/overlay \
@@ -135,14 +147,14 @@ if [ '${SECURE_WORLD:-0}' = 1 ]; then
     git clone --filter=blob:none $OPTEE_GIT /optee_os
     git -C /optee_os checkout $OPTEE_COMMIT
     git -C /optee_os apply /optee-patches/*.patch
-    # TA_SIGN_KEY does both halves: the public key is embedded in the core, and
-    # the trusted applications built here are signed with the private one. The
-    # key is mounted read-only and never enters the image.
+    # TA_PUBLIC_KEY is what the core embeds and checks against. The private
+    # half is not here, so the TA it builds carries a placeholder signature
+    # and is re-signed outside this container.
     make -C /optee_os PLATFORM=rockchip-rk3576 \
         CROSS_COMPILE64=aarch64-linux-gnu- \
         CFG_USER_TA_TARGETS=ta_arm64 \
         CFG_PKCS11_TA=y \
-        TA_SIGN_KEY=/ta-sign.pem \
+        TA_PUBLIC_KEY=/ta-public.pem \
         CFG_RK3576_HUK_DRY_RUN=$([ "${SECURE_WORLD_DEBUG:-0}" = 1 ] && echo y || echo n) \
         CFG_RK3576_TRNG_S_PROBE=$([ "${SECURE_WORLD_DEBUG:-0}" = 1 ] && echo y || echo n) \
         CFG_RK3576_PERSIST_HUK=y \
@@ -195,9 +207,19 @@ if [ '${SECURE_WORLD:-0}' = 1 ]; then
     # cannot load each other.
     mkdir -p /out/optee-ta /overlay/lib/optee_armtz
     cp /optee_os/out/arm-plat-rockchip/export-ta_arm64/ta/*.ta /out/optee-ta/
-    # Only the one that is used. The others OP-TEE builds are its own examples
-    # and test applications, and an image is not the place for them.
-    cp /out/optee-ta/$PKCS11_UUID.ta /overlay/lib/optee_armtz/
+    # Everything the signing step outside needs: the unsigned TA and the
+    # script that produces and stitches its digest. The stripped ELF is in the
+    # TA's own build directory rather than the export tree, so find it - and
+    # fail here if it is missing, because signing cannot proceed without it.
+    cp /optee_os/scripts/sign_encrypt.py /out/optee-ta/
+    STRIPPED=\$(find /optee_os/out -name "$PKCS11_UUID.stripped.elf" | head -1)
+    if [ -z "\$STRIPPED" ]; then
+        echo "the PKCS#11 TA's stripped ELF was not built" >&2
+        exit 1
+    fi
+    cp "\$STRIPPED" /out/optee-ta/
+    # The signed copy is installed outside, once the private key has been
+    # applied to it.
 else
     cp u-boot-rockchip.bin /out/
 fi
@@ -234,6 +256,52 @@ fi
 if [ "${SECURE_WORLD:-0}" = 1 ] && ! grep -qa "HUK burn" "$OUT_BIN"; then
     echo "BUILD FAILED: secure world built without the HUK provisioning path" >&2
     exit 1
+fi
+
+# Sign the TA out here, where the private key is. The container built it
+# against the public half and left a placeholder signature; this replaces that
+# with a real one. No network, no build system, nothing but openssl and
+# OP-TEE's own stitching script.
+if [ "${SECURE_WORLD:-0}" = 1 ]; then
+    TA_WORK="$REPO_DIR/uboot/optee-ta"
+    UNSIGNED="$TA_WORK/$PKCS11_UUID.stripped.elf"
+    SIGNER="$TA_WORK/sign_encrypt.py"
+
+    if [ ! -f "$UNSIGNED" ] || [ ! -f "$SIGNER" ]; then
+        echo "BUILD FAILED: the container did not export what signing needs" >&2
+        exit 1
+    fi
+
+    # OP-TEE's signing script needs python cryptography. Keep it in a venv of
+    # its own rather than the build container: the point of signing out here
+    # is that the private key is read by this script and nothing else.
+    VENV="$HOME/.config/nerves_system_sige5/signing-venv"
+    if [ ! -x "$VENV/bin/python3" ]; then
+        echo "=== creating a signing venv in $VENV"
+        python3 -m venv "$VENV"
+        "$VENV/bin/pip" install -q cryptography || {
+            echo "BUILD FAILED: could not install cryptography for signing" >&2
+            exit 1
+        }
+    fi
+    PY="$VENV/bin/python3"
+
+    "$PY" "$SIGNER" digest --uuid "$PKCS11_UUID" \
+        --in "$UNSIGNED" --key "$TA_PUBKEY" --dig "$TA_WORK/digest" >/dev/null
+
+    base64 -d < "$TA_WORK/digest" > "$TA_WORK/digest.bin"
+    openssl pkeyutl -sign -inkey "$TA_KEY" -in "$TA_WORK/digest.bin" \
+        -pkeyopt digest:sha256 \
+        -pkeyopt rsa_padding_mode:pss -pkeyopt rsa_pss_saltlen:digest \
+        -out "$TA_WORK/sig.bin"
+    base64 < "$TA_WORK/sig.bin" > "$TA_WORK/sig"
+
+    "$PY" "$SIGNER" stitch --uuid "$PKCS11_UUID" \
+        --in "$UNSIGNED" --key "$TA_PUBKEY" --sig "$TA_WORK/sig" \
+        --out "$REPO_DIR/rootfs_overlay/lib/optee_armtz/$PKCS11_UUID.ta" >/dev/null
+
+    rm -f "$TA_WORK/digest" "$TA_WORK/digest.bin" "$TA_WORK/sig" "$TA_WORK/sig.bin"
+    echo "=== signed the PKCS#11 TA outside the build container"
 fi
 
 # A core and a TA from different builds cannot load each other, and the failure

@@ -146,6 +146,14 @@ Keep it, and keep it off devices. A rebuilt core will not load TAs signed with
 a different key, so losing it means reflashing every device with a matched
 pair.
 
+Only the public half goes into the build container. That container installs
+packages, clones repositories and runs their build systems with the network
+up, so a private key mounted there is readable by all of it. OP-TEE builds
+against `TA_PUBLIC_KEY`, and the trusted application is signed afterwards, on
+this machine, by a step that runs nothing but openssl and OP-TEE's stitching
+script. For a fleet the same split is what lets the private half live in an
+HSM.
+
 That writes `uboot/u-boot-rockchip.bin` — the file fwup packages — so rebuild
 the system, build firmware, and flash normally. There is no second bootloader
 and nothing to swap in at flash time.

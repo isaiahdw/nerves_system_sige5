@@ -7,6 +7,7 @@ trust.
 | note | what it covers |
 | --- | --- |
 | [rk3576-secure-world.md](rk3576-secure-world.md) | The secure address map, what the secure OTP holds, the HUK and how one is fused, the secure TRNG, and RPMB. |
+| [rk3576-npu.md](rk3576-npu.md) | Governor behaviour and the `dvfs_*` knobs, and where the mainline NPU stack differs from the 6.1 vendor BSP. |
 | [rk3576-gpu-clocks.md](rk3576-gpu-clocks.md) | How the GPU's PVTPLL clock works, what each OPP actually delivers, and the device-tree decisions that follow. |
 | [rk3576-vendor-opp-tables.md](rk3576-vendor-opp-tables.md) | The vendor BSP's OPP tables and voltage grades, decoded. |
 | [rk3576-bsp-gpu-clock-path.md](rk3576-bsp-gpu-clock-path.md) | How the vendor BSP reaches the GPU clock, for comparison with the mainline SCMI path. |

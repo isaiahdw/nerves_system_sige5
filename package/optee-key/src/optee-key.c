@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <pkcs11.h>
 
 #define MAX_SLOTS 16
@@ -79,6 +80,10 @@ static int get_hex(const char *in, unsigned char *out, size_t max, size_t *len)
 
 	if (n % 2 || n / 2 > max)
 		return -1;
+
+	for (size_t i = 0; i < n; i++)
+		if (!isxdigit((unsigned char)in[i]))
+			return -1;
 
 	for (size_t i = 0; i < n; i += 2) {
 		unsigned int byte;
@@ -153,8 +158,8 @@ static int session_for(const char *label, const char *pin,
 	return 0;
 }
 
-static int find_object(CK_SESSION_HANDLE session, CK_OBJECT_CLASS class,
-		       const char *label, CK_OBJECT_HANDLE *out)
+static int find_object_quiet(CK_SESSION_HANDLE session, CK_OBJECT_CLASS class,
+			     const char *label, CK_OBJECT_HANDLE *out)
 {
 	CK_ULONG found = 0;
 	CK_ATTRIBUTE search[] = {
@@ -166,7 +171,13 @@ static int find_object(CK_SESSION_HANDLE session, CK_OBJECT_CLASS class,
 	CHECK(fn->C_FindObjects(session, out, 1, &found), "C_FindObjects");
 	CHECK(fn->C_FindObjectsFinal(session), "C_FindObjectsFinal");
 
-	if (!found) {
+	return found ? 0 : 1;
+}
+
+static int find_object(CK_SESSION_HANDLE session, CK_OBJECT_CLASS class,
+		       const char *label, CK_OBJECT_HANDLE *out)
+{
+	if (find_object_quiet(session, class, label, out)) {
 		fprintf(stderr, "no object labelled \"%s\"\n", label);
 		return 1;
 	}
@@ -196,14 +207,35 @@ static int cmd_info(void)
 	return 0;
 }
 
-static int cmd_init(const char *label, const char *so_pin, const char *pin)
+static int cmd_init(const char *label, const char *so_pin, const char *pin,
+		    int reinit)
 {
 	CK_SLOT_ID slot;
 	CK_SESSION_HANDLE session = 0;
+	CK_TOKEN_INFO info;
 	CK_UTF8CHAR padded[32];
+
+	/*
+	 * C_InitToken destroys every object the token holds. On a provisioned
+	 * device that is the device key and its certificate, so an accidental
+	 * re-run must not be able to do it.
+	 */
+	if (strlen(label) > 32) {
+		fprintf(stderr, "label is longer than the 32 bytes a token holds\n");
+		return 1;
+	}
 
 	if (find_token(label, 1, &slot)) {
 		fprintf(stderr, "no free token to initialise\n");
+		return 1;
+	}
+
+	if (fn->C_GetTokenInfo(slot, &info) == CKR_OK &&
+	    (info.flags & CKF_TOKEN_INITIALIZED) && !reinit) {
+		fprintf(stderr,
+			"token \"%s\" is already initialised; refusing.\n"
+			"Initialising destroys every key it holds. Pass reinit "
+			"instead if that is what you want.\n", label);
 		return 1;
 	}
 
@@ -230,8 +262,17 @@ static int cmd_generate(const char *label, const char *pin, const char *key)
 {
 	CK_SESSION_HANDLE session = 0;
 	CK_OBJECT_HANDLE pub = 0, priv = 0;
+	CK_OBJECT_HANDLE existing = 0;
 	CK_MECHANISM mech = { CKM_EC_KEY_PAIR_GEN, NULL, 0 };
 	CK_BBOOL yes = CK_TRUE, no = CK_FALSE;
+	/*
+	 * The two halves are found by label, so a second pair under the same
+	 * label makes "the public key" and "the private key" ambiguous - and
+	 * a certificate issued for one would be verified against the other.
+	 * A shared CKA_ID ties this pair together; refusing a duplicate keeps
+	 * the label unambiguous in the first place.
+	 */
+	CK_BYTE id[16];
 	int rc;
 
 	CK_ATTRIBUTE pub_tmpl[] = {
@@ -239,6 +280,7 @@ static int cmd_generate(const char *label, const char *pin, const char *key)
 		{ CKA_TOKEN, &yes, sizeof(yes) },
 		{ CKA_VERIFY, &yes, sizeof(yes) },
 		{ CKA_LABEL, (void *)key, strlen(key) },
+		{ CKA_ID, id, sizeof(id) },
 	};
 	CK_ATTRIBUTE priv_tmpl[] = {
 		{ CKA_TOKEN, &yes, sizeof(yes) },
@@ -248,13 +290,24 @@ static int cmd_generate(const char *label, const char *pin, const char *key)
 		/* the point of all this: no path back out of the TA */
 		{ CKA_EXTRACTABLE, &no, sizeof(no) },
 		{ CKA_LABEL, (void *)key, strlen(key) },
+		{ CKA_ID, id, sizeof(id) },
 	};
 
 	rc = session_for(label, pin, &session);
 	if (rc)
 		return rc;
 
-	CHECK(fn->C_GenerateKeyPair(session, &mech, pub_tmpl, 4, priv_tmpl, 6,
+	if (!find_object_quiet(session, CKO_PRIVATE_KEY, key, &existing)) {
+		fprintf(stderr,
+			"a private key labelled \"%s\" already exists.\n"
+			"Generating another would leave two under one label and "
+			"no way to tell which a certificate belongs to.\n", key);
+		return 1;
+	}
+
+	CHECK(fn->C_GenerateRandom(session, id, sizeof(id)), "C_GenerateRandom");
+
+	CHECK(fn->C_GenerateKeyPair(session, &mech, pub_tmpl, 5, priv_tmpl, 7,
 				    &pub, &priv), "C_GenerateKeyPair");
 	CHECK(fn->C_Logout(session), "C_Logout");
 	CHECK(fn->C_CloseSession(session), "C_CloseSession");
@@ -272,7 +325,7 @@ static int pubkey_hex(CK_SESSION_HANDLE session, const char *key,
 	CK_ATTRIBUTE value = { CKA_EC_POINT, point, sizeof(point) };
 	unsigned char spki[sizeof(spki_prefix) + 65];
 	const CK_BYTE *raw;
-	size_t raw_len;
+	size_t raw_len, header;
 
 	if (find_object(session, CKO_PUBLIC_KEY, key, &obj))
 		return 1;
@@ -280,22 +333,34 @@ static int pubkey_hex(CK_SESSION_HANDLE session, const char *key,
 	CHECK(fn->C_GetAttributeValue(session, obj, &value, 1),
 	      "C_GetAttributeValue");
 
-	/* CKA_EC_POINT is the point inside a DER OCTET STRING; unwrap it */
+	/*
+	 * CKA_EC_POINT is the point inside a DER OCTET STRING. The length
+	 * bytes come from the token, so check them against how much it
+	 * actually returned before reading anything they describe.
+	 */
 	if (value.ulValueLen < 2 || point[0] != 0x04) {
 		fprintf(stderr, "unexpected CKA_EC_POINT encoding\n");
 		return 1;
 	}
 
 	if (point[1] & 0x80) {
-		if ((point[1] & 0x7f) != 1) {
+		if ((point[1] & 0x7f) != 1 || value.ulValueLen < 3) {
 			fprintf(stderr, "unexpected CKA_EC_POINT length\n");
 			return 1;
 		}
 		raw_len = point[2];
 		raw = &point[3];
+		header = 3;
 	} else {
 		raw_len = point[1];
 		raw = &point[2];
+		header = 2;
+	}
+
+	if (raw_len > value.ulValueLen - header) {
+		fprintf(stderr, "CKA_EC_POINT claims %zu bytes, token returned %lu\n",
+			raw_len, (unsigned long)value.ulValueLen);
+		return 1;
 	}
 
 	if (raw_len != 65 || raw[0] != 0x04) {
@@ -338,8 +403,8 @@ static int sign_hex(CK_SESSION_HANDLE session, const char *key,
 	CHECK(fn->C_SignInit(session, &mech, obj), "C_SignInit");
 	CHECK(fn->C_Sign(session, digest, digest_len, sig, &sig_len), "C_Sign");
 
-	if (sig_len % 2) {
-		fprintf(stderr, "odd signature length %lu\n",
+	if (sig_len != 64) {
+		fprintf(stderr, "expected a 64-byte P-256 signature, got %lu\n",
 			(unsigned long)sig_len);
 		return 1;
 	}
@@ -482,11 +547,12 @@ static void usage(const char *me)
 	fprintf(stderr,
 		"usage: %s info\n"
 		"       %s init     <token> <so-pin> <pin>\n"
+		"       %s reinit   <token> <so-pin> <pin>   # destroys every key\n"
 		"       %s generate <token> <pin> <key-label>\n"
 		"       %s pubkey   <token> <pin> <key-label>\n"
 		"       %s sign     <token> <pin> <key-label> <hex-digest>\n"
 		"       %s serve    <token> <pin> <key-label>\n",
-		me, me, me, me, me, me);
+		me, me, me, me, me, me, me);
 }
 
 int main(int argc, char **argv)
@@ -504,7 +570,9 @@ int main(int argc, char **argv)
 	if (!strcmp(argv[1], "info") && argc == 2)
 		rc = cmd_info();
 	else if (!strcmp(argv[1], "init") && argc == 5)
-		rc = cmd_init(argv[2], argv[3], argv[4]);
+		rc = cmd_init(argv[2], argv[3], argv[4], 0);
+	else if (!strcmp(argv[1], "reinit") && argc == 5)
+		rc = cmd_init(argv[2], argv[3], argv[4], 1);
 	else if (!strcmp(argv[1], "generate") && argc == 5)
 		rc = cmd_generate(argv[2], argv[3], argv[4]);
 	else if (!strcmp(argv[1], "pubkey") && argc == 5)

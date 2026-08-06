@@ -22,6 +22,16 @@ OPTS=$(sed -n '/^RKNPU_DRIVER_MODULE_MAKE_OPTS[[:space:]]*=/,/[^\\]$/p' "$PD/rkn
 	sed -e 's/^RKNPU_DRIVER_MODULE_MAKE_OPTS[[:space:]]*=//' -e 's/\\$//' |
 	tr -d '\t' | tr '\n' ' ')
 [ -n "${OPTS// /}" ] || { echo "no module options found in rknpu-driver.mk" >&2; exit 1; }
+
+# The shipped configuration is the one in the .mk, and it stays the default so
+# a drifted copy cannot report success wrongly. RKNPU_OPTS overrides it to
+# check a configuration this system does not ship but Kconfig still offers -
+# the DMA-heap half, which selects a different set of objects:
+#
+#   RKNPU_OPTS='CONFIG_ROCKCHIP_RKNPU=m CONFIG_ROCKCHIP_RKNPU_DMA_HEAP=y' \
+#       FIRST_BUILDABLE=0012 ./build-each.sh
+OPTS=${RKNPU_OPTS:-$OPTS}
+
 echo "volume:  $VOL"
 echo "options: $OPTS"
 

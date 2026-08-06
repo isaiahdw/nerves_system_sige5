@@ -1080,10 +1080,7 @@ new = """	struct rknpu_device *rknpu_dev = obj->dev->dev_private;
 		 * a transient failure would otherwise leak every object freed
 		 * while it lasted.
 		 */
-		mutex_lock(&rknpu_dev->deferred_free_lock);
-		list_add_tail(&to_rknpu_obj(obj)->deferred,
-			      &rknpu_dev->deferred_free);
-		mutex_unlock(&rknpu_dev->deferred_free_lock);
+		rknpu_gem_defer(to_rknpu_obj(obj));
 		LOG_DEV_ERROR(
 			rknpu_dev->dev,
 			"npu unavailable (%d), deferring a gem destroy\\n",
@@ -1091,12 +1088,7 @@ new = """	struct rknpu_device *rknpu_dev = obj->dev->dev_private;
 		return;
 	}
 
-	if (rknpu_gem_object_destroy(to_rknpu_obj(obj))) {
-		mutex_lock(&rknpu_dev->deferred_free_lock);
-		list_add_tail(&to_rknpu_obj(obj)->deferred,
-			      &rknpu_dev->deferred_free);
-		mutex_unlock(&rknpu_dev->deferred_free_lock);
-	}
+	rknpu_gem_destroy_or_defer(to_rknpu_obj(obj));
 	rknpu_power_put_delay(rknpu_dev);"""
 assert s.count(old)==1, ("gem free", s.count(old))
 open(g,"w").write(s.replace(old,new))
@@ -1147,9 +1139,70 @@ new_tail = """	rknpu_gem_release(rknpu_obj);
 	rknpu_iommu_domain_put(rknpu_dev);
 
 	return 0;
+}
+
+/*
+ * Park an object that could not be destroyed. The deferred list is the only
+ * place an undestroyed object can be, so it is also the only owner: nothing
+ * else holds a reference once the caller has given one up.
+ */
+static void rknpu_gem_defer(struct rknpu_gem_object *rknpu_obj)
+{
+	struct rknpu_device *rknpu_dev = rknpu_obj->base.dev->dev_private;
+
+	mutex_lock(&rknpu_dev->deferred_free_lock);
+	list_add_tail(&rknpu_obj->deferred, &rknpu_dev->deferred_free);
+	mutex_unlock(&rknpu_dev->deferred_free_lock);
+}
+
+/*
+ * Every caller that gives up ownership goes through here. The destroy can give
+ * up after three failed domain switches without freeing anything, and an
+ * object dropped at that point would have no owner left, so a failure parks it
+ * rather than losing it.
+ */
+static void rknpu_gem_destroy_or_defer(struct rknpu_gem_object *rknpu_obj)
+{
+	if (rknpu_gem_object_destroy(rknpu_obj))
+		rknpu_gem_defer(rknpu_obj);
 }"""
 assert s.count(old_tail)==1, ("destroy tail", s.count(old_tail))
 s = s.replace(old_tail, new_tail)
+
+# The two handle-creation failure paths give up ownership as well: the object
+# was created but no handle refers to it, so if the destroy cannot finish, the
+# only remaining reference is the one the caller is about to discard. These run
+# under a DRM ioctl, which now holds a power reference, so the destroy itself
+# is expected to work - but "expected to" is what the deferred list is for.
+old_h = """		ret = rknpu_gem_handle_create(&rknpu_obj->base, file_priv,
+					      &args->handle);
+		if (ret) {
+			rknpu_gem_object_destroy(rknpu_obj);
+			return ret;
+		}"""
+new_h = """		ret = rknpu_gem_handle_create(&rknpu_obj->base, file_priv,
+					      &args->handle);
+		if (ret) {
+			rknpu_gem_destroy_or_defer(rknpu_obj);
+			return ret;
+		}"""
+assert s.count(old_h)==1, ("handle create", s.count(old_h))
+s = s.replace(old_h, new_h)
+
+old_d = """	ret = rknpu_gem_handle_create(&rknpu_obj->base, file_priv,
+				      &args->handle);
+	if (ret) {
+		rknpu_gem_object_destroy(rknpu_obj);
+		return ret;
+	}"""
+new_d = """	ret = rknpu_gem_handle_create(&rknpu_obj->base, file_priv,
+				      &args->handle);
+	if (ret) {
+		rknpu_gem_destroy_or_defer(rknpu_obj);
+		return ret;
+	}"""
+assert s.count(old_d)==1, ("dumb create", s.count(old_d))
+s = s.replace(old_d, new_d)
 
 old = """void rknpu_gem_free_object(struct drm_gem_object *obj)"""
 new = """/*
@@ -1170,25 +1223,28 @@ void rknpu_gem_drain_deferred(struct rknpu_device *rknpu_dev)
 
 	list_for_each_entry_safe(rknpu_obj, tmp, &ready, deferred) {
 		list_del(&rknpu_obj->deferred);
-		if (rknpu_gem_object_destroy(rknpu_obj)) {
-			mutex_lock(&rknpu_dev->deferred_free_lock);
-			list_add_tail(&rknpu_obj->deferred,
-				      &rknpu_dev->deferred_free);
-			mutex_unlock(&rknpu_dev->deferred_free_lock);
-		}
+		rknpu_gem_destroy_or_defer(rknpu_obj);
 	}
 }
 
 /*
  * Last chance on the way out. Nothing will drain the list after this, so say
  * plainly what is being abandoned instead of leaving it to be inferred.
+ *
+ * @powered says whether the caller holds a power reference. Without one the
+ * destroy cannot run at all - it switches the IOMMU, which is register access -
+ * so the objects are counted and abandoned rather than destroyed. Draining an
+ * unpowered or wedged NPU is the exact thing the deferred list exists to
+ * prevent, and doing it here would undo that on the one path that cannot
+ * retry.
  */
-void rknpu_gem_flush_deferred(struct rknpu_device *rknpu_dev)
+void rknpu_gem_flush_deferred(struct rknpu_device *rknpu_dev, bool powered)
 {
 	struct rknpu_gem_object *rknpu_obj, *tmp;
 	size_t lost = 0;
 
-	rknpu_gem_drain_deferred(rknpu_dev);
+	if (powered)
+		rknpu_gem_drain_deferred(rknpu_dev);
 
 	mutex_lock(&rknpu_dev->deferred_free_lock);
 	list_for_each_entry_safe(rknpu_obj, tmp, &rknpu_dev->deferred_free,
@@ -1221,8 +1277,26 @@ s = s.replace("void rknpu_gem_object_destroy(struct rknpu_gem_object *rknpu_obj)
               "int rknpu_gem_object_destroy(struct rknpu_gem_object *rknpu_obj);", 1)
 old2 = """void rknpu_gem_free_object(struct drm_gem_object *obj);"""
 new2 = """void rknpu_gem_free_object(struct drm_gem_object *obj);
+
+/*
+ * GEM and the DMA heap are alternatives in Kconfig and rknpu_gem.o is only
+ * built for the first, but rknpu_drv.c includes this header and calls these
+ * either way. Stub them out for the DMA-heap build, which has no GEM objects
+ * and so can never have a backlog of them.
+ */
+#if IS_ENABLED(CONFIG_ROCKCHIP_RKNPU_DRM_GEM)
 void rknpu_gem_drain_deferred(struct rknpu_device *rknpu_dev);
-void rknpu_gem_flush_deferred(struct rknpu_device *rknpu_dev);"""
+void rknpu_gem_flush_deferred(struct rknpu_device *rknpu_dev, bool powered);
+#else
+static inline void rknpu_gem_drain_deferred(struct rknpu_device *rknpu_dev)
+{
+}
+
+static inline void rknpu_gem_flush_deferred(struct rknpu_device *rknpu_dev,
+					    bool powered)
+{
+}
+#endif"""
 assert s.count(old2)==1, ("gem decl", s.count(old2))
 open(h,"w").write(s.replace(old2,new2))
 print("gem header ok")
@@ -1277,12 +1351,16 @@ sub("""	mutex_lock(&rknpu_dev->power_lock);
 	 * Before the power goes away for good: destroy what can still be
 	 * destroyed and account for anything that cannot. Nothing drains the
 	 * list after this.
+	 *
+	 * If the reference cannot be taken the objects are only counted and
+	 * abandoned. Destroying them would need the IOMMU, and an NPU that
+	 * will not power up is exactly when touching it is unsafe.
 	 */
 	if (!rknpu_power_get(rknpu_dev)) {
-		rknpu_gem_flush_deferred(rknpu_dev);
+		rknpu_gem_flush_deferred(rknpu_dev, true);
 		rknpu_power_put(rknpu_dev);
 	} else {
-		rknpu_gem_flush_deferred(rknpu_dev);
+		rknpu_gem_flush_deferred(rknpu_dev, false);
 	}
 
 	mutex_lock(&rknpu_dev->power_lock);

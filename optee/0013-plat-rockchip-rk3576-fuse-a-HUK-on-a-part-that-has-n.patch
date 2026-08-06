@@ -45,6 +45,31 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  CFG_TZDRAM_START ?= 0x70000000
  CFG_TZDRAM_SIZE  ?= 0x02000000
  CFG_SHMEM_START  ?= 0x72000000
+--- a/core/arch/arm/plat-rockchip/platform_config.h
++++ b/core/arch/arm/plat-rockchip/platform_config.h
+@@ -250,14 +250,15 @@
+ #define TRNG_S_CAND_SIZE	SIZE_K(4)
+ 
+ /*
+- * Word index of the HUK inside the secure OTP. Unconfirmed, but RK3576's own:
+- * it comes from the pending upstream port (OP-TEE PR #7841, via the-gabe's
+- * tree), where the previous value here - 0x104 - was only RK3588's, carried
+- * over from that platform's header. Both read back empty on the boards seen so
+- * far, so neither is confirmed by observation.
++ * Word index of the HUK inside the secure OTP. RK3576's own: it comes from the
++ * pending upstream port (OP-TEE PR #7841, via the-gabe's tree), where the
++ * previous value here - 0x104 - was only RK3588's, carried over from that
++ * platform's header. Confirmed on hardware.
+  *
+- * Only ever read here - see platform_rk3576.c - so a wrong index yields an
+- * empty or wrong-looking key rather than a mis-placed burn.
++ * No longer read-only: CFG_RK3576_PERSIST_HUK fuses a key here, once, on a
++ * part that has none. A wrong index would put that one-shot write somewhere it
++ * does not belong, so this is not a value to carry over from another platform
++ * again - see persist_huk() in platform_rk3576.c.
+  */
+ #define ROCKCHIP_OTP_HUK_INDEX	0x80
+ #define ROCKCHIP_OTP_HUK_SIZE	0x4
 --- a/core/arch/arm/plat-rockchip/platform_rk3576.c
 +++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
 @@ -343,11 +343,10 @@ static void survey_secure_otp(void)

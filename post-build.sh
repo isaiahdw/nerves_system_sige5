@@ -86,7 +86,8 @@ case "$VARIANT/$HAVE_TA" in
         # check both against it rather than against each other's existence.
         WANT_BL=$(sed -n 's/^bootloader-sha256: *//p' "$VARIANT_FILE")
         WANT_TA=$(sed -n 's/^ta-sha256: *//p' "$VARIANT_FILE")
-        if [ -z "$WANT_BL" ] || [ -z "$WANT_TA" ]; then
+        WANT_KEY=$(sed -n 's/^ta-pubkey-sha256: *//p' "$VARIANT_FILE")
+        if [ -z "$WANT_BL" ] || [ -z "$WANT_TA" ] || [ -z "$WANT_KEY" ]; then
             echo "BUILD FAILED: $VARIANT_FILE records no digests." >&2
             echo "  Re-run scripts/build-uboot.sh to write a manifest." >&2
             exit 1
@@ -104,7 +105,16 @@ case "$VARIANT/$HAVE_TA" in
             echo "  will not load. Re-run scripts/build-uboot.sh." >&2
             exit 1
         fi
+        # The signing key is reported, not re-checked. Its fingerprint cannot
+        # be recomputed here - build-uboot.sh derives it from the signing key,
+        # which is a temporary file or an HSM and is gone by now - and it would
+        # add nothing if it could: the signature is inside the bytes ta-sha256
+        # covers, so a TA signed by a different key already fails that compare.
+        # Requiring the field rejects a manifest from a build-uboot.sh that
+        # predates it, and printing it puts the image's signing identity in the
+        # build log where it can be audited.
         echo "post-build: bootloader and TA match the manifest"
+        echo "post-build: TA signed by key $(printf %s "$WANT_KEY" | cut -c1-16)..."
         ;;
     plain/no)
         echo "post-build: bootloader is 'plain', no PKCS#11 TA - consistent"

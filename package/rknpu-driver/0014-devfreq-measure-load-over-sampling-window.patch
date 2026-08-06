@@ -18,6 +18,28 @@ polling governor at runtime is the only write needed.
 
 Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
+--- a/include/rknpu_drv.h
++++ b/include/rknpu_drv.h
+@@ -103,6 +103,10 @@ struct rknpu_config {
+ struct rknpu_timer {
+ 	ktime_t busy_time;
+ 	ktime_t total_busy_time;
++	/* Busy time the 1 Hz timer has latched, never reset. */
++	ktime_t busy_cum;
++	/* What the cumulative count read at the last devfreq sample. */
++	ktime_t devfreq_prev;
+ };
+ 
+ struct rknpu_subcore_data {
+@@ -156,6 +160,8 @@ struct rknpu_device {
+ 	struct rockchip_opp_info opp_info;
+ 	unsigned long current_freq;
+ 	unsigned long current_volt;
++	/* When devfreq last sampled the load, for the elapsed window. */
++	ktime_t devfreq_last_sample;
+ 	/*
+ 	 * Serialises every rate change. The OPP call and the clk_set_rate
+ 	 * after it have to be one step, or a request arriving between them
 --- a/rknpu_devfreq.c
 +++ b/rknpu_devfreq.c
 @@ -25,6 +25,7 @@
@@ -28,7 +50,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  #define POWER_DOWN_FREQ 200000000
  
-@@ -475,29 +476,52 @@
+@@ -475,29 +476,52 @@ int rknpu_devfreq_sync_rate(struct device *dev)
  }
  EXPORT_SYMBOL(rknpu_devfreq_sync_rate);
  
@@ -68,18 +90,16 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	now = ktime_get();
  	for (i = 0; i < rknpu_dev->config->num_irqs; i++) {
 -		ktime_t t = rknpu_dev->subcore_datas[i].timer.total_busy_time;
--
--		if (ktime_compare(t, busy) > 0)
--			busy = t;
--	}
 +		struct rknpu_subcore_data *sd = &rknpu_dev->subcore_datas[i];
 +		ktime_t cum = npu_core_busy_cum(sd, now);
 +		ktime_t delta = ktime_sub(cum, sd->timer.devfreq_prev);
-+
+ 
+-		if (ktime_compare(t, busy) > 0)
+-			busy = t;
 +		sd->timer.devfreq_prev = cum;
 +		if (ktime_compare(delta, busy) > 0)
 +			busy = delta;
-+	}
+ 	}
 +	stat->total_time = (unsigned long)ktime_to_us(
 +		ktime_sub(now, rknpu_dev->devfreq_last_sample));
 +	rknpu_dev->devfreq_last_sample = now;
@@ -90,7 +110,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	if (stat->busy_time > stat->total_time)
  		stat->busy_time = stat->total_time;
  	stat->current_frequency = rknpu_dev->current_freq;
-@@ -516,12 +540,12 @@
+@@ -516,12 +540,12 @@ static int npu_devfreq_get_cur_freq(struct device *dev, unsigned long *freq)
  
  static struct devfreq_dev_profile npu_devfreq_profile = {
  	/*
@@ -108,7 +128,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	.target = npu_devfreq_target,
  	.get_dev_status = npu_devfreq_get_dev_status,
  	.get_cur_freq = npu_devfreq_get_cur_freq,
-@@ -654,6 +678,7 @@
+@@ -654,6 +678,7 @@ int rknpu_devfreq_init(struct rknpu_device *rknpu_dev)
  	dp->initial_freq = rknpu_dev->current_freq;
  	rknpu_dev->ondemand_freq = rknpu_dev->current_freq;
  
@@ -118,7 +138,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	if (IS_ERR(rknpu_dev->devfreq)) {
 --- a/rknpu_drv.c
 +++ b/rknpu_drv.c
-@@ -821,6 +821,9 @@
+@@ -849,6 +849,9 @@ static enum hrtimer_restart hrtimer_handler(struct hrtimer *timer)
  			job->hw_recoder_time = now;
  		}
  
@@ -128,25 +148,3 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		subcore_data->timer.total_busy_time =
  			subcore_data->timer.busy_time;
  		subcore_data->timer.busy_time = 0;
---- a/include/rknpu_drv.h
-+++ b/include/rknpu_drv.h
-@@ -103,6 +103,10 @@
- struct rknpu_timer {
- 	ktime_t busy_time;
- 	ktime_t total_busy_time;
-+	/* Busy time the 1 Hz timer has latched, never reset. */
-+	ktime_t busy_cum;
-+	/* What the cumulative count read at the last devfreq sample. */
-+	ktime_t devfreq_prev;
- };
- 
- struct rknpu_subcore_data {
-@@ -156,6 +160,8 @@
- 	struct rockchip_opp_info opp_info;
- 	unsigned long current_freq;
- 	unsigned long current_volt;
-+	/* When devfreq last sampled the load, for the elapsed window. */
-+	ktime_t devfreq_last_sample;
- 	/*
- 	 * Serialises every rate change. The OPP call and the clk_set_rate
- 	 * after it have to be one step, or a request arriving between them

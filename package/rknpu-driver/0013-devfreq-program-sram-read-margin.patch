@@ -58,6 +58,44 @@ margin wherever the last transition put it.
 
 Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
+--- a/include/rknpu_drv.h
++++ b/include/rknpu_drv.h
+@@ -39,6 +39,17 @@
+ /* sample interval: 1000ms */
+ #define RKNPU_LOAD_INTERVAL 1000000000
+ 
++/* Entries in the device tree's rockchip,volt-mem-read-margin table. */
++#define RKNPU_MAX_RM_ENTRIES 8
++
++/* No table entry matched, or nothing programmed since power was lost. */
++#define RKNPU_RM_NONE UINT_MAX
++
++struct rknpu_volt_rm {
++	unsigned long volt;
++	u32 rm;
++};
++
+ #define LOG_INFO(fmt, args...) pr_info(LOG_TAG ": " fmt, ##args)
+ #if KERNEL_VERSION(5, 5, 0) <= LINUX_VERSION_CODE
+ #define LOG_WARN(fmt, args...) pr_warn(LOG_TAG ": " fmt, ##args)
+@@ -167,6 +178,17 @@ struct rknpu_device {
+ 	 * rknpu_power_wedge().
+ 	 */
+ 	bool power_wedged;
++	/*
++	 * NPU_GRF SRAM read margin. Its reset value is 4; the vendor
++	 * derives one from the rail voltage and rewrites it as part of
++	 * every transition. current_rm is what was last written, so an
++	 * unchanged transition writes nothing, and the suspend park
++	 * invalidates it because the hardware loses the setting.
++	 */
++	struct regmap *npu_grf;
++	u32 current_rm;
++	int num_volt_rm;
++	struct rknpu_volt_rm volt_rm[RKNPU_MAX_RM_ENTRIES];
+ 	int bypass_irq_handler;
+ 	int bypass_soft_reset;
+ 	bool soft_reseting;
 --- a/rknpu_devfreq.c
 +++ b/rknpu_devfreq.c
 @@ -16,9 +16,11 @@
@@ -346,7 +384,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  static int npu_devfreq_target(struct device *dev, unsigned long *freq,
  			      u32 flags)
  {
-@@ -120,6 +389,7 @@
+@@ -120,6 +389,7 @@ static int npu_devfreq_park(struct device *dev)
  	}
  
  	rknpu_dev->current_freq = POWER_DOWN_FREQ;
@@ -354,7 +392,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  	return 0;
  }
-@@ -155,6 +425,10 @@
+@@ -155,6 +425,10 @@ static int npu_devfreq_apply_locked(struct device *dev)
  		 * no-op. Set the clock and margin explicitly; the rail is
  		 * already correct.
  		 */
@@ -365,7 +403,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		ret = clk_set_rate(rknpu_dev->clks[0].clk, freq);
  		if (ret) {
  			LOG_DEV_ERROR(dev,
-@@ -339,12 +613,17 @@
+@@ -339,12 +613,17 @@ int rknpu_devfreq_init(struct rknpu_device *rknpu_dev)
  	}
  
  	if (of_find_property(dev->of_node, "rknpu-supply", NULL)) {
@@ -387,7 +425,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  				      ret);
  			return ret;
  		}
-@@ -362,6 +641,10 @@
+@@ -362,6 +641,10 @@ int rknpu_devfreq_init(struct rknpu_device *rknpu_dev)
  		return ret;
  	}
  
@@ -400,7 +438,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	if (IS_ERR(opp))
 --- a/rknpu_drv.c
 +++ b/rknpu_drv.c
-@@ -1033,8 +1033,15 @@
+@@ -1061,8 +1061,15 @@ static int rknpu_power_on(struct rknpu_device *rknpu_dev)
  		}
  	}
  
@@ -417,41 +455,3 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  	ret = pm_runtime_get_sync(dev);
  	if (ret < 0) {
---- a/include/rknpu_drv.h
-+++ b/include/rknpu_drv.h
-@@ -39,6 +39,17 @@
- /* sample interval: 1000ms */
- #define RKNPU_LOAD_INTERVAL 1000000000
- 
-+/* Entries in the device tree's rockchip,volt-mem-read-margin table. */
-+#define RKNPU_MAX_RM_ENTRIES 8
-+
-+/* No table entry matched, or nothing programmed since power was lost. */
-+#define RKNPU_RM_NONE UINT_MAX
-+
-+struct rknpu_volt_rm {
-+	unsigned long volt;
-+	u32 rm;
-+};
-+
- #define LOG_INFO(fmt, args...) pr_info(LOG_TAG ": " fmt, ##args)
- #if KERNEL_VERSION(5, 5, 0) <= LINUX_VERSION_CODE
- #define LOG_WARN(fmt, args...) pr_warn(LOG_TAG ": " fmt, ##args)
-@@ -160,6 +171,17 @@
- 	bool hw_powered;
- 	/* Bounds the power-off retry so a persistent failure cannot spin. */
- 	unsigned int power_off_retries;
-+	/*
-+	 * NPU_GRF SRAM read margin. Its reset value is 4; the vendor
-+	 * derives one from the rail voltage and rewrites it as part of
-+	 * every transition. current_rm is what was last written, so an
-+	 * unchanged transition writes nothing, and the suspend park
-+	 * invalidates it because the hardware loses the setting.
-+	 */
-+	struct regmap *npu_grf;
-+	u32 current_rm;
-+	int num_volt_rm;
-+	struct rknpu_volt_rm volt_rm[RKNPU_MAX_RM_ENTRIES];
- 	int bypass_irq_handler;
- 	int bypass_soft_reset;
- 	bool soft_reseting;

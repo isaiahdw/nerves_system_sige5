@@ -26,6 +26,17 @@ having, so the device now comes up on simple_ondemand rather than userspace.
 
 Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
+--- a/include/rknpu_drv.h
++++ b/include/rknpu_drv.h
+@@ -162,6 +162,8 @@ struct rknpu_device {
+ 	unsigned long current_volt;
+ 	/* When devfreq last sampled the load, for the elapsed window. */
+ 	ktime_t devfreq_last_sample;
++	/* Consecutive devfreq samples that saw no work at all. */
++	unsigned int devfreq_idle_windows;
+ 	/*
+ 	 * Serialises every rate change. The OPP call and the clk_set_rate
+ 	 * after it have to be one step, or a request arriving between them
 --- a/rknpu_devfreq.c
 +++ b/rknpu_devfreq.c
 @@ -29,6 +29,18 @@
@@ -47,7 +58,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  static int npu_devfreq_apply_locked(struct device *dev);
  
  /*
-@@ -521,9 +533,21 @@
+@@ -521,9 +533,21 @@ static int npu_devfreq_get_dev_status(struct device *dev,
  	rknpu_dev->devfreq_last_sample = now;
  	spin_unlock_irqrestore(&rknpu_dev->irq_lock, irqflags);
  
@@ -72,7 +83,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	stat->current_frequency = rknpu_dev->current_freq;
  
  	return 0;
-@@ -540,10 +564,8 @@
+@@ -540,10 +564,8 @@ static int npu_devfreq_get_cur_freq(struct device *dev, unsigned long *freq)
  
  static struct devfreq_dev_profile npu_devfreq_profile = {
  	/*
@@ -85,7 +96,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	 */
  	.polling_ms = 50,
  	.target = npu_devfreq_target,
-@@ -680,7 +702,8 @@
+@@ -680,7 +702,8 @@ int rknpu_devfreq_init(struct rknpu_device *rknpu_dev)
  
  	rknpu_dev->devfreq_last_sample = ktime_get();
  	rknpu_dev->devfreq = devm_devfreq_add_device(dev, dp,
@@ -95,14 +106,3 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	if (IS_ERR(rknpu_dev->devfreq)) {
  		ret = PTR_ERR(rknpu_dev->devfreq);
  		rknpu_dev->devfreq = NULL;
---- a/include/rknpu_drv.h
-+++ b/include/rknpu_drv.h
-@@ -162,6 +162,8 @@
- 	unsigned long current_volt;
- 	/* When devfreq last sampled the load, for the elapsed window. */
- 	ktime_t devfreq_last_sample;
-+	/* Consecutive devfreq samples that saw no work at all. */
-+	unsigned int devfreq_idle_windows;
- 	/*
- 	 * Serialises every rate change. The OPP call and the clk_set_rate
- 	 * after it have to be one step, or a request arriving between them

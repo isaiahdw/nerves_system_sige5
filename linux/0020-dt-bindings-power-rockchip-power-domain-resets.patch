@@ -9,11 +9,10 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/Documentation/devicetree/bindings/power/rockchip,power-controller.yaml
 +++ b/Documentation/devicetree/bindings/power/rockchip,power-controller.yaml
-@@ -136,6 +136,14 @@
- 
+@@ -137,6 +137,14 @@ $defs:
        domain-supply:
          description: domain regulator supply.
-+
+ 
 +      resets:
 +        minItems: 1
 +        maxItems: 8
@@ -21,6 +20,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +          A number of resets that need to be pulsed after the domain powers
 +          on. Some domains come up with the bus behind them in an undefined
 +          state, and an access before the pulse can hang it.
- 
++
        pm_qos:
          $ref: /schemas/types.yaml#/definitions/phandle-array
+         items:

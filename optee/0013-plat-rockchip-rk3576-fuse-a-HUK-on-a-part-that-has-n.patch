@@ -21,7 +21,9 @@ slot is worse than an empty one:
   read back and require an exact match before trusting it.
 
 A write that fails part way cannot be repaired, and says so. The read path
-already refuses a partially programmed slot on later boots.
+refuses a slot with an all-zero word on later boots, which catches an
+interruption between words but not one inside the last word - a partly
+programmed word can read non-zero and make the slot look complete.
 
 Logs a hash and an outcome, never the key.
 

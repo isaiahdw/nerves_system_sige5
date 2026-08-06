@@ -284,7 +284,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  void panfrost_devfreq_record_idle(struct panfrost_devfreq *devfreq);
 --- a/drivers/gpu/drm/panfrost/panfrost_device.c
 +++ b/drivers/gpu/drm/panfrost/panfrost_device.c
-@@ -435,6 +435,32 @@ void panfrost_device_reset(struct panfrost_device *pfdev)
+@@ -435,6 +435,34 @@ void panfrost_device_reset(struct panfrost_device *pfdev)
  	panfrost_job_enable_interrupts(pfdev);
  }
  
@@ -293,10 +293,11 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 + * the firmware's PVTPLL state must not outlive it - that is the SError this
 + * park exists to prevent. Park while the domain is still up.
 + *
-+ * If the park itself fails there is no safe way to release the domain, so hold
-+ * it: report the device resumed with DVFS unavailable rather than hand genpd a
-+ * domain it is about to power down under a firmware-owned clock. Returns true
-+ * when the caller must not proceed to power down.
++ * If the park itself fails there is no safe way to release the domain: an error
++ * from here makes genpd drop it, so the resume has to report success to keep it.
++ * That success is a lie about the hardware - the GPU has not been reset and its
++ * rate is unknown - so the device is marked wedged and refuses work from then
++ * on. Returns true when the caller must not proceed to power down.
 + */
 +static bool panfrost_park_or_hold(struct panfrost_device *pfdev)
 +{
@@ -305,7 +306,8 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	panfrost_devfreq_transition_lock(pfdev);
 +	if (panfrost_devfreq_park(pfdev)) {
 +		dev_err(pfdev->dev,
-+			"could not park the clock; holding the power domain up\n");
++			"could not park the clock; holding the power domain up and refusing work\n");
++		pfdev->wedged = true;
 +		held = true;
 +	}
 +	panfrost_devfreq_set_available(pfdev, false);
@@ -317,7 +319,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  static int panfrost_device_runtime_resume(struct device *dev)
  {
  	struct panfrost_device *pfdev = dev_get_drvdata(dev);
-@@ -456,11 +482,51 @@ static int panfrost_device_runtime_resume(struct device *dev)
+@@ -456,11 +484,51 @@ static int panfrost_device_runtime_resume(struct device *dev)
  		}
  	}
  
@@ -371,7 +373,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  err_bus_clk:
  	if (pfdev->comp->pm_features & BIT(GPU_PM_RT))
  		clk_disable(pfdev->clock);
-@@ -473,11 +539,31 @@ static int panfrost_device_runtime_resume(struct device *dev)
+@@ -473,11 +541,31 @@ static int panfrost_device_runtime_resume(struct device *dev)
  static int panfrost_device_runtime_suspend(struct device *dev)
  {
  	struct panfrost_device *pfdev = dev_get_drvdata(dev);
@@ -420,6 +422,21 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  };
  
  /**
+@@ -140,6 +147,14 @@ struct panfrost_device {
+ 	struct device_link *pm_domain_links[MAX_PM_DOMAINS];
+ 	bool coherent;
+ 
++	/*
++	 * Set when a runtime resume could neither restore the rate nor park
++	 * the clock. The power domain is held up rather than dropped under a
++	 * firmware-owned clock, and the GPU is not reset, so it must not be
++	 * given work. See panfrost_park_or_hold().
++	 */
++	bool wedged;
++
+ 	struct panfrost_features features;
+ 	const struct panfrost_compatible *comp;
+ 	DECLARE_BITMAP(is_suspended, PANFROST_COMP_BIT_MAX);
 --- a/drivers/gpu/drm/panfrost/panfrost_drv.c
 +++ b/drivers/gpu/drm/panfrost/panfrost_drv.c
 @@ -929,6 +929,19 @@ static const struct panfrost_compatible mediatek_mt8370_data = {
@@ -450,3 +467,20 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	{ .compatible = "arm,mali-bifrost", .data = &default_data, },
  	{ .compatible = "arm,mali-valhall-jm", .data = &default_data, },
  	{ .compatible = "mediatek,mt8183-mali", .data = &mediatek_mt8183_data },
+--- a/drivers/gpu/drm/panfrost/panfrost_job.c
++++ b/drivers/gpu/drm/panfrost/panfrost_job.c
+@@ -300,6 +300,14 @@ int panfrost_job_push(struct panfrost_job *job)
+ 	struct ww_acquire_ctx acquire_ctx;
+ 	int ret = 0;
+ 
++	/*
++	 * A resume that could neither restore the rate nor park the clock kept
++	 * the power domain up and left the GPU unreset. It is powered but not
++	 * in a state to run anything.
++	 */
++	if (pfdev->wedged)
++		return -ENODEV;
++
+ 	ret = drm_gem_lock_reservations(job->bos, job->bo_count,
+ 					    &acquire_ctx);
+ 	if (ret)

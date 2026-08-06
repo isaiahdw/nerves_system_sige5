@@ -65,156 +65,30 @@ driver is tracking, and the vendor kernel does not use one on this SoC.
 
 Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
---- a/drivers/gpu/drm/panfrost/panfrost_devfreq.c
-+++ b/drivers/gpu/drm/panfrost/panfrost_devfreq.c
-@@ -182,11 +182,90 @@
- 	.get_dev_status = panfrost_devfreq_get_dev_status,
+--- a/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
++++ b/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
+@@ -1101,18 +1101,6 @@ rknpu: npu@27700000 {
+ 	};
  };
  
--static int panfrost_read_speedbin(struct device *dev)
-+/*
-+ * Bin numbers as the vendor's rockchip_get_soc_info() assigns them. BIT(bin)
-+ * is matched against the first cell of opp-supported-hw in the device tree,
-+ * so these have to stay in step with the masks there. RK3576_BIN_UNKNOWN is
-+ * not one of the vendor's: it selects the restricted table used when the part
-+ * cannot be identified.
-+ */
-+#define RK3576_BIN_BASE		0
-+#define RK3576_BIN_M		1
-+#define RK3576_BIN_J		2
-+#define RK3576_BIN_S		3
-+#define RK3576_BIN_UNKNOWN	8
-+
-+/*
-+ * The GPU reaches 900 MHz on the RK3576 and 800 MHz on the S, J and M parts,
-+ * which also want their own voltages. The speed-bin cell points at OTP's
-+ * specification_serial_number, which holds a part number rather than a ready
-+ * made opp-supported-hw value, so it is translated here instead of being
-+ * passed through.
-+ *
-+ * The second version cell is the speed grade and is left open. The vendor
-+ * measures the GPU PVTPLL's own rate counter at a reference point and picks
-+ * one of eleven per-OPP voltages from the result; that is not reimplemented
-+ * here. The device tree carries the highest voltage the vendor lists for each
-+ * rate instead, which is safe on any part at the cost of some efficiency on
-+ * fast silicon.
-+ *
-+ * customer_demand, which the vendor also folds in as bin 4, is not read: for
-+ * this GPU bin 4 selects the same OPPs as bin 0.
-+ *
-+ * This must run even when the read fails: the OPP core disables every OPP
-+ * carrying opp-supported-hw unless supported_hw has been set.
-+ */
-+int panfrost_rk3576_speedbin(struct device *dev)
- {
-+	u32 versions[2];
-+	int bin;
-+	u8 spec;
-+	int ret;
-+
-+	ret = nvmem_cell_read_u8(dev, "speed-bin", &spec);
-+	if (ret == -EPROBE_DEFER)
-+		return ret;
-+	if (ret) {
-+		/*
-+		 * Fail closed. Assuming the plain RK3576 would hand 900 MHz
-+		 * and its lower voltages to a part rated for neither.
-+		 */
-+		DRM_DEV_INFO(dev, "no speed-bin cell (%d), restricting the OPP table\n",
-+			     ret);
-+		bin = RK3576_BIN_UNKNOWN;
-+	} else {
-+		switch (spec) {
-+		case 0x0d:
-+			bin = RK3576_BIN_M;
-+			break;
-+		case 0x0a:
-+			bin = RK3576_BIN_J;
-+			break;
-+		case 0x13:
-+			bin = RK3576_BIN_S;
-+			break;
-+		default:
-+			bin = RK3576_BIN_BASE;
-+			break;
-+		}
-+		DRM_DEV_INFO(dev, "gpu bin %d (otp 0x%02x)\n", bin, spec);
-+	}
-+
-+	versions[0] = BIT(bin);
-+	versions[1] = 0xffff;
-+
-+	return devm_pm_opp_set_supported_hw(dev, versions, ARRAY_SIZE(versions));
-+}
-+
-+static int panfrost_read_speedbin(struct panfrost_device *pfdev)
-+{
-+	struct device *dev = &pfdev->pdev->dev;
- 	u32 val;
- 	int ret;
- 
-+	if (pfdev->comp->read_speedbin)
-+		return pfdev->comp->read_speedbin(dev);
-+
- 	ret = nvmem_cell_read_variable_le_u32(dev, "speed-bin", &val);
- 	if (ret) {
- 		/*
-@@ -235,7 +314,7 @@
- 		return 0;
- 	}
- 
--	ret = panfrost_read_speedbin(dev);
-+	ret = panfrost_read_speedbin(pfdev);
- 	if (ret)
- 		return ret;
- 
---- a/drivers/gpu/drm/panfrost/panfrost_devfreq.h
-+++ b/drivers/gpu/drm/panfrost/panfrost_devfreq.h
-@@ -44,6 +44,8 @@
- 	spinlock_t lock;
- };
- 
-+int panfrost_rk3576_speedbin(struct device *dev);
-+
- int panfrost_devfreq_init(struct panfrost_device *pfdev);
- void panfrost_devfreq_fini(struct panfrost_device *pfdev);
- 
---- a/drivers/gpu/drm/panfrost/panfrost_device.h
-+++ b/drivers/gpu/drm/panfrost/panfrost_device.h
-@@ -103,6 +103,12 @@
- 
- 	/* Vendor implementation quirks callback */
- 	void (*vendor_quirk)(struct panfrost_device *pfdev);
-+
-+	/*
-+	 * Replaces the generic speed-bin read. Only needed where the OTP holds
-+	 * something other than a ready-made opp-supported-hw value.
-+	 */
-+	int (*read_speedbin)(struct device *dev);
- 
- 	/* Allowed PM features */
- 	u8 pm_features;
---- a/drivers/gpu/drm/panfrost/panfrost_drv.c
-+++ b/drivers/gpu/drm/panfrost/panfrost_drv.c
-@@ -20,6 +20,7 @@
- #include <drm/drm_utils.h>
- 
- #include "panfrost_device.h"
-+#include "panfrost_devfreq.h"
- #include "panfrost_gem.h"
- #include "panfrost_mmu.h"
- #include "panfrost_job.h"
-@@ -940,6 +941,7 @@
- 	 * powering the domain down, and is below the lowest OPP.
- 	 */
- 	.park_rate = 200000000,
-+	.read_speedbin = panfrost_rk3576_speedbin,
- };
- 
- static const struct of_device_id dt_match[] = {
+-/*
+- * The OTP cell that says which RK3576 variant this is. Upstream describes
+- * the leakage and trim cells but not this one; the offset and width are the
+- * vendor's (rk3576.dtsi specification-serial-number@8).
+- */
+-&otp {
+-	specification_serial_number: specification-serial-number@8 {
+-		reg = <0x08 0x1>;
+-		bits = <0 5>;
+-	};
+-};
+-
+ /*
+  * The npu-thermal zone upstream has only a critical trip at 115 C, since
+  * mainline has no NPU driver and so nothing to throttle. Give it the same
 --- a/arch/arm64/boot/dts/rockchip/rk3576.dtsi
 +++ b/arch/arm64/boot/dts/rockchip/rk3576.dtsi
-@@ -348,43 +348,124 @@
+@@ -348,44 +348,125 @@ gpu_opp_table: opp-table-gpu {
  		compatible = "operating-points-v2";
  
  		opp-300000000 {
@@ -303,7 +177,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +			opp-supported-hw = <0x06 0xffff>;
 +			opp-hz = /bits/ 64 <800000000>;
  			opp-microvolt = <850000 850000 850000>;
-+		};
+ 		};
 +
 +		/*
 +		 * opp-supported-hw 0x100, selected when the part cannot be
@@ -338,10 +212,11 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +			opp-supported-hw = <0x100 0xffff>;
 +			opp-hz = /bits/ 64 <700000000>;
 +			opp-microvolt = <750000 750000 850000>;
- 		};
++		};
  	};
  
-@@ -1270,8 +1351,11 @@
+ 	display_subsystem: display-subsystem {
+@@ -1270,8 +1351,11 @@ gpu: gpu@27800000 {
  			reg = <0x0 0x27800000 0x0 0x20000>;
  			assigned-clocks = <&scmi_clk SCMI_CLK_GPU>;
  			assigned-clock-rates = <198000000>;
@@ -355,7 +230,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  			dynamic-power-coefficient = <1625>;
  			interrupts = <GIC_SPI 347 IRQ_TYPE_LEVEL_HIGH>,
  				     <GIC_SPI 348 IRQ_TYPE_LEVEL_HIGH>,
-@@ -1948,6 +2032,10 @@
+@@ -1948,6 +2032,10 @@ otp_cpu_version: cpu-version@5 {
  				reg = <0x05 0x1>;
  				bits = <3 3>;
  			};
@@ -366,24 +241,150 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  			otp_id: id@a {
  				reg = <0x0a 0x10>;
  			};
---- a/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
-+++ b/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
-@@ -1098,18 +1098,6 @@
- 			nvmem-cell-names = "specification_serial_number";
- 			status = "okay";
- 		};
--	};
--};
--
--/*
-- * The OTP cell that says which RK3576 variant this is. Upstream describes
-- * the leakage and trim cells but not this one; the offset and width are the
-- * vendor's (rk3576.dtsi specification-serial-number@8).
-- */
--&otp {
--	specification_serial_number: specification-serial-number@8 {
--		reg = <0x08 0x1>;
--		bits = <0 5>;
- 	};
+--- a/drivers/gpu/drm/panfrost/panfrost_devfreq.c
++++ b/drivers/gpu/drm/panfrost/panfrost_devfreq.c
+@@ -182,11 +182,90 @@ static struct devfreq_dev_profile panfrost_devfreq_profile = {
+ 	.get_dev_status = panfrost_devfreq_get_dev_status,
  };
  
+-static int panfrost_read_speedbin(struct device *dev)
++/*
++ * Bin numbers as the vendor's rockchip_get_soc_info() assigns them. BIT(bin)
++ * is matched against the first cell of opp-supported-hw in the device tree,
++ * so these have to stay in step with the masks there. RK3576_BIN_UNKNOWN is
++ * not one of the vendor's: it selects the restricted table used when the part
++ * cannot be identified.
++ */
++#define RK3576_BIN_BASE		0
++#define RK3576_BIN_M		1
++#define RK3576_BIN_J		2
++#define RK3576_BIN_S		3
++#define RK3576_BIN_UNKNOWN	8
++
++/*
++ * The GPU reaches 900 MHz on the RK3576 and 800 MHz on the S, J and M parts,
++ * which also want their own voltages. The speed-bin cell points at OTP's
++ * specification_serial_number, which holds a part number rather than a ready
++ * made opp-supported-hw value, so it is translated here instead of being
++ * passed through.
++ *
++ * The second version cell is the speed grade and is left open. The vendor
++ * measures the GPU PVTPLL's own rate counter at a reference point and picks
++ * one of eleven per-OPP voltages from the result; that is not reimplemented
++ * here. The device tree carries the highest voltage the vendor lists for each
++ * rate instead, which is safe on any part at the cost of some efficiency on
++ * fast silicon.
++ *
++ * customer_demand, which the vendor also folds in as bin 4, is not read: for
++ * this GPU bin 4 selects the same OPPs as bin 0.
++ *
++ * This must run even when the read fails: the OPP core disables every OPP
++ * carrying opp-supported-hw unless supported_hw has been set.
++ */
++int panfrost_rk3576_speedbin(struct device *dev)
++{
++	u32 versions[2];
++	int bin;
++	u8 spec;
++	int ret;
++
++	ret = nvmem_cell_read_u8(dev, "speed-bin", &spec);
++	if (ret == -EPROBE_DEFER)
++		return ret;
++	if (ret) {
++		/*
++		 * Fail closed. Assuming the plain RK3576 would hand 900 MHz
++		 * and its lower voltages to a part rated for neither.
++		 */
++		DRM_DEV_INFO(dev, "no speed-bin cell (%d), restricting the OPP table\n",
++			     ret);
++		bin = RK3576_BIN_UNKNOWN;
++	} else {
++		switch (spec) {
++		case 0x0d:
++			bin = RK3576_BIN_M;
++			break;
++		case 0x0a:
++			bin = RK3576_BIN_J;
++			break;
++		case 0x13:
++			bin = RK3576_BIN_S;
++			break;
++		default:
++			bin = RK3576_BIN_BASE;
++			break;
++		}
++		DRM_DEV_INFO(dev, "gpu bin %d (otp 0x%02x)\n", bin, spec);
++	}
++
++	versions[0] = BIT(bin);
++	versions[1] = 0xffff;
++
++	return devm_pm_opp_set_supported_hw(dev, versions, ARRAY_SIZE(versions));
++}
++
++static int panfrost_read_speedbin(struct panfrost_device *pfdev)
+ {
++	struct device *dev = &pfdev->pdev->dev;
+ 	u32 val;
+ 	int ret;
+ 
++	if (pfdev->comp->read_speedbin)
++		return pfdev->comp->read_speedbin(dev);
++
+ 	ret = nvmem_cell_read_variable_le_u32(dev, "speed-bin", &val);
+ 	if (ret) {
+ 		/*
+@@ -235,7 +314,7 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
+ 		return 0;
+ 	}
+ 
+-	ret = panfrost_read_speedbin(dev);
++	ret = panfrost_read_speedbin(pfdev);
+ 	if (ret)
+ 		return ret;
+ 
+--- a/drivers/gpu/drm/panfrost/panfrost_devfreq.h
++++ b/drivers/gpu/drm/panfrost/panfrost_devfreq.h
+@@ -44,6 +44,8 @@ struct panfrost_devfreq {
+ 	spinlock_t lock;
+ };
+ 
++int panfrost_rk3576_speedbin(struct device *dev);
++
+ int panfrost_devfreq_init(struct panfrost_device *pfdev);
+ void panfrost_devfreq_fini(struct panfrost_device *pfdev);
+ 
+--- a/drivers/gpu/drm/panfrost/panfrost_device.h
++++ b/drivers/gpu/drm/panfrost/panfrost_device.h
+@@ -104,6 +104,12 @@ struct panfrost_compatible {
+ 	/* Vendor implementation quirks callback */
+ 	void (*vendor_quirk)(struct panfrost_device *pfdev);
+ 
++	/*
++	 * Replaces the generic speed-bin read. Only needed where the OTP holds
++	 * something other than a ready-made opp-supported-hw value.
++	 */
++	int (*read_speedbin)(struct device *dev);
++
+ 	/* Allowed PM features */
+ 	u8 pm_features;
+ 
+--- a/drivers/gpu/drm/panfrost/panfrost_drv.c
++++ b/drivers/gpu/drm/panfrost/panfrost_drv.c
+@@ -20,6 +20,7 @@
+ #include <drm/drm_utils.h>
+ 
+ #include "panfrost_device.h"
++#include "panfrost_devfreq.h"
+ #include "panfrost_gem.h"
+ #include "panfrost_mmu.h"
+ #include "panfrost_job.h"
+@@ -940,6 +941,7 @@ static const struct panfrost_compatible rk3576_data = {
+ 	 * powering the domain down, and is below the lowest OPP.
+ 	 */
+ 	.park_rate = 200000000,
++	.read_speedbin = panfrost_rk3576_speedbin,
+ };
+ 
+ static const struct of_device_id dt_match[] = {

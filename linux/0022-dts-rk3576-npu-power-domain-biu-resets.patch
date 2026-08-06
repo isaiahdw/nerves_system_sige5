@@ -15,7 +15,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/arch/arm64/boot/dts/rockchip/rk3576.dtsi
 +++ b/arch/arm64/boot/dts/rockchip/rk3576.dtsi
-@@ -1153,6 +1153,7 @@
+@@ -1153,6 +1153,7 @@ power-domain@RK3576_PD_NPU0 {
  								 <&cru CLK_RKNN_DSU0>,
  								 <&cru ACLK_RKNN_CBUF>,
  								 <&cru HCLK_RKNN_CBUF>;
@@ -23,7 +23,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  							pm_qos = <&qos_npu_m0>;
  							#power-domain-cells = <0>;
  						};
-@@ -1163,6 +1164,7 @@
+@@ -1163,6 +1164,7 @@ power-domain@RK3576_PD_NPU1 {
  								 <&cru CLK_RKNN_DSU0>,
  								 <&cru ACLK_RKNN_CBUF>,
  								 <&cru HCLK_RKNN_CBUF>;

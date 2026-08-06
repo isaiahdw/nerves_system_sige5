@@ -298,18 +298,29 @@ is nothing left to do.
 ### Cost of a power cut
 
 Not a brick. The write is four words, each polled with a 1 ms timeout, so the
-operation is bounded at about 4 ms. Losing power inside that window leaves a
-half-programmed slot: the board boots normally and the read path refuses the
-slot, so that unit cannot hold a HUK at `0x80` and is otherwise unaffected.
+operation is bounded at about 4 ms.
+
+What the read path catches is an interruption *between* words: it refuses a slot
+with an all-zero word, so a burn that stopped after one, two or three words is
+rejected and the unit simply cannot hold a HUK at `0x80`.
+
+What it does not catch is an interruption *inside* the last word. A word part
+way through programming can read non-zero, which makes all four words non-zero
+and the slot look complete. The next boot then accepts a key that is not the one
+the writer verified, and derives secure storage from it. Nothing detects that
+today - closing it needs a completion marker in a spare word, written only after
+an exact read-back and required on every later read. Treat an interrupted burn
+as suspect, not as guaranteed-rejected.
 
 The fuses that can brick an RK3576 are the secure boot status at `0x008` and the
 RSA hash at `0x184` - enable secure boot with no key burned and the boot ROM
 demands a signature it cannot verify, which maskrom does not rescue. Neither is
 touched.
 
-There is also room to retry: the whitelist reserves `0x80`-`0x8f` and OP-TEE
-uses four of those words, leaving `0x84`, `0x88` and `0x8c` spare. No fallback
-is implemented.
+There is also room: the whitelist reserves `0x80`-`0x8f` and OP-TEE uses four of
+those words, leaving `0x84`, `0x88` and `0x8c` spare - which is where a
+completion marker would go, and where a retry slot could. Neither is
+implemented.
 
 ### Limits
 

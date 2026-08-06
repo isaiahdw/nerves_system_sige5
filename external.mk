@@ -30,9 +30,18 @@ MESA3D_CONF_OPTS += -Ddraw-use-llvm=false
 #
 # := on the check and = order matter: the value is captured before the marker
 # is set, or this make would skip itself.
+#
+# An empty MAKECMDGOALS is the default goal, which builds - and plain `make` in
+# the build directory is what buildroot itself tells you to run, so it has to be
+# covered. -n and -q ask what would happen rather than doing it, and must not
+# delete anything; GNU make puts those single-letter flags in the first word of
+# MAKEFLAGS.
 NERVES_BUILD_GOALS = all world
+NERVES_DRY_RUN = $(strip $(foreach f,n q,$(findstring $(f),$(firstword $(MAKEFLAGS)))))
+NERVES_WANTS_BUILD = \
+	$(if $(MAKECMDGOALS),$(filter $(NERVES_BUILD_GOALS),$(MAKECMDGOALS)),default)
 NERVES_STALE_CHECK := \
-	$(if $(NERVES_STALE_CHECKED),,$(filter $(NERVES_BUILD_GOALS),$(MAKECMDGOALS)))
+	$(if $(NERVES_STALE_CHECKED),,$(if $(NERVES_DRY_RUN),,$(NERVES_WANTS_BUILD)))
 export NERVES_STALE_CHECKED := 1
 
 # $(1) build directory, $(2) stamp file, $(3) hash the stamp must hold.

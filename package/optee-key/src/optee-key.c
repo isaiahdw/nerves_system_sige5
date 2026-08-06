@@ -167,14 +167,24 @@ static int find_object_quiet(CK_SESSION_HANDLE session, CK_OBJECT_CLASS class,
 			     const char *label, CK_OBJECT_HANDLE *out)
 {
 	CK_ULONG found = 0;
+	CK_RV rv, rvf;
 	CK_ATTRIBUTE search[] = {
 		{ CKA_CLASS, &class, sizeof(class) },
 		{ CKA_LABEL, (void *)label, strlen(label) },
 	};
 
 	CHECK(fn->C_FindObjectsInit(session, search, 2), "C_FindObjectsInit");
-	CHECK(fn->C_FindObjects(session, out, 1, &found), "C_FindObjects");
-	CHECK(fn->C_FindObjectsFinal(session), "C_FindObjectsFinal");
+
+	/*
+	 * A search left open makes the next C_FindObjectsInit on this session
+	 * answer CKR_OPERATION_ACTIVE, which in serve wedges every later
+	 * lookup. Finalise on the way out whether or not the search worked.
+	 */
+	rv = fn->C_FindObjects(session, out, 1, &found);
+	rvf = fn->C_FindObjectsFinal(session);
+
+	CHECK(rv, "C_FindObjects");
+	CHECK(rvf, "C_FindObjectsFinal");
 
 	return found ? 0 : 1;
 }

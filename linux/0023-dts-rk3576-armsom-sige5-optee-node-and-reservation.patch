@@ -1,31 +1,18 @@
 dts: rk3576-armsom-sige5: describe the secure world
 
 Adds the linaro,optee-tz firmware node the tee driver binds to, and
-reservations covering the memory a secure world owns.
+reservations covering the memory the secure world owns: upstream OP-TEE's
+TZDRAM at 0x70000000, 32 MB, and its static shared memory at 0x72000000,
+4 MB, from core/arch/arm/plat-rockchip/conf.mk.
 
-Confirmed on hardware with Rockchip's blob. The boot reads:
+Confirmed on hardware. Linux logs
 
-  ## Checking hash(es) for Image tee-1 ... sha256+ OK
-  I/TC: OP-TEE version: 3.13.0-1075-g72fc9ecd7, fwver: v1.12
-  I/TC: OP-TEE memory size: TEEOS 0x200000 TA 0xc00000 SHM 0x200000
-  I/TC: Primary CPU switching to normal world boot
-
-and with the reservation in place Linux logs
-
-  OF: reserved mem: 0x48400000..0x491fffff (14336 KiB) nomap optee@48400000
-  optee: revision 3.13, dynamic shared memory is enabled, initialized driver
+  OF: reserved mem: ... nomap optee@70000000
+  optee: revision 4.9, dynamic shared memory is enabled, initialized driver
 
 giving /dev/tee0 and /dev/teepriv0. Before the firmware node existed,
 /proc/device-tree/firmware held only scmi and the driver had nothing to bind
 to.
-
-Three regions rather than one because the two secure worlds this system can
-build sit at different addresses, and one kernel image should boot on either.
-Rockchip's blob loads at 0x48400000 and reports 14 MB; upstream OP-TEE uses
-TZDRAM 0x70000000 with 32 MB and static shared memory 0x72000000 with 4 MB,
-from core/arch/arm/plat-rockchip/conf.mk. Reserving the unused one costs its
-size in RAM and nothing else - 50 MB of 8 GB together, cheaper than a kernel
-whose reservation has to match the installed bootloader.
 
 All of it is inert in the default build, which ships no BL32: the SMC goes
 unanswered so the driver never registers. Without the reservation Linux is
@@ -34,56 +21,40 @@ luck rather than a guarantee.
 
 Claude-Session: https://claude.ai/code/session_01PBGQqVfXFDyZYA6aV3X3Qq
 
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
 --- a/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
 +++ b/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
-@@ -1314,6 +1314,58 @@
- 			#iommu-cells = <0>;
- 			power-domains = <&power RK3576_PD_NPU0>,
- 					<&power RK3576_PD_NPU1>;
-+		};
-+	};
-+};
+@@ -1317,3 +1317,40 @@ rknpu_mmu: iommu@27702000 {
+ 		};
+ 	};
+ };
 +
 +/*
 + * Secure world. Present only when the bootloader carries a BL32; a build
 + * without one leaves the SMC unanswered and the driver does not register,
 + * so these nodes are harmless either way.
 + *
-+ * Two regions, because the two secure worlds this system can be built with
-+ * sit at different addresses and one kernel image should boot on either:
-+ *
-+ *   A Rockchip BL32 blob loads at 0x48400000; not built here, kept anyway.
-+ *   Its size is published nowhere; OP-TEE reports its own layout at startup,
-+ *   "TEEOS 0x200000 TA 0xc00000 SHM 0x200000", which is 14 MB.
-+ *
-+ *   Upstream OP-TEE (USE_OPENSOURCE_TEE=1) uses CFG_TZDRAM_START 0x70000000
-+ *   with 32 MB and CFG_SHMEM_START 0x72000000 with 4 MB, from
-+ *   core/arch/arm/plat-rockchip/conf.mk.
-+ *
-+ * Reserving the unused one costs its size in RAM and nothing else. Both
-+ * together are 50 MB of 8 GB, which is cheaper than a kernel whose
-+ * reservation has to match the installed bootloader.
++ * The reservations match the only secure world this system builds: upstream
++ * OP-TEE (USE_OPENSOURCE_TEE=1) at CFG_TZDRAM_START 0x70000000 with 32 MB and
++ * CFG_SHMEM_START 0x72000000 with 4 MB, from core/arch/arm/plat-rockchip/
++ * conf.mk. A bootloader carrying a secure world at some other address needs
++ * its own reservation to match.
 + */
 +&{/} {
 +	firmware {
 +		optee {
 +			compatible = "linaro,optee-tz";
 +			method = "smc";
- 		};
- 	};
++		};
++	};
 +
 +	reserved-memory {
 +		#address-cells = <2>;
 +		#size-cells = <2>;
 +		ranges;
 +
-+		/* Rockchip BL32 */
-+		optee@48400000 {
-+			reg = <0x0 0x48400000 0x0 0xe00000>;
-+			no-map;
-+		};
-+
-+		/* Upstream OP-TEE: TZDRAM, then its static shared memory */
++		/* TZDRAM, then the static shared memory */
 +		optee@70000000 {
 +			reg = <0x0 0x70000000 0x0 0x2000000>;
 +			no-map;
@@ -94,4 +65,4 @@ Claude-Session: https://claude.ai/code/session_01PBGQqVfXFDyZYA6aV3X3Qq
 +			no-map;
 +		};
 +	};
- };
++};

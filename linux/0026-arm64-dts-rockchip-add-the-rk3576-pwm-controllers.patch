@@ -16,14 +16,10 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/arch/arm64/boot/dts/rockchip/rk3576.dtsi
 +++ b/arch/arm64/boot/dts/rockchip/rk3576.dtsi
-@@ -2477,10 +2477,164 @@
- 			dma-names = "tx", "rx";
- 			interrupts = <GIC_SPI 85 IRQ_TYPE_LEVEL_HIGH>;
- 			pinctrl-0 = <&uart9m0_xfer>;
-+			pinctrl-names = "default";
-+			status = "disabled";
-+		};
-+
+@@ -2577,6 +2577,160 @@ uart9: serial@2adc0000 {
+ 			status = "disabled";
+ 		};
+ 
 +		pwm1_0: pwm@2add0000 {
 +			compatible = "rockchip,rk3576-pwm";
 +			reg = <0x0 0x2add0000 0x0 0x1000>;
@@ -107,11 +103,11 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +			clocks = <&cru CLK_PWM2>, <&cru PCLK_PWM2>;
 +			clock-names = "pwm", "pclk";
 +			pinctrl-0 = <&pwm2m0_ch1>;
- 			pinctrl-names = "default";
++			pinctrl-names = "default";
 +			#pwm-cells = <3>;
- 			status = "disabled";
- 		};
- 
++			status = "disabled";
++		};
++
 +		pwm2_2: pwm@2ade2000 {
 +			compatible = "rockchip,rk3576-pwm";
 +			reg = <0x0 0x2ade2000 0x0 0x1000>;

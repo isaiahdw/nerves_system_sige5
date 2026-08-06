@@ -8,7 +8,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/Documentation/devicetree/bindings/pwm/pwm-rockchip.yaml
 +++ b/Documentation/devicetree/bindings/pwm/pwm-rockchip.yaml
-@@ -15,6 +15,7 @@
+@@ -15,6 +15,7 @@ properties:
        - const: rockchip,rk2928-pwm
        - const: rockchip,rk3288-pwm
        - const: rockchip,rk3328-pwm
@@ -16,7 +16,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
        - const: rockchip,vop-pwm
        - items:
            - const: rockchip,rk3036-pwm
-@@ -66,6 +67,7 @@
+@@ -66,6 +67,7 @@ allOf:
            contains:
              enum:
                - rockchip,rk3328-pwm

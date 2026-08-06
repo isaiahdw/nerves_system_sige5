@@ -66,7 +66,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  struct rockchip_pwm_chip {
  	struct clk *clk;
  	struct clk *pclk;
-@@ -43,6 +67,7 @@
+@@ -43,6 +67,7 @@ struct rockchip_pwm_regs {
  	unsigned long period;
  	unsigned long cntr;
  	unsigned long ctrl;
@@ -74,7 +74,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  };
  
  struct rockchip_pwm_data {
-@@ -50,6 +75,7 @@
+@@ -50,6 +75,7 @@ struct rockchip_pwm_data {
  	unsigned int prescaler;
  	bool supports_polarity;
  	bool supports_lock;
@@ -82,7 +82,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	u32 enable_conf;
  };
  
-@@ -88,13 +114,22 @@
+@@ -88,13 +114,22 @@ static int rockchip_pwm_get_state(struct pwm_chip *chip,
  	tmp *= prescaled_ns;
  	state->duty_cycle =  DIV_U64_ROUND_UP(tmp, clk_rate);
  
@@ -108,7 +108,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  	clk_disable(pc->clk);
  	clk_disable(pc->pclk);
-@@ -190,6 +225,77 @@
+@@ -190,6 +225,77 @@ static int rockchip_pwm_enable(struct pwm_chip *chip,
  	return 0;
  }
  
@@ -186,7 +186,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  static int rockchip_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
  			      const struct pwm_state *state)
  {
-@@ -206,6 +312,11 @@
+@@ -206,6 +312,11 @@ static int rockchip_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
  	if (ret)
  		return ret;
  
@@ -198,7 +198,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	pwm_get_state(pwm, &curstate);
  	enabled = curstate.enabled;
  
-@@ -291,11 +402,26 @@
+@@ -291,11 +402,26 @@ static const struct rockchip_pwm_data pwm_data_v3 = {
  		       PWM_CONTINUOUS,
  };
  
@@ -225,7 +225,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	{ /* sentinel */ }
  };
  MODULE_DEVICE_TABLE(of, rockchip_pwm_dt_ids);
-@@ -304,7 +430,7 @@
+@@ -304,7 +430,7 @@ static int rockchip_pwm_probe(struct platform_device *pdev)
  {
  	struct pwm_chip *chip;
  	struct rockchip_pwm_chip *pc;
@@ -234,7 +234,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	bool enabled;
  	int ret, count;
  
-@@ -351,8 +477,11 @@
+@@ -351,8 +477,11 @@ static int rockchip_pwm_probe(struct platform_device *pdev)
  	chip->ops = &rockchip_pwm_ops;
  
  	enable_conf = pc->data->enable_conf;

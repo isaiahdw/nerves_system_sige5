@@ -34,24 +34,45 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  };
  
  struct rockchip_pmu {
-@@ -653,6 +655,13 @@
+@@ -652,7 +654,33 @@
+ 
  		if (pd->info->delay_us)
  			udelay(pd->info->delay_us);
- 
-+		/* Optional: some domains need their resets cycled after power-on. */
++
++		/*
++		 * Optional: some domains need their resets cycled after
++		 * power-on. Where one is described it is not advisory - the
++		 * bus behind the domain comes up undefined without the pulse
++		 * and can hang on the first access, so a failure here fails
++		 * the power-on rather than leaving the caller believing the
++		 * domain is usable.
++		 */
 +		if (pd->resets) {
-+			reset_control_assert(pd->resets);
++			ret = reset_control_assert(pd->resets);
++			if (ret < 0) {
++				dev_err(pmu->dev, "failed to assert resets: %d\n",
++					ret);
++				goto out;
++			}
++
 +			udelay(10);
-+			reset_control_deassert(pd->resets);
+ 
++			ret = reset_control_deassert(pd->resets);
++			if (ret < 0) {
++				dev_err(pmu->dev, "failed to deassert resets: %d\n",
++					ret);
++				goto out;
++			}
 +		}
 +
  		rockchip_pmu_restore_qos(pd);
  	}
  
-@@ -823,6 +832,14 @@
+@@ -822,6 +850,14 @@
+ 	error = clk_bulk_prepare(pd->num_clks, pd->clks);
  	if (error)
  		goto err_put_clocks;
- 
++
 +	pd->resets = of_reset_control_array_get_optional_exclusive(node);
 +	if (IS_ERR(pd->resets)) {
 +		error = PTR_ERR(pd->resets);
@@ -59,11 +80,10 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +		pd->resets = NULL;
 +		goto err_unprepare_clocks;
 +	}
-+
+ 
  	pd->num_qos = of_count_phandle_with_args(node, "pm_qos",
  						 NULL);
- 
-@@ -893,6 +910,7 @@
+@@ -893,6 +929,7 @@
  	clk_bulk_unprepare(pd->num_clks, pd->clks);
  err_put_clocks:
  	clk_bulk_put(pd->num_clks, pd->clks);
@@ -71,7 +91,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	return error;
  }
  
-@@ -911,6 +929,7 @@
+@@ -911,6 +948,7 @@
  
  	clk_bulk_unprepare(pd->num_clks, pd->clks);
  	clk_bulk_put(pd->num_clks, pd->clks);

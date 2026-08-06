@@ -1,0 +1,26 @@
+dt-bindings: power: rockchip: allow resets on a power domain
+
+Some domains come up with the bus behind them in an undefined state, and an
+access before their resets are pulsed can hang it. The nodes are closed with
+unevaluatedProperties: false, so describing the resets in a device tree needs
+them in the schema first.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/Documentation/devicetree/bindings/power/rockchip,power-controller.yaml
++++ b/Documentation/devicetree/bindings/power/rockchip,power-controller.yaml
+@@ -136,6 +136,14 @@
+ 
+       domain-supply:
+         description: domain regulator supply.
++
++      resets:
++        minItems: 1
++        maxItems: 8
++        description: |
++          A number of resets that need to be pulsed after the domain powers
++          on. Some domains come up with the bus behind them in an undefined
++          state, and an access before the pulse can hang it.
+ 
+       pm_qos:
+         $ref: /schemas/types.yaml#/definitions/phandle-array

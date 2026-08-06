@@ -155,6 +155,7 @@ if [ '${SECURE_WORLD:-0}' = 1 ]; then
         CFG_USER_TA_TARGETS=ta_arm64 \
         CFG_PKCS11_TA=y \
         TA_PUBLIC_KEY=/ta-public.pem \
+        CFG_RK3576_OTP_SURVEY=$([ "${SECURE_WORLD_DEBUG:-0}" = 1 ] && echo y || echo n) \
         CFG_RK3576_HUK_DRY_RUN=$([ "${SECURE_WORLD_DEBUG:-0}" = 1 ] && echo y || echo n) \
         CFG_RK3576_TRNG_S_PROBE=$([ "${SECURE_WORLD_DEBUG:-0}" = 1 ] && echo y || echo n) \
         CFG_RK3576_PERSIST_HUK=y \

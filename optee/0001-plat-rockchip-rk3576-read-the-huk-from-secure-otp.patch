@@ -21,6 +21,8 @@ at an unconfirmed index could destroy vendor OTP data irreversibly, so a
 missing key is reported rather than created. Confirming the index - a key
 that reads non-zero and differs between boards would do it - is the next
 step, and the generate/persist half can follow after that.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 ---
  core/arch/arm/plat-rockchip/conf.mk           |  1 +
  core/arch/arm/plat-rockchip/platform_config.h | 15 ++++

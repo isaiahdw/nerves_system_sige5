@@ -17,13 +17,15 @@ carried a degraded setting into the next boot's seeding.
 
 Used key material is still cleared out of the data registers, now for the same
 reason the local copy is wiped rather than because anything else could read it.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 ---
  core/arch/arm/plat-rockchip/platform_config.h | 39 ++++++++++---------
  core/arch/arm/plat-rockchip/platform_rk3576.c | 18 ++++-----
  2 files changed, 29 insertions(+), 28 deletions(-)
 
 diff --git a/core/arch/arm/plat-rockchip/platform_config.h b/core/arch/arm/plat-rockchip/platform_config.h
-index 7baa0a6..6a5fdc8 100644
+index 7baa0a64..6a5fdc87 100644
 --- a/core/arch/arm/plat-rockchip/platform_config.h
 +++ b/core/arch/arm/plat-rockchip/platform_config.h
 @@ -217,32 +217,33 @@
@@ -80,7 +82,7 @@ index 7baa0a6..6a5fdc8 100644
  #define TRNG_S_CAND2		0x2a460000
  #define TRNG_S_CAND3		0x2a470000
 diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
-index 646e773..535648c 100644
+index 41ff58fb..90f07ca4 100644
 --- a/core/arch/arm/plat-rockchip/platform_rk3576.c
 +++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
 @@ -55,10 +55,9 @@
@@ -145,3 +147,6 @@ index 646e773..535648c 100644
  	};
  	size_t i = 0;
  
+-- 
+2.55.0
+

@@ -14,13 +14,15 @@ shows the source is producing distinct keys, which is the property the burn
 depends on and the one the survey could not establish by reading alone.
 
 Off by default, following CFG_RK_SECURE_BOOT_SIMULATION on rk3588.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 ---
  core/arch/arm/plat-rockchip/conf.mk           |  5 ++
  core/arch/arm/plat-rockchip/platform_rk3576.c | 67 +++++++++++++++++++
  2 files changed, 72 insertions(+)
 
 diff --git a/core/arch/arm/plat-rockchip/conf.mk b/core/arch/arm/plat-rockchip/conf.mk
-index 15c89ef..66f33af 100644
+index 1e871886..278daf82 100644
 --- a/core/arch/arm/plat-rockchip/conf.mk
 +++ b/core/arch/arm/plat-rockchip/conf.mk
 @@ -222,6 +222,11 @@ $(call force,CFG_TEE_CORE_NB_CORE,8)
@@ -36,10 +38,10 @@ index 15c89ef..66f33af 100644
  CFG_TZDRAM_SIZE  ?= 0x02000000
  CFG_SHMEM_START  ?= 0x72000000
 diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
-index 8157ee7..5489557 100644
+index c5269ca9..2b871efe 100644
 --- a/core/arch/arm/plat-rockchip/platform_rk3576.c
 +++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
-@@ -282,6 +282,70 @@ out:
+@@ -294,6 +294,70 @@ out:
  	return res;
  }
  
@@ -110,13 +112,16 @@ index 8157ee7..5489557 100644
  TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
  {
  	TEE_Result res = TEE_SUCCESS;
-@@ -304,6 +368,9 @@ TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
- 	if (res == TEE_ERROR_NO_DATA) {
+@@ -317,6 +381,9 @@ TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
  		EMSG("No HUK in secure OTP at index %#x", ROCKCHIP_OTP_HUK_INDEX);
+ #ifdef CFG_RK3576_OTP_SURVEY
  		survey_secure_otp();
++#endif
 +#ifdef CFG_RK3576_HUK_DRY_RUN
 +		dry_run_persist_huk();
-+#endif
+ #endif
  	}
  
- out:
+-- 
+2.55.0
+

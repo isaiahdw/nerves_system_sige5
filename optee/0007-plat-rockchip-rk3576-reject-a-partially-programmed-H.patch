@@ -12,15 +12,17 @@ Treating "any non-zero word" as a valid key accepts that silently: secure
 storage initialises, everything downstream works, and the key is short of its
 entropy permanently. Requiring all four words costs nothing real, since a
 genuine random key trips it with probability about 4 * 2^-32.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 ---
  core/arch/arm/plat-rockchip/platform_rk3576.c | 24 ++++++++++++++++---
  1 file changed, 21 insertions(+), 3 deletions(-)
 
 diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
-index 8065b2e..8157ee7 100644
+index d315d36f..c5269ca9 100644
 --- a/core/arch/arm/plat-rockchip/platform_rk3576.c
 +++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
-@@ -237,7 +237,7 @@ static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
+@@ -249,7 +249,7 @@ static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
  {
  	uint32_t buffer[ROCKCHIP_OTP_HUK_SIZE] = { };
  	TEE_Result res = TEE_SUCCESS;
@@ -29,7 +31,7 @@ index 8065b2e..8157ee7 100644
  	size_t i = 0;
  
  	static_assert(sizeof(buffer) == sizeof(hwkey->data));
-@@ -249,13 +249,31 @@ static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
+@@ -261,13 +261,31 @@ static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
  
  	for (i = 0; i < ARRAY_SIZE(buffer); i++)
  		if (buffer[i])
@@ -63,3 +65,6 @@ index 8065b2e..8157ee7 100644
  	memcpy(hwkey->data, buffer, HW_UNIQUE_KEY_LENGTH);
  
  out:
+-- 
+2.55.0
+

@@ -16,6 +16,8 @@ capture carries the whole boot.
 
 Debug aid, kept separate from the HUK port so it can be dropped once the
 questions it answers are settled.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 ---
  core/arch/arm/plat-rockchip/conf.mk | 10 ++++++++++
  1 file changed, 10 insertions(+)

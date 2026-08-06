@@ -25,13 +25,15 @@ bounds what sharing the block exposes.
 Seed length follows the rk3588 plat_init_soft_prng() with room to spare: RKRNG
 has no published SP 800-90B assessment to size it from, so 64 bytes gives 256
 bits even at 4 bits/byte.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 ---
  core/arch/arm/plat-rockchip/platform_config.h |  15 +++
  core/arch/arm/plat-rockchip/platform_rk3576.c | 107 ++++++++++++++++++
  2 files changed, 122 insertions(+)
 
 diff --git a/core/arch/arm/plat-rockchip/platform_config.h b/core/arch/arm/plat-rockchip/platform_config.h
-index ce4c091..b7f8b38 100644
+index ce4c0917..b7f8b388 100644
 --- a/core/arch/arm/plat-rockchip/platform_config.h
 +++ b/core/arch/arm/plat-rockchip/platform_config.h
 @@ -216,6 +216,21 @@
@@ -57,7 +59,7 @@ index ce4c091..b7f8b38 100644
   * the RK3588 value, and no Rockchip source seen so far states it for RK3576.
   * Only ever read here - see platform_rk3576.c - so a wrong index yields a
 diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
-index b54c7ae..7c3503d 100644
+index 394aed57..6803cb73 100644
 --- a/core/arch/arm/plat-rockchip/platform_rk3576.c
 +++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
 @@ -4,6 +4,7 @@
@@ -196,3 +198,6 @@ index b54c7ae..7c3503d 100644
  static struct mutex huk_mutex = MUTEX_INITIALIZER;
  static struct tee_hw_unique_key *huk;
  
+-- 
+2.55.0
+

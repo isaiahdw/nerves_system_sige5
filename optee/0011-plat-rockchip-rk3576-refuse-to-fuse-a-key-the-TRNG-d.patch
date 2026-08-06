@@ -25,12 +25,14 @@ takes a second and requires the two to differ.
 
 Wired into the dry run, which is how it gets exercised on hardware without
 writing anything. The persist path must call it before its first write.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 ---
  core/arch/arm/plat-rockchip/platform_rk3576.c | 105 ++++++++++++++++++
  1 file changed, 105 insertions(+)
 
 diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
-index 535648c..8569a74 100644
+index 90f07ca4..1c96303f 100644
 --- a/core/arch/arm/plat-rockchip/platform_rk3576.c
 +++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
 @@ -4,6 +4,7 @@
@@ -41,7 +43,7 @@ index 535648c..8569a74 100644
  #include <crypto/crypto.h>
  #include <drivers/rockchip_otp.h>
  #include <io.h>
-@@ -385,6 +386,90 @@ out:
+@@ -397,6 +398,90 @@ out:
  	return res;
  }
  
@@ -132,7 +134,7 @@ index 535648c..8569a74 100644
  #ifdef CFG_RK3576_HUK_DRY_RUN
  /*
   * Everything a burn would do, short of the write. rockchip_otp_write_secure()
-@@ -402,6 +487,7 @@ static void dry_run_persist_huk(void)
+@@ -414,6 +499,7 @@ static void dry_run_persist_huk(void)
  {
  	uint32_t current[ROCKCHIP_OTP_HUK_SIZE] = { };
  	uint32_t cand[ROCKCHIP_OTP_HUK_SIZE] = { };
@@ -140,7 +142,7 @@ index 535648c..8569a74 100644
  	uint32_t hash = 2166136261u;
  	TEE_Result res = TEE_SUCCESS;
  	size_t blank = 0;
-@@ -441,10 +527,29 @@ static void dry_run_persist_huk(void)
+@@ -453,10 +539,29 @@ static void dry_run_persist_huk(void)
  
  	IMSG("  candidate usable in %zu of %zu words, fnv1a=0x%08x",
  	     good, ARRAY_SIZE(cand), hash);
@@ -170,3 +172,6 @@ index 535648c..8569a74 100644
  	memzero_explicit(current, sizeof(current));
  }
  #endif /* CFG_RK3576_HUK_DRY_RUN */
+-- 
+2.55.0
+

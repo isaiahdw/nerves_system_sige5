@@ -11,13 +11,15 @@ the seed OP-TEE had just used.
 
 Request once more before returning, so what is left behind is a block no caller
 was given.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 ---
  core/arch/arm/plat-rockchip/platform_config.h | 10 ++++++----
  core/arch/arm/plat-rockchip/platform_rk3576.c | 15 +++++++++++++++
  2 files changed, 21 insertions(+), 4 deletions(-)
 
 diff --git a/core/arch/arm/plat-rockchip/platform_config.h b/core/arch/arm/plat-rockchip/platform_config.h
-index 101a968..d965a99 100644
+index 101a968b..d965a99b 100644
 --- a/core/arch/arm/plat-rockchip/platform_config.h
 +++ b/core/arch/arm/plat-rockchip/platform_config.h
 @@ -223,10 +223,12 @@
@@ -38,7 +40,7 @@ index 101a968..d965a99 100644
  #define TRNG_NS_BASE		0x2a410000
  #define TRNG_NS_SIZE		SIZE_K(4)
 diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
-index e6c1842..8065b2e 100644
+index e29ad801..d315d36f 100644
 --- a/core/arch/arm/plat-rockchip/platform_rk3576.c
 +++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
 @@ -126,6 +126,21 @@ TEE_Result hw_get_random_bytes(void *buf, size_t blen)
@@ -63,3 +65,6 @@ index e6c1842..8065b2e 100644
  out:
  	memzero_explicit(block, sizeof(block));
  	memzero_explicit(&val, sizeof(val));
+-- 
+2.55.0
+

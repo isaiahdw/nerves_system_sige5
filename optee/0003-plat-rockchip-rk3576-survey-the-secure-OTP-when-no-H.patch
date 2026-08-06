@@ -21,23 +21,47 @@ across boards must not be used as a HUK however plausible its position.
 
 Read-only, like the rest of the port. Nothing here writes, and the index
 stays unconfirmed until the comparison says otherwise.
----
- core/arch/arm/plat-rockchip/platform_rk3576.c | 50 ++++++++++++++++++-
- 1 file changed, 49 insertions(+), 1 deletion(-)
 
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+---
+ core/arch/arm/plat-rockchip/conf.mk           |  5 ++
+ core/arch/arm/plat-rockchip/platform_rk3576.c | 64 ++++++++++++++++++-
+ 2 files changed, 68 insertions(+), 1 deletion(-)
+
+diff --git a/core/arch/arm/plat-rockchip/conf.mk b/core/arch/arm/plat-rockchip/conf.mk
+index 15c89ef2..1e871886 100644
+--- a/core/arch/arm/plat-rockchip/conf.mk
++++ b/core/arch/arm/plat-rockchip/conf.mk
+@@ -236,6 +236,11 @@ CFG_EARLY_CONSOLE_BASE ?= UART0_BASE
+ CFG_EARLY_CONSOLE_SIZE ?= UART0_SIZE
+ CFG_EARLY_CONSOLE_BAUDRATE ?= 1500000
+ CFG_EARLY_CONSOLE_CLK_IN_HZ ?= 24000000
++# Bring-up only: walk the secure OTP and report which groups hold data when no
++# HUK is found. It says where data is, never what it is, but it is a tool for
++# locating an undocumented index rather than something a shipped build has any
++# use for, and it prints a page to the console on a part with no HUK.
++CFG_RK3576_OTP_SURVEY ?= n
+ endif
+ 
+ ifeq ($(platform-flavor-armv8),1)
 diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
-index 60fffdb..b54c7ae 100644
+index 60fffdb5..394aed57 100644
 --- a/core/arch/arm/plat-rockchip/platform_rk3576.c
 +++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
-@@ -58,6 +58,52 @@ int platform_secure_ddr_region(int rgn, paddr_t st, size_t sz)
+@@ -58,6 +58,64 @@ int platform_secure_ddr_region(int rgn, paddr_t st, size_t sz)
  static struct mutex huk_mutex = MUTEX_INITIALIZER;
  static struct tee_hw_unique_key *huk;
  
++#ifdef CFG_RK3576_OTP_SURVEY
 +/*
 + * Survey the secure OTP so the HUK index can be found without writing
 + * anything. RK3576's index is not documented; ROCKCHIP_OTP_HUK_INDEX is
 + * RK3588's, and reads there come back empty on the boards seen so far, which
 + * could mean either the wrong location or an unprovisioned part.
++ *
++ * Bring-up only, behind CFG_RK3576_OTP_SURVEY, which defaults off: it answers
++ * a question that is asked once per SoC, and on a part with no HUK it would
++ * otherwise print a page to the console every time a key is derived.
 + *
 + * Reports only where data is and what it hashes to, never the data. A real
 + * HUK printed to a shared console would not be a key any more. Comparing the
@@ -50,6 +74,12 @@ index 60fffdb..b54c7ae 100644
 +{
 +	const uint32_t stride = 4;
 +	uint32_t idx = 0;
++	/* Caller holds huk_mutex. Once is the point; the OTP does not change. */
++	static bool surveyed;
++
++	if (surveyed)
++		return;
++	surveyed = true;
 +
 +	IMSG("secure OTP survey: index range 0..0x300, %u words per group",
 +	     stride);
@@ -78,19 +108,25 @@ index 60fffdb..b54c7ae 100644
 +
 +	IMSG("secure OTP survey: done");
 +}
++#endif /* CFG_RK3576_OTP_SURVEY */
 +
  /*
   * Read-only, deliberately. RK3588 generates a HUK and burns it into the OTP
   * when it finds none; that is a one-shot write, and ROCKCHIP_OTP_HUK_INDEX is
-@@ -116,8 +162,10 @@ TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
+@@ -116,8 +174,12 @@ TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
  	}
  
  	res = read_huk(huk);
 -	if (res == TEE_ERROR_NO_DATA)
 +	if (res == TEE_ERROR_NO_DATA) {
  		EMSG("No HUK in secure OTP at index %#x", ROCKCHIP_OTP_HUK_INDEX);
++#ifdef CFG_RK3576_OTP_SURVEY
 +		survey_secure_otp();
++#endif
 +	}
  
  out:
  	if (res == TEE_SUCCESS) {
+-- 
+2.55.0
+

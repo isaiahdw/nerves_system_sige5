@@ -19,6 +19,8 @@ constant is something else.
 
 Informational only, and off by default. Seeding continues to use the
 non-secure instance, whose address is the one that can be confirmed.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 ---
  core/arch/arm/plat-rockchip/conf.mk           |   7 ++
  core/arch/arm/plat-rockchip/platform_config.h |  15 +++
@@ -26,7 +28,7 @@ non-secure instance, whose address is the one that can be confirmed.
  3 files changed, 125 insertions(+)
 
 diff --git a/core/arch/arm/plat-rockchip/conf.mk b/core/arch/arm/plat-rockchip/conf.mk
-index 66f33af..0b77fa2 100644
+index 278daf82..f79bf22f 100644
 --- a/core/arch/arm/plat-rockchip/conf.mk
 +++ b/core/arch/arm/plat-rockchip/conf.mk
 @@ -227,6 +227,13 @@ $(call force,CFG_ROCKCHIP_OTP,y)
@@ -44,7 +46,7 @@ index 66f33af..0b77fa2 100644
  CFG_TZDRAM_SIZE  ?= 0x02000000
  CFG_SHMEM_START  ?= 0x72000000
 diff --git a/core/arch/arm/plat-rockchip/platform_config.h b/core/arch/arm/plat-rockchip/platform_config.h
-index d965a99..7baa0a6 100644
+index d965a99b..7baa0a64 100644
 --- a/core/arch/arm/plat-rockchip/platform_config.h
 +++ b/core/arch/arm/plat-rockchip/platform_config.h
 @@ -233,6 +233,21 @@
@@ -70,7 +72,7 @@ index d965a99..7baa0a6 100644
   * Word index of the HUK inside the secure OTP. Unconfirmed, but RK3576's own:
   * it comes from the pending upstream port (OP-TEE PR #7841, via the-gabe's
 diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
-index 5489557..646e773 100644
+index 2b871efe..41ff58fb 100644
 --- a/core/arch/arm/plat-rockchip/platform_rk3576.c
 +++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
 @@ -57,6 +57,13 @@
@@ -197,3 +199,6 @@ index 5489557..646e773 100644
  }
  #endif /* CFG_WITH_SOFTWARE_PRNG */
  
+-- 
+2.55.0
+

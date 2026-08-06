@@ -9,13 +9,15 @@ upstream RK3576 port gives 0x80 instead.
 Neither is confirmed by observation - both read back empty on the boards seen
 so far, and only a part with a HUK already programmed could settle it - but one
 of them is at least about this SoC.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 ---
  core/arch/arm/plat-rockchip/platform_config.h | 15 ++++++++++-----
  core/arch/arm/plat-rockchip/platform_rk3576.c | 13 ++++++-------
  2 files changed, 16 insertions(+), 12 deletions(-)
 
 diff --git a/core/arch/arm/plat-rockchip/platform_config.h b/core/arch/arm/plat-rockchip/platform_config.h
-index b7f8b38..101a968 100644
+index b7f8b388..101a968b 100644
 --- a/core/arch/arm/plat-rockchip/platform_config.h
 +++ b/core/arch/arm/plat-rockchip/platform_config.h
 @@ -231,12 +231,17 @@
@@ -42,11 +44,11 @@ index b7f8b38..101a968 100644
  
  #elif defined(PLATFORM_FLAVOR_rv1106)
 diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
-index 7c3503d..e6c1842 100644
+index 6803cb73..e29ad801 100644
 --- a/core/arch/arm/plat-rockchip/platform_rk3576.c
 +++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
-@@ -167,8 +167,8 @@ static struct tee_hw_unique_key *huk;
- 
+@@ -168,8 +168,8 @@ static struct tee_hw_unique_key *huk;
+ #ifdef CFG_RK3576_OTP_SURVEY
  /*
   * Survey the secure OTP so the HUK index can be found without writing
 - * anything. RK3576's index is not documented; ROCKCHIP_OTP_HUK_INDEX is
@@ -55,8 +57,8 @@ index 7c3503d..e6c1842 100644
 + * ROCKCHIP_OTP_HUK_INDEX come back empty on the boards seen so far, which
   * could mean either the wrong location or an unprovisioned part.
   *
-  * Reports only where data is and what it hashes to, never the data. A real
-@@ -213,11 +213,10 @@ static void survey_secure_otp(void)
+  * Bring-up only, behind CFG_RK3576_OTP_SURVEY, which defaults off: it answers
+@@ -225,11 +225,10 @@ static void survey_secure_otp(void)
  
  /*
   * Read-only, deliberately. RK3588 generates a HUK and burns it into the OTP
@@ -72,3 +74,6 @@ index 7c3503d..e6c1842 100644
   */
  static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
  {
+-- 
+2.55.0
+

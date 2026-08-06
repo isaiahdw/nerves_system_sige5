@@ -24,13 +24,15 @@ A write that fails part way cannot be repaired, and says so. The read path
 already refuses a partially programmed slot on later boots.
 
 Logs a hash and an outcome, never the key.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 ---
  core/arch/arm/plat-rockchip/conf.mk           |   6 +
  core/arch/arm/plat-rockchip/platform_rk3576.c | 106 ++++++++++++++++++
  2 files changed, 112 insertions(+)
 
 diff --git a/core/arch/arm/plat-rockchip/conf.mk b/core/arch/arm/plat-rockchip/conf.mk
-index 0b77fa2..3ae6528 100644
+index f79bf22f..a156e774 100644
 --- a/core/arch/arm/plat-rockchip/conf.mk
 +++ b/core/arch/arm/plat-rockchip/conf.mk
 @@ -234,6 +234,12 @@ CFG_RK3576_HUK_DRY_RUN ?= n
@@ -47,10 +49,10 @@ index 0b77fa2..3ae6528 100644
  CFG_TZDRAM_SIZE  ?= 0x02000000
  CFG_SHMEM_START  ?= 0x72000000
 diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
-index 851f15e..9dc1ce0 100644
+index ad294a9d..6667bcd2 100644
 --- a/core/arch/arm/plat-rockchip/platform_rk3576.c
 +++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
-@@ -554,6 +554,109 @@ out:
+@@ -566,6 +566,109 @@ out:
  }
  #endif /* CFG_RK3576_HUK_DRY_RUN */
  
@@ -160,8 +162,8 @@ index 851f15e..9dc1ce0 100644
  TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
  {
  	TEE_Result res = TEE_SUCCESS;
-@@ -578,6 +681,9 @@ TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
- 		survey_secure_otp();
+@@ -592,6 +695,9 @@ TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
+ #endif
  #ifdef CFG_RK3576_HUK_DRY_RUN
  		dry_run_persist_huk();
 +#endif
@@ -170,3 +172,6 @@ index 851f15e..9dc1ce0 100644
  #endif
  	}
  
+-- 
+2.55.0
+

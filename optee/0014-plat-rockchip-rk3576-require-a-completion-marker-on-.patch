@@ -1,0 +1,139 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Isaiah <isaiahdw@gmail.com>
+Date: Thu, 6 Aug 2026 12:00:00 -0700
+Subject: [PATCH 14/14] plat-rockchip: rk3576: require a completion marker on
+ the HUK
+
+A burn is four separate word writes and the read path tells a written word
+from an unwritten one only by it being non-zero. That catches an
+interruption between words. It does not catch one inside the last word: a
+word caught part way through programming can read non-zero, so all four
+read non-zero and the slot looks complete. The next boot then keys secure
+storage from a value the writer never verified, and nothing says so.
+
+Record completion separately. The marker goes in the next word of the same
+whitelisted range - 0x84, inside 0x80-0x8f, surveyed blank on both boards
+here - and is written only after the key has been read back and compared
+exactly. The read path requires it.
+
+That closes the window in one direction: a torn key leaves the marker
+unwritten, so the slot is refused rather than trusted. It cannot repair such
+a part, because OTP bits only go one way; refusing is the whole of what is
+available.
+
+A part whose HUK was burned before this existed reads as unmarked and is
+refused, which means re-provisioning it. There is no way to tell that slot
+apart from a torn one, so accepting it would keep exactly the hole this
+closes.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+---
+ core/arch/arm/plat-rockchip/platform_rk3576.c | 63 ++++++++++++++++++-
+ 1 file changed, 62 insertions(+), 1 deletion(-)
+
+diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
+index 6667bcd2..2d6b9371 100644
+--- a/core/arch/arm/plat-rockchip/platform_rk3576.c
++++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
+@@ -281,6 +281,27 @@ void plat_init_soft_prng(void)
+ }
+ #endif /* CFG_WITH_SOFTWARE_PRNG */
+ 
++/*
++ * A HUK burn is four separate word writes, and the read path can only tell a
++ * word apart from an unwritten one by it being non-zero. That catches a burn
++ * interrupted between words, and not one interrupted inside the last word: a
++ * word caught part way through programming can read non-zero, so all four read
++ * non-zero and the slot looks complete. The next boot would then key secure
++ * storage from a value the writer never verified.
++ *
++ * So completion is recorded separately. The marker goes into the next word of
++ * the same whitelisted range, is written only after the key has been read back
++ * and compared exactly, and is required on every later read. A torn key leaves
++ * it unwritten, and an unmarked slot is refused.
++ *
++ * A part whose HUK was burned before this existed reads as unmarked and is
++ * refused. That is deliberate - there is no way to tell such a slot apart from
++ * a torn one - and it means re-provisioning those devices.
++ */
++#define ROCKCHIP_OTP_HUK_DONE_INDEX	(ROCKCHIP_OTP_HUK_INDEX + \
++					 ROCKCHIP_OTP_HUK_SIZE)
++#define ROCKCHIP_OTP_HUK_DONE_MAGIC	0x4b554844	/* "DHUK" */
++
+ static struct mutex huk_mutex = MUTEX_INITIALIZER;
+ static struct tee_hw_unique_key *huk;
+ 
+@@ -352,6 +373,7 @@ static void survey_secure_otp(void)
+ static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
+ {
+ 	uint32_t buffer[ROCKCHIP_OTP_HUK_SIZE] = { };
++	uint32_t done = 0;
+ 	TEE_Result res = TEE_SUCCESS;
+ 	size_t written = 0;
+ 	size_t i = 0;
+@@ -390,6 +412,22 @@ static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
+ 		goto out;
+ 	}
+ 
++	/*
++	 * The key words being non-zero is not proof the burn finished; the
++	 * marker is. See ROCKCHIP_OTP_HUK_DONE_INDEX.
++	 */
++	res = rockchip_otp_read_secure(&done, ROCKCHIP_OTP_HUK_DONE_INDEX, 1);
++	if (res)
++		goto out;
++
++	if (done != ROCKCHIP_OTP_HUK_DONE_MAGIC) {
++		EMSG("HUK present but not marked complete (%#"PRIx32
++		     ") - the burn was interrupted, or predates the marker",
++		     done);
++		res = TEE_ERROR_CORRUPT_OBJECT;
++		goto out;
++	}
++
+ 	memcpy(hwkey->data, buffer, HW_UNIQUE_KEY_LENGTH);
+ 
+ out:
+@@ -500,6 +538,7 @@ static void dry_run_persist_huk(void)
+ 	uint32_t current[ROCKCHIP_OTP_HUK_SIZE] = { };
+ 	uint32_t cand[ROCKCHIP_OTP_HUK_SIZE] = { };
+ 	uint32_t again[ROCKCHIP_OTP_HUK_SIZE] = { };
++	uint32_t done = 0;
+ 	uint32_t hash = 2166136261u;
+ 	TEE_Result res = TEE_SUCCESS;
+ 	size_t blank = 0;
+@@ -657,8 +696,30 @@ static TEE_Result persist_huk(struct tee_hw_unique_key *hwkey)
+ 		goto out;
+ 	}
+ 
++	/*
++	 * Only now, with the key read back and compared exactly, is the burn
++	 * known to have finished. Record that; until this word is written the
++	 * read path refuses the slot.
++	 */
++	done = ROCKCHIP_OTP_HUK_DONE_MAGIC;
++	res = rockchip_otp_write_secure(&done, ROCKCHIP_OTP_HUK_DONE_INDEX, 1);
++	if (res) {
++		EMSG("HUK burn: key written but the completion marker failed "
++		     "(%#"PRIx32") - this part cannot hold a HUK", res);
++		goto out;
++	}
++
++	done = 0;
++	res = rockchip_otp_read_secure(&done, ROCKCHIP_OTP_HUK_DONE_INDEX, 1);
++	if (res || done != ROCKCHIP_OTP_HUK_DONE_MAGIC) {
++		EMSG("HUK burn: completion marker did not read back (%#"PRIx32
++		     ")", done);
++		res = TEE_ERROR_CORRUPT_OBJECT;
++		goto out;
++	}
++
+ 	memcpy(hwkey->data, cand, HW_UNIQUE_KEY_LENGTH);
+-	IMSG("HUK burn: done, verified");
++	IMSG("HUK burn: done, verified and marked complete");
+ 
+ out:
+ 	memzero_explicit(cand, sizeof(cand));
+-- 
+2.55.0
+

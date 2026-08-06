@@ -39,3 +39,37 @@ prune_orphan_lib libLTO
 prune_orphan_lib libclang-cpp
 prune_orphan_lib libclang
 prune_orphan_lib libLLVM
+
+# The bootloader and the trusted application have to come from the same build.
+# scripts/build-uboot.sh checks the pair when it runs, but nothing re-checks it
+# at firmware-build time, so an image can be assembled from a bootloader and a
+# rootfs that were never built together - a TA with no secure world to load it,
+# or a secure world with no TA. Check what is actually about to be packaged.
+VARIANT_FILE=$NERVES_DEFCONFIG_DIR/uboot/u-boot-rockchip.variant
+PKCS11_TA=$TARGET_DIR/lib/optee_armtz/fd02c9da-306c-48c7-a49c-bbd827ae86ee.ta
+VARIANT=$(sed -n 's/^variant: *//p' "$VARIANT_FILE" 2>/dev/null)
+
+if [ -f "$PKCS11_TA" ]; then HAVE_TA=yes; else HAVE_TA=no; fi
+
+case "$VARIANT/$HAVE_TA" in
+    secure-world/yes|plain/no)
+        echo "post-build: bootloader is '$VARIANT', PKCS#11 TA present: $HAVE_TA"
+        ;;
+    secure-world/no)
+        echo "BUILD FAILED: the bootloader carries a secure world but no PKCS#11 TA" >&2
+        echo "  is in the image. Re-run scripts/build-uboot.sh." >&2
+        exit 1
+        ;;
+    plain/yes)
+        echo "BUILD FAILED: a PKCS#11 TA is in the image but the bootloader is" >&2
+        echo "  '$VARIANT', so nothing will load it. It is also signed against a" >&2
+        echo "  core this image does not carry. Remove" >&2
+        echo "  rootfs_overlay/lib/optee_armtz/, or rebuild with SECURE_WORLD=1." >&2
+        exit 1
+        ;;
+    *)
+        echo "BUILD FAILED: cannot read the bootloader variant from" >&2
+        echo "  $VARIANT_FILE" >&2
+        exit 1
+        ;;
+esac

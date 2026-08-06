@@ -304,23 +304,28 @@ What the read path catches is an interruption *between* words: it refuses a slot
 with an all-zero word, so a burn that stopped after one, two or three words is
 rejected and the unit simply cannot hold a HUK at `0x80`.
 
-What it does not catch is an interruption *inside* the last word. A word part
-way through programming can read non-zero, which makes all four words non-zero
-and the slot look complete. The next boot then accepts a key that is not the one
-the writer verified, and derives secure storage from it. Nothing detects that
-today - closing it needs a completion marker in a spare word, written only after
-an exact read-back and required on every later read. Treat an interrupted burn
-as suspect, not as guaranteed-rejected.
+What that alone does not catch is an interruption *inside* the last word. A word
+part way through programming can read non-zero, which makes all four words
+non-zero and the slot look complete, so the next boot would accept a key the
+writer never verified and derive secure storage from it.
+
+A completion marker closes it. `0x84`, the next word of the same whitelisted
+range, holds a fixed magic written only after the key has been read back and
+compared exactly, and every later read requires it. A burn torn inside the last
+word leaves it unwritten, so the slot is refused.
+
+Refused, not repaired: OTP bits only go one way, so a half-programmed slot can
+never be completed. A key burned before the marker existed also reads as
+unmarked and is refused, since it cannot be told apart from a torn one.
 
 The fuses that can brick an RK3576 are the secure boot status at `0x008` and the
 RSA hash at `0x184` - enable secure boot with no key burned and the boot ROM
 demands a signature it cannot verify, which maskrom does not rescue. Neither is
 touched.
 
-There is also room: the whitelist reserves `0x80`-`0x8f` and OP-TEE uses four of
-those words, leaving `0x84`, `0x88` and `0x8c` spare - which is where a
-completion marker would go, and where a retry slot could. Neither is
-implemented.
+The whitelist reserves `0x80`-`0x8f` and the key uses four of those words.
+`0x84` is the completion marker; `0x88` and `0x8c` remain spare, which is where
+a retry slot could go. No retry is implemented.
 
 ### Limits
 

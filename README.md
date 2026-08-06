@@ -88,14 +88,24 @@ boots the previous slot on the next reboot. If the env is missing or the
 nerves boot path fails, `bootflow scan` falls back to
 `extlinux/extlinux.conf` (eMMC first, then SD).
 
-## Secure world (OP-TEE) — opt-in, not in the shipped image
+## Secure world (OP-TEE) — the bootloader is opt-in, the rest ships
 
-The default image has no BL32. The boot chain runs BL31 and nothing in
-TrustZone above it, so `/dev/tee0` never appears even though the kernel carries
-the OP-TEE driver.
+Only the BL32 is opt-in. The default bootloader has none, so the boot chain
+runs BL31 and nothing in TrustZone above it and `/dev/tee0` never appears.
 
-The device tree reserves the secure world's memory unconditionally so one image
-boots on either bootloader. That costs 36 MB of 8 GB.
+Everything else is in every image, so that one image boots on either
+bootloader:
+
+| always present | cost |
+| --- | --- |
+| The device tree's secure-world memory reservation | 36 MB of 8 GB |
+| The kernel's OP-TEE and RPMB drivers | built in, unused with no BL32 |
+| `optee-client` (`tee-supplicant`), `optee-key`, `libp11` | a few hundred KB of rootfs |
+
+None of it does anything without a BL32 - the SMC goes unanswered, so the
+driver never registers and `tee-supplicant` has nothing to talk to - but it is
+not accurate to call the feature absent from the default build. Removing it
+would mean a second defconfig and a second device tree.
 
 There is no separate secure element on this board, so TrustZone is the only
 place a key can live that survives root or a desoldered eMMC. A NervesHub
@@ -136,8 +146,48 @@ pair.
 
 Only the public half enters the build container. OP-TEE builds against
 `TA_PUBLIC_KEY`; the trusted application is signed afterwards on this machine,
-by a step that runs openssl and OP-TEE's stitching script. For a fleet, the
-same split lets the private half live in an HSM.
+where the private key is.
+
+That signing step runs as the user who owns the key, so what else it runs
+matters. Every input is pinned: the OP-TEE commit by full SHA,
+`scripts/sign_encrypt.py` checked against a recorded hash before it is
+executed, and the Python it needs installed from
+`scripts/signing-requirements.txt` with `--require-hashes`. Only `openssl` is
+handed the key; the rest is pinned because it runs with permission to read it.
+
+### Signing from an HSM
+
+Pinning bounds what runs beside the key. It does not remove the key from the
+machine - and for a fleet, that is the thing to fix, because the private half
+cannot be rotated on devices already flashed with a matching core.
+
+What is needed is a token that will sign a supplied SHA-256 digest with
+RSA-PSS, which is the one operation `openssl pkeyutl -sign` performs here:
+
+| requirement | value |
+| --- | --- |
+| key | RSA-2048, generated on the token, non-exportable |
+| mechanism | `CKM_RSA_PKCS_PSS`, MGF1-SHA256, 32-byte salt |
+| input | a 32-byte digest, not the file - the token never sees the TA |
+| access | a PKCS#11 module, or a CLI that can replace the `openssl pkeyutl` line |
+
+Options, cheapest integration first:
+
+- **Google Cloud KMS**, if the fleet already runs there. `RSA_SIGN_PSS_2048_SHA256`
+  with the HSM protection level, and the signing line becomes
+  `gcloud kms asymmetric-sign`. No hardware to buy or carry.
+- **YubiHSM 2**, around $650. Purpose-built, ships its own PKCS#11 module,
+  documents RSA-PSS.
+- **Nitrokey HSM 2** (SmartCard-HSM), around €100, driven through OpenSC's
+  PKCS#11. Confirm it exposes `CKM_RSA_PKCS_PSS` before buying - the cheaper
+  smartcard tokens often offer PKCS#1 v1.5 only, which OP-TEE will not accept.
+- **SoftHSM2** is worth using first whichever you choose: it is free, exercises
+  the same PKCS#11 path, and tells you the integration works before any
+  hardware arrives.
+
+The acceptance test is the one the build already runs - the stitched TA has to
+pass `sign_encrypt.py verify` against the public key the core embeds. A token
+that produces a signature that fails it has the wrong padding or salt length.
 
 That writes `uboot/u-boot-rockchip.bin`, the file fwup packages: rebuild the
 system, build firmware, and flash normally.
@@ -148,13 +198,18 @@ part that has none**, because a secure world without one cannot store anything.
 It only ever writes a blank slot and only after its checks pass, so booting it
 on a part that already has a key does nothing.
 
+A key burned before the completion marker existed reads as unmarked and is
+refused, so those parts re-provision - there is no way to tell such a slot
+apart from one left by an interrupted burn.
+
 It replaces BL31 as well. Both BL31 builds deliver identical GPU rates.
 
 ### What the patches add
 
-Thirteen patches, applied to a pinned optee_os by `scripts/build-uboot.sh`:
+Fourteen patches, applied to a pinned optee_os by `scripts/build-uboot.sh`:
 
-- a HUK read from the secure OTP, rejecting a slot with an all-zero word
+- a HUK read from the secure OTP, rejecting a slot with an all-zero word or
+  without its completion marker
 - `hw_get_random_bytes()` driving RKRNG, and PRNG seeding from it; an unreadable
   TRNG is fatal
 - a secure-world console on the debug UART
@@ -182,11 +237,17 @@ Fusing is irreversible, but it is not a brick risk: the four words are written
 in a short window, and the fuses that can brick an RK3576 are the secure-boot
 control word and the RSA hash, neither of which this touches.
 
-Losing power mid-write is not fully guarded, though. The read path rejects a
-slot with an all-zero word, which catches an interruption between words but not
-one inside the last word — a partly programmed word that happens to be non-zero
-reads as a complete key. Treat an interrupted burn as suspect rather than as
-guaranteed-rejected.
+An interrupted burn is refused rather than trusted. Rejecting a slot with an
+all-zero word catches an interruption between words; it does not catch one
+inside the last word, where a partly programmed word can read non-zero and make
+the slot look complete. So completion is recorded separately: a marker in the
+next word of the same whitelisted range, written only after the key has been
+read back and compared exactly, and required on every later read. A torn burn
+leaves it unwritten.
+
+That refuses such a part rather than repairing it. OTP bits only go one way, so
+a slot left half-programmed can never be completed, and refusing is the whole of
+what is available.
 
 ### What it does not protect against
 

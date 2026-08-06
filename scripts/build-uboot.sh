@@ -21,6 +21,9 @@
 set -e
 
 UBOOT_VERSION="v2026.01"
+# The tag is what the clone asks for; this is what it has to resolve to. A tag
+# can be moved, a commit cannot.
+UBOOT_COMMIT="127a42c7257a6ffbbd1575ed1cbaa8f5408a44b3"
 # rkbin source. rockchip-linux/rkbin is the official repo but has not been
 # updated since 2026-06-11 and still ships BL32 v1.08, whose OP-TEE (3.13)
 # has no PKCS#11 TA - probed on hardware, TEEC_OpenSession on
@@ -59,7 +62,12 @@ BL31_ELF="bin/rk35/rk3576_bl31_v1.25.elf"
 # SECURE_WORLD_DEBUG=1 adds read-only diagnostics: an OTP survey, a search for
 # the secure TRNG, and a dry run reporting what a burn would do.
 OPTEE_GIT="https://github.com/OP-TEE/optee_os.git"
-OPTEE_COMMIT="5a53776"
+# Full SHA: a short one is ambiguous, and this commit decides both what the
+# secure world does and what sign_encrypt.py below is checked against.
+OPTEE_COMMIT="5a5377616c67d88a63f2724637dffc1d854b48df"
+# sha256 of scripts/sign_encrypt.py at that commit. It runs on this machine, as
+# the user who owns the TA private key.
+OPTEE_SIGNER_SHA256="9f4b2d91541518ee4900ec4339db00f3c9cec2419edefc91bda102e68946642d"
 TFA_GIT="https://github.com/ARM-software/arm-trusted-firmware.git"
 # Pinned, like OP-TEE above: master moves, and a bootloader that cannot be
 # rebuilt byte for byte is not much use for working out what is on a board.
@@ -136,6 +144,12 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git make gcc \
     libgnutls28-dev uuid-dev python3-cryptography >/dev/null
 
 git clone --depth 1 --branch $UBOOT_VERSION https://source.denx.de/u-boot/u-boot.git /u-boot
+UBOOT_HEAD=\$(git -C /u-boot rev-parse HEAD)
+if [ "\$UBOOT_HEAD" != "$UBOOT_COMMIT" ]; then
+    echo "BUILD FAILED: $UBOOT_VERSION resolves to \$UBOOT_HEAD," >&2
+    echo "  not the pinned $UBOOT_COMMIT. The tag moved." >&2
+    exit 1
+fi
 # Partial clone. rkbin is a multi-GB binary repo and a full history download
 # takes over an hour; blobs are fetched on demand at checkout instead, which
 # pulls only the handful this build actually reads.
@@ -261,8 +275,14 @@ fi
 
 # Sign the TA out here, where the private key is. The container built it
 # against the public half and left a placeholder signature; this replaces that
-# with a real one. No network, no build system, nothing but openssl and
-# OP-TEE's own stitching script.
+# with a real one.
+#
+# Only openssl is handed the key, but everything below runs as the user who
+# owns it and so could read it. That is why the inputs are pinned: the OP-TEE
+# commit by full SHA, sign_encrypt.py against OPTEE_SIGNER_SHA256, and the
+# Python it needs by hash from scripts/signing-requirements.txt. Creating the
+# venv is the one step here that uses the network, and --require-hashes is what
+# bounds it.
 if [ "${SECURE_WORLD:-0}" = 1 ]; then
     TA_WORK="$REPO_DIR/uboot/optee-ta"
     UNSIGNED="$TA_WORK/$PKCS11_UUID.stripped.elf"
@@ -273,17 +293,36 @@ if [ "${SECURE_WORLD:-0}" = 1 ]; then
         exit 1
     fi
 
+    # This script came out of a repository cloned over the network and is about
+    # to run beside the private key. Check it is the one that was reviewed.
+    GOT_SHA=$(shasum -a 256 "$SIGNER" | cut -d' ' -f1)
+    if [ "$GOT_SHA" != "$OPTEE_SIGNER_SHA256" ]; then
+        echo "BUILD FAILED: sign_encrypt.py does not match the pinned hash." >&2
+        echo "  expected $OPTEE_SIGNER_SHA256" >&2
+        echo "  got      $GOT_SHA" >&2
+        echo "  Refusing to run it next to $TA_KEY. If OPTEE_COMMIT was" >&2
+        echo "  bumped, review the new script and update OPTEE_SIGNER_SHA256." >&2
+        exit 1
+    fi
+
     # OP-TEE's signing script needs python cryptography. Keep it in a venv of
-    # its own rather than the build container: the point of signing out here
-    # is that the private key is read by this script and nothing else.
+    # its own rather than the build container, and install it by hash: an
+    # unpinned install puts whatever PyPI serves today next to the private key.
+    # The recorded requirements hash rebuilds the venv when the pins move.
     VENV="$HOME/.config/nerves_system_sige5/signing-venv"
-    if [ ! -x "$VENV/bin/python3" ]; then
+    REQS="$REPO_DIR/scripts/signing-requirements.txt"
+    REQS_SHA=$(shasum -a 256 "$REQS" | cut -d' ' -f1)
+
+    if [ ! -x "$VENV/bin/python3" ] ||
+       [ "$(cat "$VENV/.requirements-sha256" 2>/dev/null)" != "$REQS_SHA" ]; then
         echo "=== creating a signing venv in $VENV"
+        rm -rf "$VENV"
         python3 -m venv "$VENV"
-        "$VENV/bin/pip" install -q cryptography || {
-            echo "BUILD FAILED: could not install cryptography for signing" >&2
+        "$VENV/bin/pip" install -q --require-hashes -r "$REQS" || {
+            echo "BUILD FAILED: could not install the pinned signing dependencies" >&2
             exit 1
         }
+        echo "$REQS_SHA" > "$VENV/.requirements-sha256"
     fi
     PY="$VENV/bin/python3"
 

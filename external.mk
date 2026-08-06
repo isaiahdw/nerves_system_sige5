@@ -19,12 +19,21 @@ MESA3D_CONF_OPTS += -Ddraw-use-llvm=false
 # longer matches, the tree is stale: delete it and the next step extracts and
 # patches a fresh one.
 #
-# Both checks below only run for goals that actually build something. They
-# delete a build directory, which is not a thing to do while parsing a makefile
-# for `make source`, `make legal-info` or a variable query - and not something
-# to leave reachable from a recursive invocation either.
+# Both checks below run only for a goal that builds, and only once. Deleting a
+# build directory is not a thing to do while merely reading a makefile for
+# `make source`, `make legal-info` or a variable query, and a recursive make
+# reparsing this must not delete a tree the outer one is using.
+#
+# The marker is exported, so a nested make sees it already set and skips.
+# MAKELEVEL cannot be used for this: buildroot is not invoked at the top level
+# here, so requiring level 0 disables the check altogether.
+#
+# := on the check and = order matter: the value is captured before the marker
+# is set, or this make would skip itself.
 NERVES_BUILD_GOALS = all world
-NERVES_STALE_CHECK = $(if $(MAKECMDGOALS),$(filter $(NERVES_BUILD_GOALS),$(MAKECMDGOALS)),yes)
+NERVES_STALE_CHECK := \
+	$(if $(NERVES_STALE_CHECKED),,$(filter $(NERVES_BUILD_GOALS),$(MAKECMDGOALS)))
+export NERVES_STALE_CHECKED := 1
 
 # /dev/null keeps cat off stdin when there are no patches at all.
 NERVES_LINUX_PATCHES = $(sort $(wildcard $(NERVES_DEFCONFIG_DIR)/linux/*.patch))

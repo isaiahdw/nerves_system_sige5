@@ -61,7 +61,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/drivers/gpu/drm/panfrost/panfrost_devfreq.c
 +++ b/drivers/gpu/drm/panfrost/panfrost_devfreq.c
-@@ -30,6 +30,7 @@
+@@ -30,6 +30,7 @@ static int panfrost_devfreq_target(struct device *dev, unsigned long *freq,
  				   u32 flags)
  {
  	struct panfrost_device *pfdev = dev_get_drvdata(dev);
@@ -69,7 +69,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	struct dev_pm_opp *opp;
  	int err;
  
-@@ -38,13 +39,105 @@
+@@ -38,13 +39,105 @@ static int panfrost_devfreq_target(struct device *dev, unsigned long *freq,
  		return PTR_ERR(opp);
  	dev_pm_opp_put(opp);
  
@@ -100,10 +100,10 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 -		pfdev->pfdevfreq.current_frequency = *freq;
 +		pfdevfreq->current_frequency = *freq;
 +	mutex_unlock(&pfdevfreq->transition_lock);
- 
- 	return err;
- }
- 
++
++	return err;
++}
++
 +/*
 + * Leave the firmware-owned clock somewhere safe before the domain goes down.
 + * Caller must still have the domain up. Not an OPP: the parking rate is below
@@ -153,10 +153,10 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +			freq, err);
 +	else
 +		pfdevfreq->current_frequency = freq;
-+
-+	return err;
-+}
-+
+ 
+ 	return err;
+ }
+ 
 +void panfrost_devfreq_transition_lock(struct panfrost_device *pfdev)
 +{
 +	mutex_lock(&pfdev->pfdevfreq.transition_lock);
@@ -176,7 +176,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  static void panfrost_devfreq_reset(struct panfrost_devfreq *pfdevfreq)
  {
  	pfdevfreq->busy_time = 0;
-@@ -125,6 +218,14 @@
+@@ -125,6 +218,14 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
  	struct panfrost_devfreq *pfdevfreq = &pfdev->pfdevfreq;
  	unsigned long freq = ULONG_MAX;
  
@@ -191,7 +191,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	if (pfdev->comp->num_supplies > 1) {
  		/*
  		 * GPUs with more than 1 supply require platform-specific handling:
-@@ -162,6 +263,7 @@
+@@ -162,6 +263,7 @@ int panfrost_devfreq_init(struct panfrost_device *pfdev)
  	panfrost_devfreq_reset(pfdevfreq);
  
  	cur_freq = clk_get_rate(pfdev->clock);
@@ -199,7 +199,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  	opp = devfreq_recommended_opp(dev, &cur_freq, 0);
  	if (IS_ERR(opp))
-@@ -231,26 +333,39 @@
+@@ -231,26 +333,39 @@ void panfrost_devfreq_fini(struct panfrost_device *pfdev)
  	}
  }
  
@@ -227,8 +227,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	if (!pfdevfreq->devfreq)
 -		return;
 +		return 0;
- 
--	devfreq_suspend_device(pfdevfreq->devfreq);
++
 +	err = devfreq_suspend_device(pfdevfreq->devfreq);
 +	if (err) {
 +		/*
@@ -240,14 +239,15 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +		dev_err(&pfdev->pdev->dev, "failed to suspend devfreq: %d\n",
 +			err);
 +	}
-+
+ 
+-	devfreq_suspend_device(pfdevfreq->devfreq);
 +	return err;
  }
  
  void panfrost_devfreq_record_busy(struct panfrost_devfreq *pfdevfreq)
 --- a/drivers/gpu/drm/panfrost/panfrost_devfreq.h
 +++ b/drivers/gpu/drm/panfrost/panfrost_devfreq.h
-@@ -19,7 +19,18 @@
+@@ -19,7 +19,18 @@ struct panfrost_devfreq {
  	struct devfreq_simple_ondemand_data gov_data;
  	bool opp_of_table_added;
  
@@ -266,7 +266,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	unsigned long fast_rate;
  
  	ktime_t busy_time;
-@@ -36,8 +47,13 @@
+@@ -36,8 +47,13 @@ struct panfrost_devfreq {
  int panfrost_devfreq_init(struct panfrost_device *pfdev);
  void panfrost_devfreq_fini(struct panfrost_device *pfdev);
  
@@ -284,7 +284,40 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  void panfrost_devfreq_record_idle(struct panfrost_devfreq *devfreq);
 --- a/drivers/gpu/drm/panfrost/panfrost_device.c
 +++ b/drivers/gpu/drm/panfrost/panfrost_device.c
-@@ -456,11 +456,54 @@
+@@ -435,6 +435,32 @@ void panfrost_device_reset(struct panfrost_device *pfdev)
+ 	panfrost_job_enable_interrupts(pfdev);
+ }
+ 
++/*
++ * Returning an error from a runtime resume makes genpd drop the domain, and
++ * the firmware's PVTPLL state must not outlive it - that is the SError this
++ * park exists to prevent. Park while the domain is still up.
++ *
++ * If the park itself fails there is no safe way to release the domain, so hold
++ * it: report the device resumed with DVFS unavailable rather than hand genpd a
++ * domain it is about to power down under a firmware-owned clock. Returns true
++ * when the caller must not proceed to power down.
++ */
++static bool panfrost_park_or_hold(struct panfrost_device *pfdev)
++{
++	bool held = false;
++
++	panfrost_devfreq_transition_lock(pfdev);
++	if (panfrost_devfreq_park(pfdev)) {
++		dev_err(pfdev->dev,
++			"could not park the clock; holding the power domain up\n");
++		held = true;
++	}
++	panfrost_devfreq_set_available(pfdev, false);
++	panfrost_devfreq_transition_unlock(pfdev);
++
++	return held;
++}
++
+ static int panfrost_device_runtime_resume(struct device *dev)
+ {
+ 	struct panfrost_device *pfdev = dev_get_drvdata(dev);
+@@ -456,11 +482,51 @@ static int panfrost_device_runtime_resume(struct device *dev)
  		}
  	}
  
@@ -307,26 +340,23 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +		panfrost_devfreq_set_available(pfdev, true);
 +	}
 +	panfrost_devfreq_transition_unlock(pfdev);
-+	if (ret)
-+		goto err_restore;
- 
-+	ret = panfrost_devfreq_resume(pfdev);
 +	if (ret) {
 +		/*
-+		 * The rate is already back on PVTPLL. Returning an error from a
-+		 * runtime resume makes genpd drop the domain, so park the clock
-+		 * while it is still up - otherwise the firmware's PVTPLL state
-+		 * outlives the power domain, which is what the park exists to
-+		 * prevent.
++		 * A failed restore leaves the rate unknown rather than known
++		 * good, so this path needs the park as much as the one below.
 +		 */
-+		panfrost_devfreq_transition_lock(pfdev);
-+		if (panfrost_devfreq_park(pfdev))
-+			dev_warn(dev, "could not park the clock after a failed resume\n");
-+		panfrost_devfreq_set_available(pfdev, false);
-+		panfrost_devfreq_transition_unlock(pfdev);
++		if (panfrost_park_or_hold(pfdev))
++			return 0;
 +		goto err_restore;
 +	}
 +
++	ret = panfrost_devfreq_resume(pfdev);
++	if (ret) {
++		if (panfrost_park_or_hold(pfdev))
++			return 0;
++		goto err_restore;
++	}
+ 
  	return 0;
  
 +err_restore:
@@ -341,7 +371,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  err_bus_clk:
  	if (pfdev->comp->pm_features & BIT(GPU_PM_RT))
  		clk_disable(pfdev->clock);
-@@ -473,11 +516,31 @@
+@@ -473,11 +539,31 @@ static int panfrost_device_runtime_resume(struct device *dev)
  static int panfrost_device_runtime_suspend(struct device *dev)
  {
  	struct panfrost_device *pfdev = dev_get_drvdata(dev);
@@ -376,7 +406,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	panfrost_gpu_suspend_irq(pfdev);
 --- a/drivers/gpu/drm/panfrost/panfrost_device.h
 +++ b/drivers/gpu/drm/panfrost/panfrost_device.h
-@@ -109,6 +109,13 @@
+@@ -109,6 +109,13 @@ struct panfrost_compatible {
  
  	/* GPU configuration quirks */
  	u8 gpu_quirks;
@@ -392,12 +422,10 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  /**
 --- a/drivers/gpu/drm/panfrost/panfrost_drv.c
 +++ b/drivers/gpu/drm/panfrost/panfrost_drv.c
-@@ -927,6 +927,19 @@
- 	.pm_domain_names = mediatek_pm_domains,
- 	.pm_features = BIT(GPU_PM_CLK_DIS) | BIT(GPU_PM_VREG_OFF),
+@@ -929,6 +929,19 @@ static const struct panfrost_compatible mediatek_mt8370_data = {
  	.gpu_quirks = BIT(GPU_QUIRK_FORCE_AARCH64_PGTABLE),
-+};
-+
+ };
+ 
 +static const struct panfrost_compatible rk3576_data = {
 +	.num_supplies = ARRAY_SIZE(default_supplies) - 1,
 +	.supply_names = default_supplies,
@@ -409,10 +437,12 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	 * powering the domain down, and is below the lowest OPP.
 +	 */
 +	.park_rate = 200000000,
- };
- 
++};
++
  static const struct of_device_id dt_match[] = {
-@@ -944,6 +957,7 @@
+ 	/* Set first to probe before the generic compatibles */
+ 	{ .compatible = "amlogic,meson-gxm-mali",
+@@ -944,6 +957,7 @@ static const struct of_device_id dt_match[] = {
  	{ .compatible = "arm,mali-t830", .data = &default_data, },
  	{ .compatible = "arm,mali-t860", .data = &default_data, },
  	{ .compatible = "arm,mali-t880", .data = &default_data, },

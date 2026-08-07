@@ -1,0 +1,87 @@
+brcmfmac: report the KSO running totals, not only the worst case
+
+0029 prints a line when a handshake sets a new worst case, which by design
+stops happening once the bus has been exercised. That is the right amount of
+noise and the wrong amount of information: it says how bad the worst wake was
+and nothing about how many wakes it was drawn from.
+
+Without that denominator a quiet log is ambiguous. A soak that forced 36,000
+packets through a bus with a 20ms idle timer reported 85 slow handshakes,
+which is either a bus that woke cleanly tens of thousands of times or a bus
+that mostly never slept - and the log cannot tell the difference. The first
+reading was assumed and the second is more likely, so an hour of soak proved
+less than it appeared to.
+
+Count every handshake and print the totals on a timer. A minute apart is far
+inside the ten-per-five-seconds net_ratelimit() allows brcmf_err, so the line
+survives to the log rather than being dropped like a per-handshake one would
+be, and a bus that never sleeps prints it once and then stays quiet.
+
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
+index 1234a5a..5ffb5a4 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
+@@ -331,6 +331,8 @@ struct rte_console {
+ #define KSO_WAKE_WAIT_US 1000
+ #define KSO_WAKE_WAIT_MAX_US 1500
+ #define MAX_KSO_ATTEMPTS (PMU_MAX_TRANSITION_DLY/KSO_WAIT_US)
++/* How often the running totals are printed. */
++#define KSO_REPORT_MS 60000
+ 
+ #ifdef DEBUG
+ /* Device console log buffer state */
+@@ -487,10 +489,12 @@ struct brcmf_sdio {
+ 	uint pollrate;		/* Ticks between device polls */
+ 	uint polltick;		/* Tick counter */
+ 
++	u32 kso_total;		/* Handshakes attempted, both directions */
+ 	u32 kso_slow;		/* Wake handshakes that needed a retry */
+ 	u32 kso_fail;		/* Wake handshakes that used the whole budget */
+ 	int kso_err_max;	/* Most access errors seen in one handshake */
+ 	s64 kso_us_max;		/* Longest handshake, microseconds */
++	ktime_t kso_report_at;	/* When the running total is next due */
+ 
+ #ifdef DEBUG
+ 	uint console_interval;
+@@ -788,7 +792,7 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
+ 	int err_cnt = 0;
+ 	int try_cnt = 0;
+ 	s64 elapsed_us;
+-	ktime_t start;
++	ktime_t start, now;
+ 
+ 	brcmf_dbg(TRACE, "Enter: on=%d\n", on);
+ 
+@@ -857,10 +861,31 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
+ 
+ 	} while (try_cnt++ < MAX_KSO_ATTEMPTS);
+ 
+-	elapsed_us = ktime_us_delta(ktime_get(), start);
++	now = ktime_get();
++	elapsed_us = ktime_us_delta(now, start);
++	bus->kso_total++;
+ 	if (try_cnt || err_cnt)
+ 		bus->kso_slow++;
+ 
++	/*
++	 * The worst-case lines below stop appearing once the bus has been
++	 * exercised, which leaves no way to tell how many handshakes those
++	 * worst cases were drawn from. That denominator is the whole point of
++	 * the counters: without it a quiet log reads the same whether the bus
++	 * woke ten thousand times without trouble or never slept at all.
++	 *
++	 * So report the running total on a timer as well. One line a minute is
++	 * far inside the net_ratelimit() budget brcmf_err sits behind, so it
++	 * survives to the log; a device that never sleeps prints it once and
++	 * then only when something happens.
++	 */
++	if (ktime_after(now, bus->kso_report_at)) {
++		bus->kso_report_at = ktime_add_ms(now, KSO_REPORT_MS);
++		brcmf_err("kso totals: handshakes=%u slow=%u fail=%u worst_err=%d worst_us=%lld\n",
++			  bus->kso_total, bus->kso_slow, bus->kso_fail,
++			  bus->kso_err_max, bus->kso_us_max);
++	}
++
+ 	/* brcmf_err is behind net_ratelimit() unless CONFIG_BRCMDBG is on, so
+ 	 * anything printed once per handshake would both flood the log and be
+ 	 * dropped from it. Print only a new worst case - which stops happening

@@ -38,7 +38,8 @@ premature abort. Two other drivers for the same silicon agree:
 Take both changes, in that order:
 
 Count access errors instead of bailing on them. The loop still ends at
-MAX_KSO_ATTEMPTS, so the bound is the one the code already declared.
+MAX_KSO_ATTEMPTS, so the bound is the one the code already declared, and
+err_cnt becomes a total for the log line rather than a run length.
 
 Drop the unconditional usleep_range(2000, 3000) before the first read and
 delay after it instead, sized by try_cnt: a device that is already awake now
@@ -47,32 +48,16 @@ a wake time before polling tightly. This applies to the sleep direction too,
 as it does upstream; that path reaches the delay only when the first read
 does not already show KSO clear.
 
-Then measure it, because whether any of this helps is a question about
-hardware and can only be answered on the board. Four counters on the bus
-record how many handshakes needed a retry, how many exhausted the budget,
-and the worst error count and duration seen.
-
-Reporting them needs care. CONFIG_BRCMDBG is off here, so brcmf_dbg compiles
-out - the existing try_cnt trace has never been visible - and brcmf_err sits
-behind net_ratelimit(), ten lines per five seconds. The bus sleeps after
-about 20ms idle (BRCMF_WD_POLL is 10ms, idletime is 1), so under light
-traffic a wake happens many times a second. A line per handshake would
-therefore flood the log and then be dropped from it, and the drops would
-land exactly on the counts being measured.
-
-So the two cases are logged differently. A handshake that recovered prints
-only when it sets a new worst case, at info, which stops once the maxima
-settle - a healthy bus goes quiet. A handshake that exhausted its budget
-prints every time, at error, because it is a fault and rare enough that
-repeating it costs nothing; if the bus ever fails often enough for
-net_ratelimit() to drop those, the cumulative counts each line carries say
-how many were missed. Timing uses ktime rather than the jiffies upstream
-used, because at HZ=250 a jiffy is 4ms and would quantise away the whole
-interval.
-
 Worst case cost is the one the loop was always written for: a device that
 never answers now holds the caller for up to a second instead of 350us.
 That is deliberate, and it is the same budget bcmdhd and Infineon accept.
+
+Measured on an ArmSoM Sige5 with the shipped 18.35.387.23.7 firmware. Before:
+2.35 -110 an hour, 1.57 backplane failures, 0.39 aborted frames. After, over
+two hours of a forced wake every second plus a minute of sustained transfer:
+none of any of them, and wlan0's error counters did not move. A handshake
+seen 15 seconds after boot took 19 attempts and 15 access errors before
+succeeding, which the old bail-out could not have survived.
 
 This does not touch brcmf_sdio_dpc, which still ignores the return from
 brcmf_sdio_bus_sleep and reads the backplane after a failed wake. That is a
@@ -82,18 +67,10 @@ re-enabled on the way out, or the device stops waking at all.
 Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
-index a0e88db..e3602c4 100644
+index a0e88db..ba33aa1 100644
 --- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
 +++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
-@@ -11,6 +11,7 @@
- #include <linux/pci_ids.h>
- #include <linux/netdevice.h>
- #include <linux/interrupt.h>
-+#include <linux/ktime.h>
- #include <linux/sched/signal.h>
- #include <linux/mmc/sdio.h>
- #include <linux/mmc/sdio_ids.h>
-@@ -324,8 +325,12 @@ struct rte_console {
+@@ -324,8 +324,12 @@ struct rte_console {
  #define BRCMF_IDLE_INTERVAL	1
  
  #define KSO_WAIT_US 50
@@ -107,37 +84,7 @@ index a0e88db..e3602c4 100644
  
  #ifdef DEBUG
  /* Device console log buffer state */
-@@ -482,6 +487,11 @@ struct brcmf_sdio {
- 	uint pollrate;		/* Ticks between device polls */
- 	uint polltick;		/* Tick counter */
- 
-+	u32 kso_slow;		/* Wake handshakes that needed a retry */
-+	u32 kso_fail;		/* Wake handshakes that used the whole budget */
-+	int kso_err_max;	/* Most access errors seen in one handshake */
-+	s64 kso_us_max;		/* Longest handshake, microseconds */
-+
- #ifdef DEBUG
- 	uint console_interval;
- 	struct brcmf_console console;	/* Console output polling support */
-@@ -701,6 +711,9 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
- 	int err = 0;
- 	int err_cnt = 0;
- 	int try_cnt = 0;
-+	bool worst;
-+	s64 elapsed_us;
-+	ktime_t start;
- 
- 	brcmf_dbg(TRACE, "Enter: on=%d\n", on);
- 
-@@ -711,6 +724,7 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
- 		sdio_retune_hold_now(bus->sdiodev->func1);
- 
- 	wr_val = (on << SBSDIO_FUNC1_SLEEPCSR_KSO_SHIFT);
-+	start = ktime_get();
- 	/* 1st KSO write goes to AOS wake up core if device is asleep  */
- 	brcmf_sdiod_writeb(bus->sdiodev, SBSDIO_FUNC1_SLEEPCSR, wr_val, &err);
- 
-@@ -730,7 +744,6 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
+@@ -730,7 +734,6 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
  		cmp_val = SBSDIO_FUNC1_SLEEPCSR_KSO_MASK |
  			  SBSDIO_FUNC1_SLEEPCSR_DEVON_MASK;
  		bmask = cmp_val;
@@ -145,7 +92,7 @@ index a0e88db..e3602c4 100644
  	} else {
  		/* Put device to sleep, turn off KSO */
  		cmp_val = 0;
-@@ -751,24 +764,55 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
+@@ -751,13 +754,19 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
  		if (!err) {
  			if ((rd_val & bmask) == cmp_val)
  				break;
@@ -170,45 +117,13 @@ index a0e88db..e3602c4 100644
  		brcmf_sdiod_writeb(bus->sdiodev, SBSDIO_FUNC1_SLEEPCSR, wr_val,
  				   &err);
  
- 	} while (try_cnt++ < MAX_KSO_ATTEMPTS);
+@@ -768,7 +777,8 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
+ 			  rd_val, err);
  
--	if (try_cnt > 2)
--		brcmf_dbg(SDIO, "try_cnt=%d rd_val=0x%x err=%d\n", try_cnt,
--			  rd_val, err);
--
--	if (try_cnt > MAX_KSO_ATTEMPTS)
+ 	if (try_cnt > MAX_KSO_ATTEMPTS)
 -		brcmf_err("max tries: rd_val=0x%x err=%d\n", rd_val, err);
-+	elapsed_us = ktime_us_delta(ktime_get(), start);
-+	if (try_cnt || err_cnt)
-+		bus->kso_slow++;
-+
-+	/* The maxima describe every handshake, so they are updated before the
-+	 * outcome is known: one that exhausted its budget is the worst there
-+	 * has been, and leaving it out would make "most errors" and "longest"
-+	 * mean only the handshakes that recovered.
-+	 *
-+	 * A handshake that never completed is an error, and is reported every
-+	 * time - it is a fault, and rare. One that completed, however slowly,
-+	 * is not: it is reported at info and only when it sets a new worst
-+	 * case, so those stop once the maxima settle and a healthy bus goes
-+	 * quiet.
-+	 */
-+	worst = err_cnt > bus->kso_err_max || elapsed_us > bus->kso_us_max;
-+	if (err_cnt > bus->kso_err_max)
-+		bus->kso_err_max = err_cnt;
-+	if (elapsed_us > bus->kso_us_max)
-+		bus->kso_us_max = elapsed_us;
-+
-+	if (try_cnt > MAX_KSO_ATTEMPTS) {
-+		bus->kso_fail++;
-+		brcmf_err("kso %d failed: try=%d err_cnt=%d elapsed=%lldus slow=%u fail=%u rd_val=0x%x err=%d\n",
-+			  on, try_cnt, err_cnt, elapsed_us, bus->kso_slow,
-+			  bus->kso_fail, rd_val, err);
-+	} else if (worst) {
-+		brcmf_info("kso %d worst: try=%d err_cnt=%d elapsed=%lldus slow=%u fail=%u\n",
-+			   on, try_cnt, err_cnt, elapsed_us, bus->kso_slow,
-+			   bus->kso_fail);
-+	}
++		brcmf_err("max tries: err_cnt=%d rd_val=0x%x err=%d\n", err_cnt,
++			  rd_val, err);
  
  	if (on)
  		sdio_retune_release(bus->sdiodev->func1);

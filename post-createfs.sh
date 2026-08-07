@@ -19,6 +19,14 @@ $BR2_EXTERNAL_NERVES_PATH/board/nerves-common/post-createfs.sh $TARGET_DIR $FWUP
 # copies in here are duplicates from the moment they are made, and a build that
 # fails after this point still leaves the host copy intact.
 #
+# BASE_DIR is the right place to look, from nerves' own build runner rather
+# than from guessing: mounts/1 in nerves/artifact/build_runners/docker.ex binds
+# the build volume at working_dir(), and copy_artifact/2 runs
+# `cp <name> /nerves/dl/<name>` with a relative source, so `make system` writes
+# the tarball into the working directory. That directory is also buildroot's
+# output - it is what holds build/, host/, target/ and images/ - so BASE_DIR,
+# the working directory and the volume root are all the same path.
+#
 # This only holds the line. The volume's backing file is sparse and grows to
 # its high-water mark, and the guest's virtio-blk device has no discard
 # support, so freed blocks are reused rather than returned - space already lost

@@ -1,0 +1,79 @@
+From 08ce32486c18965edaf9c918580e3389a13a166b Mon Sep 17 00:00:00 2001
+From: Isaiah <isaiahdw@gmail.com>
+Date: Tue, 4 Aug 2026 21:33:24 -0700
+Subject: [PATCH 05/13] plat-rockchip: rk3576: use RK3576's own HUK index
+
+0x104 was RK3588's, inherited by copying that platform's header. The pending
+upstream RK3576 port gives 0x80 instead.
+
+Neither is confirmed by observation - both read back empty on the boards seen
+so far, and only a part with a HUK already programmed could settle it - but one
+of them is at least about this SoC.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+---
+ core/arch/arm/plat-rockchip/platform_config.h | 15 ++++++++++-----
+ core/arch/arm/plat-rockchip/platform_rk3576.c | 13 ++++++-------
+ 2 files changed, 16 insertions(+), 12 deletions(-)
+
+diff --git a/core/arch/arm/plat-rockchip/platform_config.h b/core/arch/arm/plat-rockchip/platform_config.h
+index b7f8b388..101a968b 100644
+--- a/core/arch/arm/plat-rockchip/platform_config.h
++++ b/core/arch/arm/plat-rockchip/platform_config.h
+@@ -231,12 +231,17 @@
+ #define TRNG_NS_BASE		0x2a410000
+ #define TRNG_NS_SIZE		SIZE_K(4)
+ 
+-/* Word index of the HUK inside the secure OTP. Unverified on RK3576: this is
+- * the RK3588 value, and no Rockchip source seen so far states it for RK3576.
+- * Only ever read here - see platform_rk3576.c - so a wrong index yields a
+- * wrong-looking or empty key rather than a mis-placed burn.
++/*
++ * Word index of the HUK inside the secure OTP. Unconfirmed, but RK3576's own:
++ * it comes from the pending upstream port (OP-TEE PR #7841, via the-gabe's
++ * tree), where the previous value here - 0x104 - was only RK3588's, carried
++ * over from that platform's header. Both read back empty on the boards seen so
++ * far, so neither is confirmed by observation.
++ *
++ * Only ever read here - see platform_rk3576.c - so a wrong index yields an
++ * empty or wrong-looking key rather than a mis-placed burn.
+  */
+-#define ROCKCHIP_OTP_HUK_INDEX	0x104
++#define ROCKCHIP_OTP_HUK_INDEX	0x80
+ #define ROCKCHIP_OTP_HUK_SIZE	0x4
+ 
+ #elif defined(PLATFORM_FLAVOR_rv1106)
+diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
+index 6803cb73..e29ad801 100644
+--- a/core/arch/arm/plat-rockchip/platform_rk3576.c
++++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
+@@ -168,8 +168,8 @@ static struct tee_hw_unique_key *huk;
+ #ifdef CFG_RK3576_OTP_SURVEY
+ /*
+  * Survey the secure OTP so the HUK index can be found without writing
+- * anything. RK3576's index is not documented; ROCKCHIP_OTP_HUK_INDEX is
+- * RK3588's, and reads there come back empty on the boards seen so far, which
++ * anything. RK3576's index is not documented, and reads at
++ * ROCKCHIP_OTP_HUK_INDEX come back empty on the boards seen so far, which
+  * could mean either the wrong location or an unprovisioned part.
+  *
+  * Bring-up only, behind CFG_RK3576_OTP_SURVEY, which defaults off: it answers
+@@ -225,11 +225,10 @@ static void survey_secure_otp(void)
+ 
+ /*
+  * Read-only, deliberately. RK3588 generates a HUK and burns it into the OTP
+- * when it finds none; that is a one-shot write, and ROCKCHIP_OTP_HUK_INDEX is
+- * not confirmed for RK3576 - it is RK3588's value. Writing at an unconfirmed
+- * index could destroy vendor OTP data irreversibly, so this returns an error
+- * instead. Once the index is confirmed - a key that is non-zero here and
+- * differs between boards would do it - the generate/persist half can follow.
++ * when it finds none; that is a one-shot write and the index is not confirmed
++ * for RK3576, so this returns an error instead. Once it is confirmed - a key
++ * that is non-zero here and differs between boards would do it - the
++ * generate/persist half can follow.
+  */
+ static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
+ {
+-- 
+2.55.0
+

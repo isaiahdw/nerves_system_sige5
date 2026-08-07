@@ -1,0 +1,172 @@
+From 1657c275cd131605bcf04111c6f5364d7aa15fb5 Mon Sep 17 00:00:00 2001
+From: Isaiah <isaiahdw@gmail.com>
+Date: Tue, 4 Aug 2026 21:32:48 -0700
+Subject: [PATCH 01/13] plat-rockchip: rk3576: read the HUK from secure OTP
+
+Without this OP-TEE falls back to the default HUK compiled into public
+source, so anything sealed by secure storage - RPMB included - is keyed on a
+constant anyone can look up.
+
+The pieces were already upstream: core/drivers/rockchip_otp.c is generic and
+only wants a platform OTP_S_BASE, and RK3588 already derives its HUK through
+it. RK3576's bases come from TF-A plat/rockchip/rk3576/rk3576_def.h, where
+OTP_NS_BASE 0x2a580000 matches the otp@2a580000 node in the vendor device
+tree - that correspondence is what ties the secure base 0x2a480000 to this
+SoC.
+
+Read-only on purpose. RK3588 generates a HUK and burns it into the OTP when
+it finds none, which is a one-shot write, and ROCKCHIP_OTP_HUK_INDEX here is
+RK3588's value - no Rockchip source seen so far states it for RK3576. Writing
+at an unconfirmed index could destroy vendor OTP data irreversibly, so a
+missing key is reported rather than created. Confirming the index - a key
+that reads non-zero and differs between boards would do it - is the next
+step, and the generate/persist half can follow after that.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+---
+ core/arch/arm/plat-rockchip/conf.mk           |  1 +
+ core/arch/arm/plat-rockchip/platform_config.h | 15 ++++
+ core/arch/arm/plat-rockchip/platform_rk3576.c | 83 +++++++++++++++++++
+ 3 files changed, 99 insertions(+)
+
+diff --git a/core/arch/arm/plat-rockchip/conf.mk b/core/arch/arm/plat-rockchip/conf.mk
+index 366ffd0..6498ef9 100644
+--- a/core/arch/arm/plat-rockchip/conf.mk
++++ b/core/arch/arm/plat-rockchip/conf.mk
+@@ -220,6 +220,7 @@ ifeq ($(PLATFORM_FLAVOR),rk3576)
+ include core/arch/arm/cpu/cortex-armv8-0.mk
+ $(call force,CFG_TEE_CORE_NB_CORE,8)
+ $(call force,CFG_AUTO_MAX_PA_BITS,y)
++$(call force,CFG_ROCKCHIP_OTP,y)
+ 
+ CFG_TZDRAM_START ?= 0x70000000
+ CFG_TZDRAM_SIZE  ?= 0x02000000
+diff --git a/core/arch/arm/plat-rockchip/platform_config.h b/core/arch/arm/plat-rockchip/platform_config.h
+index b7f1a80..ce4c091 100644
+--- a/core/arch/arm/plat-rockchip/platform_config.h
++++ b/core/arch/arm/plat-rockchip/platform_config.h
+@@ -209,6 +209,21 @@
+ #define PMU1SGRF_FW_BASE	0x26003000
+ #define PMU1SGRF_FW_SIZE	SIZE_K(4)
+ 
++/* Secure OTP. Bases from TF-A plat/rockchip/rk3576/rk3576_def.h, where
++ * OTP_NS_BASE 0x2a580000 matches the otp@2a580000 node in the vendor device
++ * tree, which is what ties the pair to this SoC.
++ */
++#define OTP_S_BASE		0x2a480000
++#define OTP_S_SIZE		SIZE_K(64)
++
++/* Word index of the HUK inside the secure OTP. Unverified on RK3576: this is
++ * the RK3588 value, and no Rockchip source seen so far states it for RK3576.
++ * Only ever read here - see platform_rk3576.c - so a wrong index yields a
++ * wrong-looking or empty key rather than a mis-placed burn.
++ */
++#define ROCKCHIP_OTP_HUK_INDEX	0x104
++#define ROCKCHIP_OTP_HUK_SIZE	0x4
++
+ #elif defined(PLATFORM_FLAVOR_rv1106)
+ 
+ /* GIC-400 (GICv2) */
+diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
+index 927eeac..60fffdb 100644
+--- a/core/arch/arm/plat-rockchip/platform_rk3576.c
++++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
+@@ -4,11 +4,17 @@
+  */
+ 
+ #include <common.h>
++#include <drivers/rockchip_otp.h>
+ #include <io.h>
++#include <kernel/mutex.h>
+ #include <kernel/panic.h>
++#include <kernel/tee_common_otp.h>
+ #include <mm/core_memprot.h>
+ #include <platform.h>
+ #include <platform_config.h>
++#include <stdlib_ext.h>
++#include <string.h>
++#include <string_ext.h>
+ #include <trace.h>
+ #include <util.h>
+ 
+@@ -48,3 +54,80 @@ int platform_secure_ddr_region(int rgn, paddr_t st, size_t sz)
+ 
+ 	return 0;
+ }
++
++static struct mutex huk_mutex = MUTEX_INITIALIZER;
++static struct tee_hw_unique_key *huk;
++
++/*
++ * Read-only, deliberately. RK3588 generates a HUK and burns it into the OTP
++ * when it finds none; that is a one-shot write, and ROCKCHIP_OTP_HUK_INDEX is
++ * not confirmed for RK3576 - it is RK3588's value. Writing at an unconfirmed
++ * index could destroy vendor OTP data irreversibly, so this returns an error
++ * instead. Once the index is confirmed - a key that is non-zero here and
++ * differs between boards would do it - the generate/persist half can follow.
++ */
++static TEE_Result read_huk(struct tee_hw_unique_key *hwkey)
++{
++	uint32_t buffer[ROCKCHIP_OTP_HUK_SIZE] = { };
++	TEE_Result res = TEE_SUCCESS;
++	bool key_is_empty = true;
++	size_t i = 0;
++
++	static_assert(sizeof(buffer) == sizeof(hwkey->data));
++
++	res = rockchip_otp_read_secure(buffer, ROCKCHIP_OTP_HUK_INDEX,
++				       ROCKCHIP_OTP_HUK_SIZE);
++	if (res)
++		goto out;
++
++	for (i = 0; i < ARRAY_SIZE(buffer); i++)
++		if (buffer[i])
++			key_is_empty = false;
++
++	if (key_is_empty) {
++		res = TEE_ERROR_NO_DATA;
++		goto out;
++	}
++
++	memcpy(hwkey->data, buffer, HW_UNIQUE_KEY_LENGTH);
++
++out:
++	memzero_explicit(buffer, sizeof(buffer));
++
++	return res;
++}
++
++TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
++{
++	TEE_Result res = TEE_SUCCESS;
++
++	if (!hwkey)
++		return TEE_ERROR_BAD_PARAMETERS;
++
++	mutex_lock(&huk_mutex);
++
++	if (huk)
++		goto out;
++
++	huk = malloc(sizeof(*huk));
++	if (!huk) {
++		res = TEE_ERROR_OUT_OF_MEMORY;
++		goto out;
++	}
++
++	res = read_huk(huk);
++	if (res == TEE_ERROR_NO_DATA)
++		EMSG("No HUK in secure OTP at index %#x", ROCKCHIP_OTP_HUK_INDEX);
++
++out:
++	if (res == TEE_SUCCESS) {
++		memcpy(hwkey->data, huk->data, HW_UNIQUE_KEY_LENGTH);
++	} else if (huk) {
++		free_wipe(huk);
++		huk = NULL;
++	}
++
++	mutex_unlock(&huk_mutex);
++
++	return res;
++}

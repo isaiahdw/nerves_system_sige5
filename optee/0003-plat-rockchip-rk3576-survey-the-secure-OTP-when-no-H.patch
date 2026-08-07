@@ -1,0 +1,132 @@
+From d9795353357c854c698bf4b9900578076f901716 Mon Sep 17 00:00:00 2001
+From: Isaiah <isaiahdw@gmail.com>
+Date: Tue, 4 Aug 2026 21:32:48 -0700
+Subject: [PATCH 03/13] plat-rockchip: rk3576: survey the secure OTP when no
+ HUK is found
+
+RK3576's HUK index is not documented anywhere found so far.
+ROCKCHIP_OTP_HUK_INDEX is RK3588's value, and a read there returns empty on
+this board - which could mean the wrong location or an unprovisioned part,
+and those need different responses.
+
+When the HUK read comes back empty, walk the addressable secure OTP and
+report which groups hold data and what each hashes to.
+
+Reports structure, never contents. A HUK printed to a shared console is not a
+key any more, and this console is the same UART carrying U-Boot and Linux.
+Per-group FNV-1a hashes are enough to compare the same location across
+boards, which is the actual question: a per-device secret differs everywhere,
+while a public key hash or a status word is identical. Anything identical
+across boards must not be used as a HUK however plausible its position.
+
+Read-only, like the rest of the port. Nothing here writes, and the index
+stays unconfirmed until the comparison says otherwise.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+---
+ core/arch/arm/plat-rockchip/conf.mk           |  5 ++
+ core/arch/arm/plat-rockchip/platform_rk3576.c | 64 ++++++++++++++++++-
+ 2 files changed, 68 insertions(+), 1 deletion(-)
+
+diff --git a/core/arch/arm/plat-rockchip/conf.mk b/core/arch/arm/plat-rockchip/conf.mk
+index 15c89ef2..1e871886 100644
+--- a/core/arch/arm/plat-rockchip/conf.mk
++++ b/core/arch/arm/plat-rockchip/conf.mk
+@@ -236,6 +236,11 @@ CFG_EARLY_CONSOLE_BASE ?= UART0_BASE
+ CFG_EARLY_CONSOLE_SIZE ?= UART0_SIZE
+ CFG_EARLY_CONSOLE_BAUDRATE ?= 1500000
+ CFG_EARLY_CONSOLE_CLK_IN_HZ ?= 24000000
++# Bring-up only: walk the secure OTP and report which groups hold data when no
++# HUK is found. It says where data is, never what it is, but it is a tool for
++# locating an undocumented index rather than something a shipped build has any
++# use for, and it prints a page to the console on a part with no HUK.
++CFG_RK3576_OTP_SURVEY ?= n
+ endif
+ 
+ ifeq ($(platform-flavor-armv8),1)
+diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
+index 60fffdb5..394aed57 100644
+--- a/core/arch/arm/plat-rockchip/platform_rk3576.c
++++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
+@@ -58,6 +58,64 @@ int platform_secure_ddr_region(int rgn, paddr_t st, size_t sz)
+ static struct mutex huk_mutex = MUTEX_INITIALIZER;
+ static struct tee_hw_unique_key *huk;
+ 
++#ifdef CFG_RK3576_OTP_SURVEY
++/*
++ * Survey the secure OTP so the HUK index can be found without writing
++ * anything. RK3576's index is not documented; ROCKCHIP_OTP_HUK_INDEX is
++ * RK3588's, and reads there come back empty on the boards seen so far, which
++ * could mean either the wrong location or an unprovisioned part.
++ *
++ * Bring-up only, behind CFG_RK3576_OTP_SURVEY, which defaults off: it answers
++ * a question that is asked once per SoC, and on a part with no HUK it would
++ * otherwise print a page to the console every time a key is derived.
++ *
++ * Reports only where data is and what it hashes to, never the data. A real
++ * HUK printed to a shared console would not be a key any more. Comparing the
++ * per-group hashes across boards is what distinguishes a per-device secret
++ * from something constant like a public key hash or a status word - and a
++ * value that is identical everywhere must not be used as a HUK however
++ * plausible it looks.
++ */
++static void survey_secure_otp(void)
++{
++	const uint32_t stride = 4;
++	uint32_t idx = 0;
++	/* Caller holds huk_mutex. Once is the point; the OTP does not change. */
++	static bool surveyed;
++
++	if (surveyed)
++		return;
++	surveyed = true;
++
++	IMSG("secure OTP survey: index range 0..0x300, %u words per group",
++	     stride);
++
++	for (idx = 0; idx + stride <= 0x300; idx += stride) {
++		uint32_t buf[4] = { };
++		uint32_t hash = 2166136261u;   /* FNV-1a, enough to compare */
++		bool empty = true;
++		size_t i = 0;
++
++		if (rockchip_otp_read_secure(buf, idx, stride))
++			continue;
++
++		for (i = 0; i < ARRAY_SIZE(buf); i++) {
++			if (buf[i])
++				empty = false;
++			hash = (hash ^ buf[i]) * 16777619u;
++		}
++
++		if (!empty)
++			IMSG("  otp[0x%03x..0x%03x] non-zero, fnv1a=0x%08x",
++			     idx, idx + stride - 1, hash);
++
++		memzero_explicit(buf, sizeof(buf));
++	}
++
++	IMSG("secure OTP survey: done");
++}
++#endif /* CFG_RK3576_OTP_SURVEY */
++
+ /*
+  * Read-only, deliberately. RK3588 generates a HUK and burns it into the OTP
+  * when it finds none; that is a one-shot write, and ROCKCHIP_OTP_HUK_INDEX is
+@@ -116,8 +174,12 @@ TEE_Result tee_otp_get_hw_unique_key(struct tee_hw_unique_key *hwkey)
+ 	}
+ 
+ 	res = read_huk(huk);
+-	if (res == TEE_ERROR_NO_DATA)
++	if (res == TEE_ERROR_NO_DATA) {
+ 		EMSG("No HUK in secure OTP at index %#x", ROCKCHIP_OTP_HUK_INDEX);
++#ifdef CFG_RK3576_OTP_SURVEY
++		survey_secure_otp();
++#endif
++	}
+ 
+ out:
+ 	if (res == TEE_SUCCESS) {
+-- 
+2.55.0
+

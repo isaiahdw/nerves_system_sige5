@@ -1,0 +1,45 @@
+From b6b5dd3a7c1aa9a2a31e87b6643474187f355486 Mon Sep 17 00:00:00 2001
+From: Isaiah <isaiahdw@gmail.com>
+Date: Tue, 4 Aug 2026 21:32:48 -0700
+Subject: [PATCH 02/13] plat-rockchip: rk3576: put the secure console on the
+ debug UART
+
+Upstream leaves CFG_EARLY_CONSOLE off for this flavor, so OP-TEE's own
+diagnostics go nowhere. That makes secure-world faults unreadable from the
+outside: a TA that fails to initialise looks exactly like a TA that is not
+there, and the HUK state - which decides whether secure storage can work at
+all - is invisible.
+
+Point it at UART0 (0x2ad40000), which platform_config.h already defines for
+this flavor and which U-Boot and the kernel already use at 1.5 Mbaud, so one
+capture carries the whole boot.
+
+Debug aid, kept separate from the HUK port so it can be dropped once the
+questions it answers are settled.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+---
+ core/arch/arm/plat-rockchip/conf.mk | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/core/arch/arm/plat-rockchip/conf.mk b/core/arch/arm/plat-rockchip/conf.mk
+index 6498ef9..15c89ef 100644
+--- a/core/arch/arm/plat-rockchip/conf.mk
++++ b/core/arch/arm/plat-rockchip/conf.mk
+@@ -226,6 +226,16 @@ CFG_TZDRAM_START ?= 0x70000000
+ CFG_TZDRAM_SIZE  ?= 0x02000000
+ CFG_SHMEM_START  ?= 0x72000000
+ CFG_SHMEM_SIZE   ?= 0x00400000
++
++# Secure-world console on the debug UART, the same one U-Boot and the kernel
++# use. Without it OP-TEE's own diagnostics - the HUK state, why a TA failed to
++# load - go nowhere, and a TA that will not start looks identical to one that
++# is missing.
++CFG_EARLY_CONSOLE ?= y
++CFG_EARLY_CONSOLE_BASE ?= UART0_BASE
++CFG_EARLY_CONSOLE_SIZE ?= UART0_SIZE
++CFG_EARLY_CONSOLE_BAUDRATE ?= 1500000
++CFG_EARLY_CONSOLE_CLK_IN_HZ ?= 24000000
+ endif
+ 
+ ifeq ($(platform-flavor-armv8),1)

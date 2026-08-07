@@ -1,0 +1,37 @@
+dt-bindings: gpu: arm,mali-bifrost: require the RK3576 clock trio
+
+The generic schema allows one to three clocks with any names. On RK3576
+the GPU needs exactly three and the names are load-bearing: the core clock
+is the one firmware scales, and the bus and gate clocks are what firmware
+reaches its registers over. A node missing the gate builds and boots right
+up until the first rate request, which then wedges the CPU, so a typo here
+is worth catching at validation rather than at runtime.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/Documentation/devicetree/bindings/gpu/arm,mali-bifrost.yaml	2026-07-24 14:17:26.000000000 +0000
++++ b/Documentation/devicetree/bindings/gpu/arm,mali-bifrost.yaml	2026-08-03 00:10:53.114985920 +0000
+@@ -134,6 +134,23 @@
+       properties:
+         compatible:
+           contains:
++            const: rockchip,rk3576-mali
++    then:
++      properties:
++        clocks:
++          minItems: 3
++          maxItems: 3
++        clock-names:
++          items:
++            - const: core
++            - const: bus
++            - const: gate
++      required:
++        - clock-names
++  - if:
++      properties:
++        compatible:
++          contains:
+             const: amlogic,meson-g12a-mali
+     then:
+       properties:

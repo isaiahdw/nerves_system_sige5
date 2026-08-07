@@ -70,7 +70,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  #define RKNPU_DEBUGGER_ROOT_NAME "rknpu"
  
-@@ -301,9 +302,50 @@
+@@ -308,9 +309,50 @@
  	return len;
  }
  

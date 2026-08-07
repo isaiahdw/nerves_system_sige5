@@ -211,7 +211,12 @@ edit(p, """#ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
 # reach err_power_put and drop the reference a second time - and by then the
 # debugfs nodes are live, so the count it decremented could be a reference
 # somebody else was relying on. Hold it until nothing else can fail.
-edit(p, """	if (rknpu_power_put(rknpu_dev))
+edit(p, """	/*
+	 * Drop the probe-time reference. rknpu_power_put() puts the count back
+	 * and schedules a retry if the power-off could not run, so the count
+	 * keeps describing the hardware either way.
+	 */
+	if (rknpu_power_put(rknpu_dev))
 		LOG_DEV_WARN(dev, "deferred power off after probe\\n");
 	atomic_set(&rknpu_dev->cmdline_power_refcount, 0);
 	atomic_set(&rknpu_dev->iommu_domain_refcount, 0);
@@ -225,42 +230,57 @@ err_power_put:""",
      """	atomic_set(&rknpu_dev->cmdline_power_refcount, 0);
 	atomic_set(&rknpu_dev->iommu_domain_refcount, 0);
 
-	rknpu_debugger_init(rknpu_dev);
 	rknpu_init_timer(rknpu_dev);
 
 	/*
-	 * Last. From here userspace can open the node and submit work, and
-	 * everything an ioctl reaches - power, devfreq, the workqueue, the
-	 * deferrable work, the IOMMU domains, the timer - is now up.
+	 * Last of the things that can fail. From here userspace can open the
+	 * node and submit work, and everything an ioctl reaches - power,
+	 * devfreq, the workqueue, the deferrable work, the IOMMU domains, the
+	 * timer - is now up.
 	 */
 #ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
 	ret = rknpu_drm_register(rknpu_dev);
 	if (ret) {
 		LOG_DEV_ERROR(dev, "failed to register drm device (%d)\\n", ret);
-		goto err_remove_debugger;
+		goto err_cancel_timer;
 	}
 #endif
 #ifdef CONFIG_ROCKCHIP_RKNPU_DMA_HEAP
 	ret = misc_register(&rknpu_dev->miscdev);
 	if (ret) {
 		LOG_DEV_ERROR(dev, "cannot register miscdev (%d)\\n", ret);
-		goto err_remove_debugger;
+		goto err_cancel_timer;
 	}
 #endif
 
 	/*
-	 * Nothing below can fail, so the probe's reference goes here and only
-	 * here. err_power_put drops it for every path that did not get this
-	 * far, which is what makes that one put unambiguous.
+	 * The debugger goes after all of it, and nothing fallible follows,
+	 * because its files outlive the call that made them. One left open
+	 * across a failed probe would keep pointers to nodes that
+	 * rknpu_debugger_remove() frees and to a rknpu_dev that devm is about
+	 * to release; and a write to its power attribute in that window takes
+	 * a reference teardown does not know about, so the workqueue, the
+	 * domains and the device go while it is still held. Publishing it here
+	 * means there is no window: probe cannot fail after this point.
+	 */
+	rknpu_debugger_init(rknpu_dev);
+
+	/*
+	 * Drop the probe-time reference. rknpu_power_put() puts the count back
+	 * and schedules a retry if the power-off could not run, so the count
+	 * keeps describing the hardware either way.
+	 *
+	 * Nothing above this point remains that can fail, so it goes here and
+	 * only here. err_power_put drops it for every path that did not get
+	 * this far, which is what makes that one put unambiguous.
 	 */
 	if (rknpu_power_put(rknpu_dev))
 		LOG_DEV_WARN(dev, "deferred power off after probe\\n");
 
 	return 0;
 
-err_remove_debugger:
+err_cancel_timer:
 	rknpu_cancel_timer(rknpu_dev);
-	rknpu_debugger_remove(rknpu_dev);
 	/*
 	 * While the probe reference is still held: freeing the domains
 	 * switches the active one, which is register access.
@@ -311,3 +331,37 @@ edit(p, """err_remove_drv:
 	return ret;
 }""",
      "unwind frees rather than unregisters")
+
+# The workqueue allocation fails after pm_runtime_enable() and the named domain
+# attach, but jumps past the block that undoes them - it cannot use
+# err_remove_wq, because there is no workqueue to destroy. Give that block its
+# own label so the failure can reach it without destroying something that was
+# never created.
+edit(p, """err_remove_wq:
+	destroy_workqueue(rknpu_dev->power_off_wq);
+	rknpu_dev->power_off_wq = NULL;
+
+	/*
+	 * Only reached once pm_runtime_enable() and the named domain attach
+	 * have run; earlier failures jump straight to err_remove_drv.
+	 */
+	if (!powered) {""",
+     """err_remove_wq:
+	destroy_workqueue(rknpu_dev->power_off_wq);
+	rknpu_dev->power_off_wq = NULL;
+
+err_detach_domains:
+	/*
+	 * Reached once pm_runtime_enable() and the named domain attach have
+	 * run. Failures before that jump straight to err_remove_drv.
+	 */
+	if (!powered) {""",
+     "detach label")
+
+edit(p, """		LOG_DEV_ERROR(dev, "rknpu couldn't create power_off workqueue");
+		ret = -ENOMEM;
+		goto err_remove_drv;""",
+     """		LOG_DEV_ERROR(dev, "rknpu couldn't create power_off workqueue");
+		ret = -ENOMEM;
+		goto err_detach_domains;""",
+     "workqueue failure phase")

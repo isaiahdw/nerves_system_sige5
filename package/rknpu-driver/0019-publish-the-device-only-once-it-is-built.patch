@@ -167,51 +167,78 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	rknpu_dev->heap = rk_dma_heap_find("rk-dma-heap-cma");
  	if (!rknpu_dev->heap) {
  		LOG_DEV_ERROR(dev, "failed to find cma heap\n");
-@@ -1839,16 +1869,52 @@
- 	 * and schedules a retry if the power-off could not run, so the count
- 	 * keeps describing the hardware either way.
- 	 */
--	if (rknpu_power_put(rknpu_dev))
--		LOG_DEV_WARN(dev, "deferred power off after probe\n");
- 	atomic_set(&rknpu_dev->cmdline_power_refcount, 0);
- 	atomic_set(&rknpu_dev->iommu_domain_refcount, 0);
+@@ -1783,7 +1813,7 @@
+ 	if (!rknpu_dev->power_off_wq) {
+ 		LOG_DEV_ERROR(dev, "rknpu couldn't create power_off workqueue");
+ 		ret = -ENOMEM;
+-		goto err_remove_drv;
++		goto err_detach_domains;
+ 	}
+ 	INIT_DEFERRABLE_WORK(&rknpu_dev->power_off_work,
+ 			     rknpu_power_off_delay_work);
+@@ -1834,21 +1864,67 @@
+ 	if (rknpu_dev->iommu_en)
+ 		rknpu_iommu_init_domain(rknpu_dev);
  
- 	rknpu_debugger_init(rknpu_dev);
- 	rknpu_init_timer(rknpu_dev);
- 
++	atomic_set(&rknpu_dev->cmdline_power_refcount, 0);
++	atomic_set(&rknpu_dev->iommu_domain_refcount, 0);
++
++	rknpu_init_timer(rknpu_dev);
++
 +	/*
-+	 * Last. From here userspace can open the node and submit work, and
-+	 * everything an ioctl reaches - power, devfreq, the workqueue, the
-+	 * deferrable work, the IOMMU domains, the timer - is now up.
++	 * Last of the things that can fail. From here userspace can open the
++	 * node and submit work, and everything an ioctl reaches - power,
++	 * devfreq, the workqueue, the deferrable work, the IOMMU domains, the
++	 * timer - is now up.
 +	 */
 +#ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
 +	ret = rknpu_drm_register(rknpu_dev);
 +	if (ret) {
 +		LOG_DEV_ERROR(dev, "failed to register drm device (%d)\n", ret);
-+		goto err_remove_debugger;
++		goto err_cancel_timer;
 +	}
 +#endif
 +#ifdef CONFIG_ROCKCHIP_RKNPU_DMA_HEAP
 +	ret = misc_register(&rknpu_dev->miscdev);
 +	if (ret) {
 +		LOG_DEV_ERROR(dev, "cannot register miscdev (%d)\n", ret);
-+		goto err_remove_debugger;
++		goto err_cancel_timer;
 +	}
 +#endif
 +
 +	/*
-+	 * Nothing below can fail, so the probe's reference goes here and only
-+	 * here. err_power_put drops it for every path that did not get this
-+	 * far, which is what makes that one put unambiguous.
++	 * The debugger goes after all of it, and nothing fallible follows,
++	 * because its files outlive the call that made them. One left open
++	 * across a failed probe would keep pointers to nodes that
++	 * rknpu_debugger_remove() frees and to a rknpu_dev that devm is about
++	 * to release; and a write to its power attribute in that window takes
++	 * a reference teardown does not know about, so the workqueue, the
++	 * domains and the device go while it is still held. Publishing it here
++	 * means there is no window: probe cannot fail after this point.
 +	 */
-+	if (rknpu_power_put(rknpu_dev))
-+		LOG_DEV_WARN(dev, "deferred power off after probe\n");
++	rknpu_debugger_init(rknpu_dev);
 +
+ 	/*
+ 	 * Drop the probe-time reference. rknpu_power_put() puts the count back
+ 	 * and schedules a retry if the power-off could not run, so the count
+ 	 * keeps describing the hardware either way.
++	 *
++	 * Nothing above this point remains that can fail, so it goes here and
++	 * only here. err_power_put drops it for every path that did not get
++	 * this far, which is what makes that one put unambiguous.
+ 	 */
+ 	if (rknpu_power_put(rknpu_dev))
+ 		LOG_DEV_WARN(dev, "deferred power off after probe\n");
+-	atomic_set(&rknpu_dev->cmdline_power_refcount, 0);
+-	atomic_set(&rknpu_dev->iommu_domain_refcount, 0);
+-
+-	rknpu_debugger_init(rknpu_dev);
+-	rknpu_init_timer(rknpu_dev);
+ 
  	return 0;
  
-+err_remove_debugger:
++err_cancel_timer:
 +	rknpu_cancel_timer(rknpu_dev);
-+	rknpu_debugger_remove(rknpu_dev);
 +	/*
 +	 * While the probe reference is still held: freeing the domains
 +	 * switches the active one, which is register access.
@@ -222,7 +249,20 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  err_power_put:
  	/*
  	 * Drop the probe-time reference before the resources it depends on go
-@@ -1890,11 +1956,22 @@
+@@ -1870,9 +1946,10 @@
+ 	destroy_workqueue(rknpu_dev->power_off_wq);
+ 	rknpu_dev->power_off_wq = NULL;
+ 
++err_detach_domains:
+ 	/*
+-	 * Only reached once pm_runtime_enable() and the named domain attach
+-	 * have run; earlier failures jump straight to err_remove_drv.
++	 * Reached once pm_runtime_enable() and the named domain attach have
++	 * run. Failures before that jump straight to err_remove_drv.
+ 	 */
+ 	if (!powered) {
+ 		if (rknpu_dev->multiple_domains) {
+@@ -1890,11 +1967,22 @@
  	}
  
  err_remove_drv:

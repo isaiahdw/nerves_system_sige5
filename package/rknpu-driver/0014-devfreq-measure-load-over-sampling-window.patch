@@ -118,7 +118,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	if (IS_ERR(rknpu_dev->devfreq)) {
 --- a/rknpu_drv.c
 +++ b/rknpu_drv.c
-@@ -821,6 +821,9 @@
+@@ -855,6 +855,9 @@
  			job->hw_recoder_time = now;
  		}
  

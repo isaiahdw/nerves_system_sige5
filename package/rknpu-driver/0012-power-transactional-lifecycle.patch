@@ -61,12 +61,26 @@ there and leaks rather than pulling them; and a failed rate restore only
 tears down once pm_runtime_put_sync() confirms the device really
 suspended.
 
-Ownership across a failed power-on. Two of the unwind paths deliberately
-leave resources enabled - a domain that will not go down, a device that
-will not suspend - and rknpu_power_get() was releasing its reference
-anyway, so the count described powered hardware as off and the next get
-would enable it a second time. Those paths answer -EBUSY now and the
-count stays held.
+Ownership across a failed unwind. Three paths deliberately leave resources
+enabled - a domain that will not go down, on either the power-on or the
+power-off side, and a device that will not suspend - and rknpu_power_get()
+was releasing its reference anyway, so the count described powered
+hardware as off and the next get would enable it a second time.
+
+Holding the count instead is only half an answer: nothing owns that
+reference either, and a retry cannot resume from where those paths stop -
+it would put a runtime PM reference power-on had already released, or a
+domain that is already down. So they latch power_wedged, which says the
+NPU is powered with a transition half-done. Acquisitions are refused from
+there rather than handed a device whose state is not known, the retry
+worker stands down, and probe and remove take the route that leaves the
+domains attached and runtime PM enabled.
+
+Power-off's own domain releases were unchecked, so a domain that stayed up
+was followed by the clocks and rails going down underneath it - the case
+the power-on unwind already refuses. They are checked against the same
+rule now. Its regulators also came down in the order they were enabled;
+they follow the power-on unwind and go in reverse.
 
 Remove closes the ioctl paths before quiescing the worker, since they take
 power references and one arriving afterwards would queue a retry onto a
@@ -87,7 +101,40 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/rknpu_drv.c
 +++ b/rknpu_drv.c
-@@ -383,8 +383,17 @@
+@@ -326,6 +326,21 @@
+ static int rknpu_power_on(struct rknpu_device *rknpu_dev);
+ static int rknpu_power_off(struct rknpu_device *rknpu_dev);
+ 
++/*
++ * Latch a failed unwind. The power paths stop short of pulling suppliers out
++ * from under hardware they could not bring down, which leaves the NPU powered
++ * with a reference held and no owner for it - resuming the transition would
++ * put a runtime PM reference that was already released, or a domain that is
++ * already down. Rather than retry into that, record it once: acquisitions are
++ * refused from here, the retry worker stands down, and teardown leaves the
++ * domains attached and runtime PM enabled.
++ */
++static void rknpu_power_wedge(struct rknpu_device *rknpu_dev, const char *what)
++{
++	WRITE_ONCE(rknpu_dev->power_wedged, true);
++	LOG_DEV_ERROR(rknpu_dev->dev, "%s; the npu stays powered\n", what);
++}
++
+ /* Floor for the debugfs-settable delay: zero would busy-loop the workqueue. */
+ #define RKNPU_POWER_OFF_RETRY_MIN_MS 20
+ #define RKNPU_POWER_OFF_RETRY_LIMIT 10
+@@ -345,6 +360,10 @@
+ 	if (!rknpu_dev->power_off_wq)
+ 		return;
+ 
++	/* A wedged device has no state to retry from. */
++	if (READ_ONCE(rknpu_dev->power_wedged))
++		return;
++
+ 	if (++rknpu_dev->power_off_retries > RKNPU_POWER_OFF_RETRY_LIMIT) {
+ 		LOG_DEV_ERROR(
+ 			rknpu_dev->dev,
+@@ -383,8 +402,26 @@
  	int ret = 0;
  
  	mutex_lock(&rknpu_dev->power_lock);
@@ -95,18 +142,27 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	if (atomic_inc_return(&rknpu_dev->power_refcount) == 1) {
  		ret = rknpu_power_on(rknpu_dev);
 +		/*
-+		 * -EBUSY is rknpu_power_on() reporting that it could not unwind
-+		 * and left resources enabled. Releasing the count there would
++		 * The count follows the hardware: it goes back when power-on
++		 * unwound cleanly, and stays held when the unwind stopped
++		 * partway and left resources enabled. Releasing it there would
 +		 * describe powered hardware as off and let the next get enable
-+		 * it a second time, so the count stays held.
++		 * it a second time.
 +		 */
-+		if (ret && ret != -EBUSY)
++		if (ret && !READ_ONCE(rknpu_dev->power_wedged))
 +			atomic_dec(&rknpu_dev->power_refcount);
++	} else if (READ_ONCE(rknpu_dev->power_wedged)) {
++		/*
++		 * Powered, but a transition stopped half-done, so the count
++		 * describes one thing and the hardware another. Refuse rather
++		 * than hand out a device whose state is not known.
++		 */
++		atomic_dec(&rknpu_dev->power_refcount);
++		ret = -EBUSY;
 +	}
  	mutex_unlock(&rknpu_dev->power_lock);
  
  	return ret;
-@@ -627,7 +636,9 @@
+@@ -627,7 +664,14 @@
  
  	rknpu_dev = ((struct rknpu_session *)file->private_data)->rknpu_dev;
  
@@ -114,10 +170,15 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	ret = rknpu_power_get(rknpu_dev);
 +	if (ret)
 +		return ret;
++
++	/* The hardware is up and this caller holds a reference, which is what
++	 * a deferred destroy has been waiting for.
++	 */
++	rknpu_gem_drain_deferred(rknpu_dev);
  
  	switch (_IOC_NR(cmd)) {
  	case RKNPU_ACTION:
-@@ -688,8 +699,9 @@
+@@ -688,8 +732,10 @@
  			    struct drm_file *file_priv)                     \
  	{                                                                   \
  		struct rknpu_device *rknpu_dev = dev_get_drvdata(dev->dev); \
@@ -126,10 +187,11 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +		int ret = rknpu_power_get(rknpu_dev);                       \
 +		if (ret)                                                    \
 +			return ret;                                         \
++		rknpu_gem_drain_deferred(rknpu_dev);                        \
  		ret = func(dev, data, file_priv);                           \
  		rknpu_power_put_delay(rknpu_dev);                           \
  		return ret;                                                 \
-@@ -951,7 +963,8 @@
+@@ -951,7 +997,8 @@
  static int rknpu_power_on(struct rknpu_device *rknpu_dev)
  {
  	struct device *dev = rknpu_dev->dev;
@@ -139,7 +201,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  #ifndef FPGA_PLATFORM
  	if (rknpu_dev->vdd) {
-@@ -972,7 +985,7 @@
+@@ -972,7 +1019,7 @@
  				dev,
  				"failed to enable mem reg for rknpu, ret: %d\n",
  				ret);
@@ -148,7 +210,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		}
  	}
  #endif
-@@ -981,85 +994,120 @@
+@@ -981,85 +1028,119 @@
  	if (ret) {
  		LOG_DEV_ERROR(dev, "failed to enable clk for rknpu, ret: %d\n",
  			      ret);
@@ -251,9 +313,9 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +		 */
 +		pmret = pm_runtime_put_sync(dev);
 +		if (pmret < 0 || !pm_runtime_status_suspended(dev)) {
-+			LOG_DEV_ERROR(
-+				dev,
-+				"npu still active after failed resume, leaving it powered\n");
++			rknpu_power_wedge(
++				rknpu_dev,
++				"npu still active after failed resume");
 +			return -EBUSY;
 +		}
 +		goto err_hw;
@@ -282,9 +344,8 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	 * prevent, so stop here and leave the leak.
 +	 */
 +	if (domain_err) {
-+		LOG_DEV_ERROR(
-+			dev,
-+			"npu domains did not go down, leaving clocks and rails up\n");
++		rknpu_power_wedge(rknpu_dev,
++				  "npu domains did not go down, leaving clocks and rails up");
 +		return -EBUSY;
 +	}
 +err_clk:
@@ -300,15 +361,33 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  #endif
  
  	return ret;
-@@ -1075,7 +1123,6 @@
+@@ -1068,6 +1149,7 @@
+ static int rknpu_power_off(struct rknpu_device *rknpu_dev)
+ {
+ 	struct device *dev = rknpu_dev->dev;
++	bool domain_err = false;
+ 
+ #ifndef FPGA_PLATFORM
+ 	int ret;
+@@ -1075,9 +1157,16 @@
  	bool val;
  #endif
  
 -	rknpu_devfreq_lock(rknpu_dev);
  #endif
  
++	/*
++	 * A wedged device is powered with a transition half-done, and this
++	 * path cannot resume from there: it would put a runtime PM reference
++	 * power-on had already released, or a domain that is already down.
++	 */
++	if (READ_ONCE(rknpu_dev->power_wedged))
++		return -EBUSY;
++
  #ifndef FPGA_PLATFORM
-@@ -1098,7 +1145,6 @@
+ 	/*
+ 	 * Shut the SCMI gate first. Doing it after the suspended check below
+@@ -1098,7 +1187,6 @@
  		WRITE_ONCE(rknpu_dev->hw_powered, true);
  		pm_runtime_get_noresume(dev);
  		LOG_DEV_ERROR(dev, "failed to suspend npu: %d\n", ret);
@@ -316,7 +395,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		return ret;
  	}
  	/*
-@@ -1112,7 +1158,6 @@
+@@ -1112,7 +1200,6 @@
  	if (!pm_runtime_status_suspended(dev)) {
  		WRITE_ONCE(rknpu_dev->hw_powered, true);
  		pm_runtime_get_noresume(dev);
@@ -324,7 +403,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		return -EBUSY;
  	}
  #else
-@@ -1152,8 +1197,7 @@
+@@ -1152,8 +1239,7 @@
  		if (ret) {
  			LOG_DEV_ERROR(dev, "iommu still enabled\n");
  			pm_runtime_get_sync(dev);
@@ -334,19 +413,50 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		}
  #endif
  #else
-@@ -1168,10 +1212,6 @@
- 			pm_runtime_put_sync(rknpu_dev->genpd_dev_npu0);
- 	}
+@@ -1161,27 +1247,40 @@
+ 			msleep(20);
+ #endif
+ 		if (rknpu_dev->genpd_dev_npu2)
+-			pm_runtime_put_sync(rknpu_dev->genpd_dev_npu2);
++			domain_err |= pm_runtime_put_sync(
++					      rknpu_dev->genpd_dev_npu2) < 0;
+ 		if (rknpu_dev->genpd_dev_npu1)
+-			pm_runtime_put_sync(rknpu_dev->genpd_dev_npu1);
++			domain_err |= pm_runtime_put_sync(
++					      rknpu_dev->genpd_dev_npu1) < 0;
+ 		if (rknpu_dev->genpd_dev_npu0)
+-			pm_runtime_put_sync(rknpu_dev->genpd_dev_npu0);
+-	}
++			domain_err |= pm_runtime_put_sync(
++					      rknpu_dev->genpd_dev_npu0) < 0;
  
 -#ifndef FPGA_PLATFORM
 -	rknpu_devfreq_unlock(rknpu_dev);
 -#endif
--
++		/*
++		 * Same rule as the power-on unwind: a domain that would not go
++		 * down still has registers behind the clocks and rails below,
++		 * so stop rather than pull them.
++		 */
++		if (domain_err) {
++			rknpu_power_wedge(rknpu_dev,
++					  "npu domains did not go down, leaving clocks and rails up");
++			return -EBUSY;
++		}
++	}
+ 
  	clk_bulk_disable_unprepare(rknpu_dev->num_clks, rknpu_dev->clks);
  
++	/* Reverse of the enable order in rknpu_power_on(). */
  #ifndef FPGA_PLATFORM
-@@ -1182,6 +1222,8 @@
+-	if (rknpu_dev->vdd)
+-		regulator_disable(rknpu_dev->vdd);
+-
+ 	if (rknpu_dev->mem)
  		regulator_disable(rknpu_dev->mem);
++
++	if (rknpu_dev->vdd)
++		regulator_disable(rknpu_dev->vdd);
  #endif
  
 +	rknpu_dev->power_off_retries = 0;
@@ -354,7 +464,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	return 0;
  }
  
-@@ -1366,6 +1408,7 @@
+@@ -1366,6 +1465,7 @@
  	struct resource *res = NULL;
  	struct rknpu_device *rknpu_dev = NULL;
  	struct device *dev = &pdev->dev;
@@ -362,7 +472,16 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	struct device *virt_dev = NULL;
  	const struct of_device_id *match = NULL;
  	const struct rknpu_config *config = NULL;
-@@ -1576,33 +1619,49 @@
+@@ -1471,6 +1571,8 @@
+ 	spin_lock_init(&rknpu_dev->lock);
+ 	spin_lock_init(&rknpu_dev->irq_lock);
+ 	mutex_init(&rknpu_dev->power_lock);
++	mutex_init(&rknpu_dev->deferred_free_lock);
++	INIT_LIST_HEAD(&rknpu_dev->deferred_free);
+ 	mutex_init(&rknpu_dev->reset_lock);
+ 	mutex_init(&rknpu_dev->domain_lock);
+ 	for (i = 0; i < config->num_irqs; i++) {
+@@ -1576,33 +1678,52 @@
  		rknpu_dev->multiple_domains = true;
  	}
  
@@ -397,8 +516,11 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	 * every other user and the count always describes the hardware.
 +	 */
 +	ret = rknpu_power_get(rknpu_dev);
-+	if (ret)
++	if (ret) {
++		if (READ_ONCE(rknpu_dev->power_wedged))
++			powered = true;
 +		goto err_remove_wq;
++	}
 +
 +#ifndef FPGA_PLATFORM
 +	/*
@@ -423,7 +545,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		} else {
  			LOG_DEV_WARN(dev, "could not find sram resource!\n");
  		}
-@@ -1619,14 +1678,12 @@
+@@ -1619,14 +1740,12 @@
  		rknpu_iommu_init_domain(rknpu_dev);
  
  	/*
@@ -443,7 +565,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	atomic_set(&rknpu_dev->cmdline_power_refcount, 0);
  	atomic_set(&rknpu_dev->iommu_domain_refcount, 0);
  
-@@ -1635,14 +1692,46 @@
+@@ -1635,14 +1754,46 @@
  
  	return 0;
  
@@ -493,7 +615,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  err_remove_drv:
  #ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
  	rknpu_drm_remove(rknpu_dev);
-@@ -1657,10 +1746,42 @@
+@@ -1657,10 +1808,60 @@
  static int rknpu_remove(struct platform_device *pdev)
  {
  	struct rknpu_device *rknpu_dev = platform_get_drvdata(pdev);
@@ -525,8 +647,26 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	 * The remove callback the kernel calls returns void, so a failure here
 +	 * cannot stop the teardown - say so rather than pretending otherwise.
 +	 */
++	/*
++	 * Before the power goes away for good: destroy what can still be
++	 * destroyed and account for anything that cannot. Nothing drains the
++	 * list after this.
++	 *
++	 * If the reference cannot be taken the objects are only counted and
++	 * abandoned. Destroying them would need the IOMMU, and an NPU that
++	 * will not power up is exactly when touching it is unsafe.
++	 */
++	if (!rknpu_power_get(rknpu_dev)) {
++		rknpu_gem_flush_deferred(rknpu_dev, true);
++		rknpu_power_put(rknpu_dev);
++	} else {
++		rknpu_gem_flush_deferred(rknpu_dev, false);
++	}
++
 +	mutex_lock(&rknpu_dev->power_lock);
-+	if (atomic_read(&rknpu_dev->power_refcount) > 0) {
++	if (READ_ONCE(rknpu_dev->power_wedged)) {
++		powered = true;
++	} else if (atomic_read(&rknpu_dev->power_refcount) > 0) {
 +		if (rknpu_power_off(rknpu_dev))
 +			powered = true;
 +		else
@@ -536,7 +676,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  	rknpu_debugger_remove(rknpu_dev);
  	rknpu_cancel_timer(rknpu_dev);
-@@ -1688,21 +1809,23 @@
+@@ -1688,21 +1889,23 @@
  		iommu_group_put(rknpu_dev->iommu_group);
  	}
  
@@ -571,6 +711,25 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  
  	if (rknpu_dev->multiple_domains) {
  		if (rknpu_dev->genpd_dev_npu0)
+@@ -1723,10 +1926,16 @@
+ static int rknpu_suspend(struct device *dev)
+ {
+ 	struct rknpu_device *rknpu_dev = dev_get_drvdata(dev);
++	int ret = rknpu_power_get(rknpu_dev);
+ 
+-	rknpu_power_get(rknpu_dev);
++	if (ret)
++		return ret;
++
++	ret = pm_runtime_force_suspend(dev);
++	if (ret)
++		rknpu_power_put(rknpu_dev);
+ 
+-	return pm_runtime_force_suspend(dev);
++	return ret;
+ }
+ 
+ static int rknpu_resume(struct device *dev)
 --- a/rknpu_devfreq.c
 +++ b/rknpu_devfreq.c
 @@ -253,14 +253,6 @@
@@ -588,6 +747,212 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  /*
   * Bin numbers as the vendor's rockchip_get_soc_info() assigns them, and one of
   * ours. BIT(bin) is matched against the first cell of opp-supported-hw in the
+--- a/rknpu_debugger.c
++++ b/rknpu_debugger.c
+@@ -107,8 +107,11 @@
+ 	buf[len - 1] = '\0';
+ 
+ 	if (strcmp(buf, "on") == 0) {
++		int ret = rknpu_power_get(rknpu_dev);
++
++		if (ret)
++			return ret;
+ 		atomic_inc(&rknpu_dev->cmdline_power_refcount);
+-		rknpu_power_get(rknpu_dev);
+ 		LOG_INFO("rknpu power is on!");
+ 	} else if (strcmp(buf, "off") == 0) {
+ 		if (atomic_read(&rknpu_dev->power_refcount) > 0 &&
+@@ -181,8 +184,10 @@
+ 	struct rknpu_device *rknpu_dev =
+ 		container_of(debugger, struct rknpu_device, debugger);
+ 	unsigned long current_freq = 0;
++	int ret = rknpu_power_get(rknpu_dev);
+ 
+-	rknpu_power_get(rknpu_dev);
++	if (ret)
++		return ret;
+ 
+ 	current_freq = clk_get_rate(rknpu_dev->clks[0].clk);
+ 
+@@ -222,7 +227,9 @@
+ 	if (!rknpu_dev->devfreq)
+ 		return -EFAULT;
+ 
+-	rknpu_power_get(rknpu_dev);
++	ret = rknpu_power_get(rknpu_dev);
++	if (ret)
++		return ret;
+ 
+ 	current_freq = clk_get_rate(rknpu_dev->clks[0].clk);
+ 	if (freq != current_freq) {
+--- a/rknpu_gem.c
++++ b/rknpu_gem.c
+@@ -831,7 +831,7 @@
+ 	return ERR_PTR(ret);
+ }
+ 
+-void rknpu_gem_object_destroy(struct rknpu_gem_object *rknpu_obj)
++int rknpu_gem_object_destroy(struct rknpu_gem_object *rknpu_obj)
+ {
+ 	struct drm_gem_object *obj = &rknpu_obj->base;
+ 	struct rknpu_device *rknpu_dev = obj->dev->dev_private;
+@@ -852,7 +852,7 @@
+ 				rknpu_dev->dev,
+ 				"failed to destroy dma addr: %pad, size: %lu\n",
+ 				&rknpu_obj->dma_addr, rknpu_obj->size);
+-			return;
++			return ret;
+ 		}
+ 	} while (ret);
+ 
+@@ -884,6 +884,34 @@
+ 
+ 	rknpu_gem_release(rknpu_obj);
+ 	rknpu_iommu_domain_put(rknpu_dev);
++
++	return 0;
++}
++
++/*
++ * Park an object that could not be destroyed. The deferred list is the only
++ * place an undestroyed object can be, so it is also the only owner: nothing
++ * else holds a reference once the caller has given one up.
++ */
++static void rknpu_gem_defer(struct rknpu_gem_object *rknpu_obj)
++{
++	struct rknpu_device *rknpu_dev = rknpu_obj->base.dev->dev_private;
++
++	mutex_lock(&rknpu_dev->deferred_free_lock);
++	list_add_tail(&rknpu_obj->deferred, &rknpu_dev->deferred_free);
++	mutex_unlock(&rknpu_dev->deferred_free_lock);
++}
++
++/*
++ * Every caller that gives up ownership goes through here. The destroy can give
++ * up after three failed domain switches without freeing anything, and an
++ * object dropped at that point would have no owner left, so a failure parks it
++ * rather than losing it.
++ */
++static void rknpu_gem_destroy_or_defer(struct rknpu_gem_object *rknpu_obj)
++{
++	if (rknpu_gem_object_destroy(rknpu_obj))
++		rknpu_gem_defer(rknpu_obj);
+ }
+ 
+ int rknpu_gem_create_ioctl(struct drm_device *drm, void *data,
+@@ -905,7 +933,7 @@
+ 		ret = rknpu_gem_handle_create(&rknpu_obj->base, file_priv,
+ 					      &args->handle);
+ 		if (ret) {
+-			rknpu_gem_object_destroy(rknpu_obj);
++			rknpu_gem_destroy_or_defer(rknpu_obj);
+ 			return ret;
+ 		}
+ 	}
+@@ -1190,12 +1218,92 @@
+ 	return 0;
+ }
+ 
++/*
++ * Destroy everything queued by a free that could not power the NPU. The caller
++ * holds a reference, so the IOMMU work the destroy does is safe here. Anything
++ * that still fails goes back on the list rather than being dropped - the
++ * destroy can give up after three domain switches without freeing, and an
++ * object removed from the list at that point would have no owner left.
++ */
++void rknpu_gem_drain_deferred(struct rknpu_device *rknpu_dev)
++{
++	struct rknpu_gem_object *rknpu_obj, *tmp;
++	LIST_HEAD(ready);
++
++	mutex_lock(&rknpu_dev->deferred_free_lock);
++	list_splice_init(&rknpu_dev->deferred_free, &ready);
++	mutex_unlock(&rknpu_dev->deferred_free_lock);
++
++	list_for_each_entry_safe(rknpu_obj, tmp, &ready, deferred) {
++		list_del(&rknpu_obj->deferred);
++		rknpu_gem_destroy_or_defer(rknpu_obj);
++	}
++}
++
++/*
++ * Last chance on the way out. Nothing will drain the list after this, so say
++ * plainly what is being abandoned instead of leaving it to be inferred.
++ *
++ * @powered says whether the caller holds a power reference. Without one the
++ * destroy cannot run at all - it switches the IOMMU, which is register access -
++ * so the objects are counted and abandoned rather than destroyed. Draining an
++ * unpowered or wedged NPU is the exact thing the deferred list exists to
++ * prevent, and doing it here would undo that on the one path that cannot
++ * retry.
++ */
++void rknpu_gem_flush_deferred(struct rknpu_device *rknpu_dev, bool powered)
++{
++	struct rknpu_gem_object *rknpu_obj, *tmp;
++	size_t lost = 0;
++
++	if (powered)
++		rknpu_gem_drain_deferred(rknpu_dev);
++
++	mutex_lock(&rknpu_dev->deferred_free_lock);
++	list_for_each_entry_safe(rknpu_obj, tmp, &rknpu_dev->deferred_free,
++				 deferred) {
++		list_del(&rknpu_obj->deferred);
++		lost++;
++	}
++	mutex_unlock(&rknpu_dev->deferred_free_lock);
++
++	if (lost)
++		LOG_DEV_ERROR(rknpu_dev->dev,
++			      "%zu gem object(s) never destroyed; leaking them\n",
++			      lost);
++}
++
+ void rknpu_gem_free_object(struct drm_gem_object *obj)
+ {
+ 	struct rknpu_device *rknpu_dev = obj->dev->dev_private;
++	int ret = rknpu_power_get(rknpu_dev);
++
++	/*
++	 * rknpu_gem_object_destroy() calls rknpu_iommu_domain_get_and_switch(),
++	 * which detaches and reattaches the IOMMU when the object's domain is
++	 * not the current one - register access that needs the NPU powered.
++	 * Without a reference there is no way to do that safely, and freeing
++	 * cannot be declined, so the object is left alone instead. Leaking a
++	 * mapping is recoverable; programming an unpowered or wedged IOMMU is
++	 * not.
++	 */
++	if (ret) {
++		/*
++		 * Queue it instead of dropping it. Freeing cannot be declined,
++		 * but the destroy needs the hardware, so the object waits for
++		 * an acquisition that succeeds rather than being abandoned -
++		 * a transient failure would otherwise leak every object freed
++		 * while it lasted.
++		 */
++		rknpu_gem_defer(to_rknpu_obj(obj));
++		LOG_DEV_ERROR(
++			rknpu_dev->dev,
++			"npu unavailable (%d), deferring a gem destroy\n",
++			ret);
++		return;
++	}
+ 
+-	rknpu_power_get(rknpu_dev);
+-	rknpu_gem_object_destroy(to_rknpu_obj(obj));
++	rknpu_gem_destroy_or_defer(to_rknpu_obj(obj));
+ 	rknpu_power_put_delay(rknpu_dev);
+ }
+ 
+@@ -1229,7 +1337,7 @@
+ 	ret = rknpu_gem_handle_create(&rknpu_obj->base, file_priv,
+ 				      &args->handle);
+ 	if (ret) {
+-		rknpu_gem_object_destroy(rknpu_obj);
++		rknpu_gem_destroy_or_defer(rknpu_obj);
+ 		return ret;
+ 	}
+ 
 --- a/include/rknpu_devfreq.h
 +++ b/include/rknpu_devfreq.h
 @@ -8,8 +8,6 @@
@@ -614,3 +979,73 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  static inline int rknpu_devfreq_runtime_suspend(struct device *dev)
  {
  	return 0;
+--- a/include/rknpu_drv.h
++++ b/include/rknpu_drv.h
+@@ -160,6 +160,20 @@
+ 	bool hw_powered;
+ 	/* Bounds the power-off retry so a persistent failure cannot spin. */
+ 	unsigned int power_off_retries;
++	/*
++	 * Set once an unwind stopped partway and left the suppliers enabled.
++	 * A one-way latch: acquisitions are refused, the retry worker stands
++	 * down, and teardown leaves the domains attached. See
++	 * rknpu_power_wedge().
++	 */
++	bool power_wedged;
++	/*
++	 * GEM objects whose destroy could not run because the NPU could not be
++	 * powered. Drained by rknpu_gem_drain_deferred() on the next successful
++	 * acquisition. See rknpu_gem_free_object().
++	 */
++	struct list_head deferred_free;
++	struct mutex deferred_free_lock;
+ 	int bypass_irq_handler;
+ 	int bypass_soft_reset;
+ 	bool soft_reseting;
+--- a/include/rknpu_gem.h
++++ b/include/rknpu_gem.h
+@@ -44,6 +44,8 @@
+  *	user can access the buffer through kms_bo.handle.
+  */
+ struct rknpu_gem_object {
++	/* Queued on rknpu_device.deferred_free when a destroy could not run. */
++	struct list_head deferred;
+ 	struct drm_gem_object base;
+ 	unsigned int flags;
+ 	unsigned long size;
+@@ -77,7 +79,7 @@
+ 			int iommu_domain_id, unsigned int core_mask);
+ 
+ /* destroy a buffer with gem object */
+-void rknpu_gem_object_destroy(struct rknpu_gem_object *rknpu_obj);
++int rknpu_gem_object_destroy(struct rknpu_gem_object *rknpu_obj);
+ 
+ /* request gem object creation and buffer allocation as the size */
+ int rknpu_gem_create_ioctl(struct drm_device *dev, void *data,
+@@ -146,6 +148,26 @@
+ /* free gem object. */
+ void rknpu_gem_free_object(struct drm_gem_object *obj);
+ 
++/*
++ * GEM and the DMA heap are alternatives in Kconfig and rknpu_gem.o is only
++ * built for the first, but rknpu_drv.c includes this header and calls these
++ * either way. Stub them out for the DMA-heap build, which has no GEM objects
++ * and so can never have a backlog of them.
++ */
++#if IS_ENABLED(CONFIG_ROCKCHIP_RKNPU_DRM_GEM)
++void rknpu_gem_drain_deferred(struct rknpu_device *rknpu_dev);
++void rknpu_gem_flush_deferred(struct rknpu_device *rknpu_dev, bool powered);
++#else
++static inline void rknpu_gem_drain_deferred(struct rknpu_device *rknpu_dev)
++{
++}
++
++static inline void rknpu_gem_flush_deferred(struct rknpu_device *rknpu_dev,
++					    bool powered)
++{
++}
++#endif
++
+ /* create memory region for drm framebuffer. */
+ int rknpu_gem_dumb_create(struct drm_file *file_priv, struct drm_device *dev,
+ 			  struct drm_mode_create_dumb *args);

@@ -209,13 +209,22 @@ old = """int rknpu_power_get(struct rknpu_device *rknpu_dev)
 	if (atomic_inc_return(&rknpu_dev->power_refcount) == 1) {
 		ret = rknpu_power_on(rknpu_dev);
 		/*
-		 * -EBUSY is rknpu_power_on() reporting that it could not unwind
-		 * and left resources enabled. Releasing the count there would
+		 * The count follows the hardware: it goes back when power-on
+		 * unwound cleanly, and stays held when the unwind stopped
+		 * partway and left resources enabled. Releasing it there would
 		 * describe powered hardware as off and let the next get enable
-		 * it a second time, so the count stays held.
+		 * it a second time.
 		 */
-		if (ret && ret != -EBUSY)
+		if (ret && !READ_ONCE(rknpu_dev->power_wedged))
 			atomic_dec(&rknpu_dev->power_refcount);
+	} else if (READ_ONCE(rknpu_dev->power_wedged)) {
+		/*
+		 * Powered, but a transition stopped half-done, so the count
+		 * describes one thing and the hardware another. Refuse rather
+		 * than hand out a device whose state is not known.
+		 */
+		atomic_dec(&rknpu_dev->power_refcount);
+		ret = -EBUSY;
 	}
 	mutex_unlock(&rknpu_dev->power_lock);
 
@@ -232,13 +241,22 @@ new = """int rknpu_power_get(struct rknpu_device *rknpu_dev)
 	if (atomic_inc_return(&rknpu_dev->power_refcount) == 1) {
 		ret = rknpu_power_on(rknpu_dev);
 		/*
-		 * -EBUSY is rknpu_power_on() reporting that it could not unwind
-		 * and left resources enabled. Releasing the count there would
+		 * The count follows the hardware: it goes back when power-on
+		 * unwound cleanly, and stays held when the unwind stopped
+		 * partway and left resources enabled. Releasing it there would
 		 * describe powered hardware as off and let the next get enable
-		 * it a second time, so the count stays held.
+		 * it a second time.
 		 */
-		if (ret && ret != -EBUSY)
+		if (ret && !READ_ONCE(rknpu_dev->power_wedged))
 			atomic_dec(&rknpu_dev->power_refcount);
+	} else if (READ_ONCE(rknpu_dev->power_wedged)) {
+		/*
+		 * Powered, but a transition stopped half-done, so the count
+		 * describes one thing and the hardware another. Refuse rather
+		 * than hand out a device whose state is not known.
+		 */
+		atomic_dec(&rknpu_dev->power_refcount);
+		ret = -EBUSY;
 	}
 	mutex_unlock(&rknpu_dev->power_lock);
 

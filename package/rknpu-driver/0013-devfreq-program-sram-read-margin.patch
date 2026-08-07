@@ -400,7 +400,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	if (IS_ERR(opp))
 --- a/rknpu_drv.c
 +++ b/rknpu_drv.c
-@@ -1033,8 +1033,15 @@
+@@ -1067,8 +1067,15 @@
  		}
  	}
  
@@ -437,11 +437,10 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  #define LOG_INFO(fmt, args...) pr_info(LOG_TAG ": " fmt, ##args)
  #if KERNEL_VERSION(5, 5, 0) <= LINUX_VERSION_CODE
  #define LOG_WARN(fmt, args...) pr_warn(LOG_TAG ": " fmt, ##args)
-@@ -160,6 +171,17 @@
- 	bool hw_powered;
+@@ -161,6 +172,17 @@
  	/* Bounds the power-off retry so a persistent failure cannot spin. */
  	unsigned int power_off_retries;
-+	/*
+ 	/*
 +	 * NPU_GRF SRAM read margin. Its reset value is 4; the vendor
 +	 * derives one from the rail voltage and rewrites it as part of
 +	 * every transition. current_rm is what was last written, so an
@@ -452,6 +451,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	u32 current_rm;
 +	int num_volt_rm;
 +	struct rknpu_volt_rm volt_rm[RKNPU_MAX_RM_ENTRIES];
- 	int bypass_irq_handler;
- 	int bypass_soft_reset;
- 	bool soft_reseting;
++	/*
+ 	 * Set once an unwind stopped partway and left the suppliers enabled.
+ 	 * A one-way latch: acquisitions are refused, the retry worker stands
+ 	 * down, and teardown leaves the domains attached. See

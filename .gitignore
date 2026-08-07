@@ -6,3 +6,14 @@
 build.log
 /log/
 /archive.log
+
+# u-boot-rockchip.bin is tracked because fwup packages it, and
+# u-boot-rockchip.variant records which build is in it - a plain binary diff
+# says only "binary files differ", which is not enough to notice that a secure
+# world got committed by accident.
+/uboot/optee-ta/
+
+# Trusted applications are built by scripts/build-uboot.sh and signed with a
+# key that is not in this repository, so the pair is per-builder rather than
+# something to commit.
+/rootfs_overlay/lib/optee_armtz/

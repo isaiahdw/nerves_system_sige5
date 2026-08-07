@@ -365,3 +365,76 @@ edit(p, """		LOG_DEV_ERROR(dev, "rknpu couldn't create power_off workqueue");
 		ret = -ENOMEM;
 		goto err_detach_domains;""",
      "workqueue failure phase")
+
+# ---- every failure after the group is taken has to give it back ----
+#
+# The clock, regulator, MMIO, IRQ, DRM-allocation and DMA-heap failures all
+# returned straight out, past the only iommu_group_put() in probe. Nothing
+# crashes, but a probe that defers - which the optional regulator makes routine
+# at boot - leaks a group reference every time round.
+#
+# Rewrite the returns in that stretch as one jump. They are uniform: ret is
+# already set for some and a literal for others, and none of them has anything
+# else to undo, because the group is the first thing probe acquires that the
+# device core does not manage.
+s = open(p).read()
+start = s.index("\trknpu_dev->num_clks = devm_clk_bulk_get_all")
+end = s.index("#ifdef CONFIG_ROCKCHIP_RKNPU_FENCE")
+region = s[start:end]
+
+import re
+
+# "return ret;" - the value is already the one to report.
+region, n_ret = re.subn(r"\n(\t+)return ret;", r"\n\1goto err_put_group;", region)
+assert n_ret == 4, ("return ret", n_ret)
+
+# "return -Exxx;" and "return PTR_ERR(...);" - set ret first.
+region, n_lit = re.subn(r"\n(\t+)return (-[A-Z]+|PTR_ERR\([^;]*\));",
+                        r"\n\1ret = \2;\n\1goto err_put_group;", region)
+assert n_lit == 4, ("return literal", n_lit)
+
+s = s[:start] + region + s[end:]
+open(p, "w").write(s)
+print("early returns routed:", n_ret + n_lit)  # 8
+
+# The label itself is the tail of the existing unwind, so the put stays in one
+# place rather than being repeated. The reserved-memory region is the other
+# half of the same either/or, and was never released at all.
+edit(p, """	if (rknpu_dev->iommu_en)
+		iommu_group_put(rknpu_dev->iommu_group);
+
+#ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
+	rknpu_drm_free(rknpu_dev);
+#endif
+
+	return ret;
+}""",
+     """#ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
+	rknpu_drm_free(rknpu_dev);
+#endif
+
+err_put_group:
+	if (rknpu_dev->iommu_en)
+		iommu_group_put(rknpu_dev->iommu_group);
+	else
+		of_reserved_mem_device_release(dev);
+
+	return ret;
+}""",
+     "err_put_group tail")
+
+# remove() gives the group back but never the reserved-memory region, which is
+# the other half of the same either/or in probe.
+edit(p, """	if (rknpu_dev->iommu_en) {
+		rknpu_iommu_free_domains(rknpu_dev);
+		iommu_group_put(rknpu_dev->iommu_group);
+	}
+""",
+     """	if (rknpu_dev->iommu_en) {
+		rknpu_iommu_free_domains(rknpu_dev);
+		iommu_group_put(rknpu_dev->iommu_group);
+	} else {
+		of_reserved_mem_device_release(rknpu_dev->dev);
+	}
+""",
+     "remove reserved mem")

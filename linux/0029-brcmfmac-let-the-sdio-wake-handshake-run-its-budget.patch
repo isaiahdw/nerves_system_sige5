@@ -78,7 +78,7 @@ re-enabled on the way out, or the device stops waking at all.
 Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
-index a0e88db..c7cdb2b 100644
+index a0e88db..7d7b865 100644
 --- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
 +++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
 @@ -11,6 +11,7 @@
@@ -115,16 +115,17 @@ index a0e88db..c7cdb2b 100644
  #ifdef DEBUG
  	uint console_interval;
  	struct brcmf_console console;	/* Console output polling support */
-@@ -701,6 +711,8 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
+@@ -701,6 +711,9 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
  	int err = 0;
  	int err_cnt = 0;
  	int try_cnt = 0;
++	bool worst;
 +	s64 elapsed_us;
 +	ktime_t start;
  
  	brcmf_dbg(TRACE, "Enter: on=%d\n", on);
  
-@@ -711,6 +723,7 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
+@@ -711,6 +724,7 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
  		sdio_retune_hold_now(bus->sdiodev->func1);
  
  	wr_val = (on << SBSDIO_FUNC1_SLEEPCSR_KSO_SHIFT);
@@ -132,7 +133,7 @@ index a0e88db..c7cdb2b 100644
  	/* 1st KSO write goes to AOS wake up core if device is asleep  */
  	brcmf_sdiod_writeb(bus->sdiodev, SBSDIO_FUNC1_SLEEPCSR, wr_val, &err);
  
-@@ -730,7 +743,6 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
+@@ -730,7 +744,6 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
  		cmp_val = SBSDIO_FUNC1_SLEEPCSR_KSO_MASK |
  			  SBSDIO_FUNC1_SLEEPCSR_DEVON_MASK;
  		bmask = cmp_val;
@@ -140,7 +141,7 @@ index a0e88db..c7cdb2b 100644
  	} else {
  		/* Put device to sleep, turn off KSO */
  		cmp_val = 0;
-@@ -751,24 +763,48 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
+@@ -751,24 +764,54 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
  		if (!err) {
  			if ((rd_val & bmask) == cmp_val)
  				break;
@@ -170,28 +171,35 @@ index a0e88db..c7cdb2b 100644
 -	if (try_cnt > 2)
 -		brcmf_dbg(SDIO, "try_cnt=%d rd_val=0x%x err=%d\n", try_cnt,
 -			  rd_val, err);
+-
+-	if (try_cnt > MAX_KSO_ATTEMPTS)
+-		brcmf_err("max tries: rd_val=0x%x err=%d\n", rd_val, err);
 +	elapsed_us = ktime_us_delta(ktime_get(), start);
 +	if (try_cnt || err_cnt)
 +		bus->kso_slow++;
- 
--	if (try_cnt > MAX_KSO_ATTEMPTS)
--		brcmf_err("max tries: rd_val=0x%x err=%d\n", rd_val, err);
-+	/* brcmf_err is behind net_ratelimit() unless CONFIG_BRCMDBG is on, so
-+	 * anything printed once per handshake would both flood the log and be
-+	 * dropped from it. Print only a new worst case - which stops happening
-+	 * once the bus has been exercised - and carry the cumulative counts in
-+	 * the line, so a dropped message costs no information.
++
++	/* The maxima describe every handshake, so they are updated before the
++	 * outcome is known: one that exhausted its budget is the worst there
++	 * has been, and leaving it out would make "most errors" and "longest"
++	 * mean only the handshakes that recovered.
++	 *
++	 * A handshake that never completed is an error. One that did, however
++	 * slowly, is not - so a new worst case is reported at info. Neither
++	 * repeats: the failure is rare, and a worst case stops being new once
++	 * the bus has been exercised.
 +	 */
++	worst = err_cnt > bus->kso_err_max || elapsed_us > bus->kso_us_max;
++	if (err_cnt > bus->kso_err_max)
++		bus->kso_err_max = err_cnt;
++	if (elapsed_us > bus->kso_us_max)
++		bus->kso_us_max = elapsed_us;
++
 +	if (try_cnt > MAX_KSO_ATTEMPTS) {
 +		bus->kso_fail++;
 +		brcmf_err("kso %d failed: try=%d err_cnt=%d elapsed=%lldus slow=%u fail=%u rd_val=0x%x err=%d\n",
 +			  on, try_cnt, err_cnt, elapsed_us, bus->kso_slow,
 +			  bus->kso_fail, rd_val, err);
-+	} else if (err_cnt > bus->kso_err_max || elapsed_us > bus->kso_us_max) {
-+		if (err_cnt > bus->kso_err_max)
-+			bus->kso_err_max = err_cnt;
-+		if (elapsed_us > bus->kso_us_max)
-+			bus->kso_us_max = elapsed_us;
++	} else if (worst) {
 +		brcmf_info("kso %d worst: try=%d err_cnt=%d elapsed=%lldus slow=%u fail=%u\n",
 +			   on, try_cnt, err_cnt, elapsed_us, bus->kso_slow,
 +			   bus->kso_fail);

@@ -417,7 +417,7 @@ sector 64, with one copy and no revert.
 ## Kernel
 
 Mainline LTS from kernel.org (6.18.40) with the upstream
-`rk3576-armsom-sige5` device tree and twenty-eight patches, each commented
+`rk3576-armsom-sige5` device tree and thirty patches, each commented
 inline.
 
 NPU and board (`0001`-`0014`): bindings for the NPU MMU and the RKNPU OPP

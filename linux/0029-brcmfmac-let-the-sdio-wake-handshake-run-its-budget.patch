@@ -60,11 +60,15 @@ traffic a wake happens many times a second. A line per handshake would
 therefore flood the log and then be dropped from it, and the drops would
 land exactly on the counts being measured.
 
-So only a new worst case prints, which stops happening once the bus has been
-exercised, and every line carries the cumulative totals. A dropped message
-then costs no information, and a healthy bus is silent. Timing uses ktime
-rather than the jiffies upstream used, because at HZ=250 a jiffy is 4ms and
-would quantise away the whole interval.
+So the two cases are logged differently. A handshake that recovered prints
+only when it sets a new worst case, at info, which stops once the maxima
+settle - a healthy bus goes quiet. A handshake that exhausted its budget
+prints every time, at error, because it is a fault and rare enough that
+repeating it costs nothing; if the bus ever fails often enough for
+net_ratelimit() to drop those, the cumulative counts each line carries say
+how many were missed. Timing uses ktime rather than the jiffies upstream
+used, because at HZ=250 a jiffy is 4ms and would quantise away the whole
+interval.
 
 Worst case cost is the one the loop was always written for: a device that
 never answers now holds the caller for up to a second instead of 350us.
@@ -78,7 +82,7 @@ re-enabled on the way out, or the device stops waking at all.
 Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
-index a0e88db..7d7b865 100644
+index a0e88db..e3602c4 100644
 --- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
 +++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
 @@ -11,6 +11,7 @@
@@ -141,7 +145,7 @@ index a0e88db..7d7b865 100644
  	} else {
  		/* Put device to sleep, turn off KSO */
  		cmp_val = 0;
-@@ -751,24 +764,54 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
+@@ -751,24 +764,55 @@ brcmf_sdio_kso_control(struct brcmf_sdio *bus, bool on)
  		if (!err) {
  			if ((rd_val & bmask) == cmp_val)
  				break;
@@ -183,10 +187,11 @@ index a0e88db..7d7b865 100644
 +	 * has been, and leaving it out would make "most errors" and "longest"
 +	 * mean only the handshakes that recovered.
 +	 *
-+	 * A handshake that never completed is an error. One that did, however
-+	 * slowly, is not - so a new worst case is reported at info. Neither
-+	 * repeats: the failure is rare, and a worst case stops being new once
-+	 * the bus has been exercised.
++	 * A handshake that never completed is an error, and is reported every
++	 * time - it is a fault, and rare. One that completed, however slowly,
++	 * is not: it is reported at info and only when it sets a new worst
++	 * case, so those stop once the maxima settle and a healthy bus goes
++	 * quiet.
 +	 */
 +	worst = err_cnt > bus->kso_err_max || elapsed_us > bus->kso_us_max;
 +	if (err_cnt > bus->kso_err_max)

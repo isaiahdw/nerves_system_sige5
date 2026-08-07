@@ -232,6 +232,37 @@ executed, and the Python it needs installed from
 `scripts/signing-requirements.txt` with `--require-hashes`. Only `openssl` is
 handed the key; the rest is pinned because it runs with permission to read it.
 
+### Provisioning a device
+
+    MIX_TARGET=sige5 mix sige5.provision <ip>
+
+Asks the device for a certificate request, signs it with the device CA (created
+on first use), installs the certificate, and prints the serial number plus
+`ca/<serial>.crt` and `ca/rootCA.crt`.
+
+There is no private key to paste anywhere. It was generated inside the token as
+non-extractable, so none exists outside the SoC - NervesHubLink authenticates
+through a callback that hands each TLS signature to the secure world.
+
+In NervesHub: add a device whose **Identifier** is the serial number, then add
+a certificate and paste `ca/<serial>.crt`. The public key is inside it.
+
+Do **not** upload `ca/rootCA.crt` unless you want just-in-time provisioning - a
+signer CA makes NervesHub trust certificates it has never seen, so anything
+your CA signs could enrol itself. And keep `ca/rootCA.key` off devices; it can
+mint identities for boards you never provisioned.
+
+Each board's key is different, since the token is sealed against a per-device
+HUK. A maskrom flash wipes `/data` and so the token with it, so the board needs
+re-provisioning and its old certificate replaced.
+
+The burn reads the key back and compares it exactly before trusting it, so a
+write that lands wrong is caught where it happens. What that leaves open is a
+power cut in the microseconds between the last word landing and the compare
+running - deliberately, for the reasons in docs/research/rk3576-secure-world.md.
+
+It replaces BL31 as well. Both BL31 builds deliver identical GPU rates.
+
 ### What the patches add
 
 Thirteen patches, applied to a pinned optee_os by `scripts/build-uboot.sh`:

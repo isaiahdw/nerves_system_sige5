@@ -1,6 +1,6 @@
 # rknpu patch generators
 
-The ten largest rknpu patches are generated, not hand-written:
+The eleven largest rknpu patches are generated, not hand-written:
 
 | Patch | Generator | Edits the tree left by |
 | --- | --- | --- |
@@ -14,6 +14,7 @@ The ten largest rknpu patches are generated, not hand-written:
 | `0016-devfreq-report-demand-and-default-to-ondemand` | `0016-dvfs-demand-metric.py` | `0001`–`0015` |
 | `0017-devfreq-raise-the-floor-when-work-arrives` | `0017-devfreq-event-driven-boost.py` | `0001`–`0016` |
 | `0018-pin-the-module-for-anything-that-outlives-its-fd` | `0018-lifetime-pin.py` | `0001`–`0017` |
+| `0019-publish-the-device-only-once-it-is-built` | `0019-publish-last.py` | `0001`–`0018` |
 
 Each generator edits the tree its predecessors leave behind, and the patch is
 the `diff -u` of that edit, so hunk headers and context are never written by

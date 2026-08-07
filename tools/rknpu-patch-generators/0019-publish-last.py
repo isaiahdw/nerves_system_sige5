@@ -3,17 +3,17 @@
 # rknpu_drm_probe() calls drm_dev_register() and only then assigns
 # drm_dev->dev_private, so an open landing in that window reaches a device
 # whose private pointer is still NULL - and every GEM path dereferences it
-# without checking. That window is small but it is a NULL dereference, not a
-# missed feature.
+# without checking. It also registers the fake device afterwards, which
+# rknpu_gem_sync_ioctl() dereferences, so the same window hands out a NULL
+# there too.
 #
-# The registration itself is also far too early: it runs before power is on,
-# before devfreq, the power-off workqueue, the deferrable work, the cache
-# scatter-gather tables and the debugger exist. An ioctl arriving in that
-# window reaches a device that is only partly built.
+# The registration is also far too early in probe: it runs before power is on,
+# before devfreq, the power-off workqueue, the deferrable work, the IOMMU
+# domains, the cache scatter-gather tables, the debugger and the timer exist.
 #
 # Split allocation from publication. Allocation stays where the old call was,
-# because the object has to exist for the rest of probe to hang things off;
-# publication moves to the end, after the last subsystem is up.
+# because the rest of probe hangs things off the object; publication moves to
+# the end, after the last subsystem is up.
 
 p = "/tmp/b/rknpu_drv.c"
 
@@ -23,6 +23,52 @@ def edit(path, old, new, what):
     assert s.count(old) == 1, (what, s.count(old))
     open(path, "w").write(s.replace(old, new))
 
+
+# ---- the fake device has to succeed or fail, not half-exist ----
+#
+# platform_device_register_full() returns an ERR_PTR, which is not NULL, so
+# the old test accepted it and then dereferenced it. And a failure left
+# fake_dev NULL while the caller ignored the return, which
+# rknpu_gem_sync_ioctl() only notices as a WARN_ON before using it anyway.
+edit(p, """	pdev = platform_device_register_full(&rknpu_dev_info);
+	if (pdev) {
+		ret = of_dma_configure(&pdev->dev, NULL, true);
+		if (ret) {
+			platform_device_unregister(pdev);
+			pdev = NULL;
+		}
+	}
+
+	rknpu_dev->fake_dev = pdev ? &pdev->dev : NULL;
+
+	return ret;
+}""",
+     """	pdev = platform_device_register_full(&rknpu_dev_info);
+	if (IS_ERR(pdev))
+		return PTR_ERR(pdev);
+
+	ret = of_dma_configure(&pdev->dev, NULL, true);
+	if (ret) {
+		platform_device_unregister(pdev);
+		return ret;
+	}
+
+	rknpu_dev->fake_dev = &pdev->dev;
+
+	return 0;
+}""",
+     "fake dev err ptr")
+
+# Clear the pointer before dropping the device, so nothing is left holding a
+# reference to a device that has gone.
+edit(p, """	pdev = to_platform_device(rknpu_dev->fake_dev);
+
+	platform_device_unregister(pdev);""",
+     """	pdev = to_platform_device(rknpu_dev->fake_dev);
+	rknpu_dev->fake_dev = NULL;
+
+	platform_device_unregister(pdev);""",
+     "fake dev clear")
 
 # ---- split the helper in two ----
 edit(p, """static int rknpu_drm_probe(struct rknpu_device *rknpu_dev)
@@ -47,7 +93,15 @@ edit(p, """static int rknpu_drm_probe(struct rknpu_device *rknpu_dev)
 
 	return 0;
 
-err_free_drm:""",
+err_free_drm:
+#if KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE
+	drm_dev_put(drm_dev);
+#else
+	drm_dev_unref(drm_dev);
+#endif
+
+	return ret;
+}""",
      """/*
  * Allocate the DRM device and wire it to this driver, without publishing it.
  * Nothing can open it yet, so the order here is only about the rest of probe
@@ -77,17 +131,22 @@ static int rknpu_drm_alloc(struct rknpu_device *rknpu_dev)
 /*
  * Publish it. Called last in probe, because from here userspace can open the
  * node and issue an ioctl, and everything one of those touches has to already
- * exist.
+ * exist - including the fake device, which rknpu_gem_sync_ioctl() uses for
+ * every cache operation.
  */
 static int rknpu_drm_register(struct rknpu_device *rknpu_dev)
 {
 	int ret;
 
-	ret = drm_dev_register(rknpu_dev->drm_dev, 0);
-	if (ret < 0)
+	ret = drm_fake_dev_register(rknpu_dev);
+	if (ret)
 		return ret;
 
-	drm_fake_dev_register(rknpu_dev);
+	ret = drm_dev_register(rknpu_dev->drm_dev, 0);
+	if (ret < 0) {
+		drm_fake_dev_unregister(rknpu_dev);
+		return ret;
+	}
 
 	return 0;
 }
@@ -102,28 +161,13 @@ static void rknpu_drm_free(struct rknpu_device *rknpu_dev)
 	if (!drm_dev)
 		return;
 
-err_free_drm:""",
+#if KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE
+	drm_dev_put(drm_dev);
+#else
+	drm_dev_unref(drm_dev);
+#endif
+}""",
      "split drm probe")
-
-# The old tail of rknpu_drm_probe now closes rknpu_drm_free(), which has no
-# error to return.
-edit(p, """err_free_drm:
-#if KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE
-	drm_dev_put(drm_dev);
-#else
-	drm_dev_unref(drm_dev);
-#endif
-
-	return ret;
-}""",
-     """err_free_drm:
-#if KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE
-	drm_dev_put(drm_dev);
-#else
-	drm_dev_unref(drm_dev);
-#endif
-}""",
-     "drm free tail")
 
 # ---- probe: allocate here, publish at the end ----
 edit(p, """#ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
@@ -160,14 +204,28 @@ edit(p, """#ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
 """,
      "probe alloc only")
 
-# ---- publish at the very end, and unwind it ----
-edit(p, """	rknpu_debugger_init(rknpu_dev);
+# ---- publish last, and hold the probe reference until it has ----
+#
+# The probe-time power reference used to be dropped here, before the debugger,
+# the timer and now the registration. Anything failing after that point would
+# reach err_power_put and drop the reference a second time - and by then the
+# debugfs nodes are live, so the count it decremented could be a reference
+# somebody else was relying on. Hold it until nothing else can fail.
+edit(p, """	if (rknpu_power_put(rknpu_dev))
+		LOG_DEV_WARN(dev, "deferred power off after probe\\n");
+	atomic_set(&rknpu_dev->cmdline_power_refcount, 0);
+	atomic_set(&rknpu_dev->iommu_domain_refcount, 0);
+
+	rknpu_debugger_init(rknpu_dev);
 	rknpu_init_timer(rknpu_dev);
 
 	return 0;
 
 err_power_put:""",
-     """	rknpu_debugger_init(rknpu_dev);
+     """	atomic_set(&rknpu_dev->cmdline_power_refcount, 0);
+	atomic_set(&rknpu_dev->iommu_domain_refcount, 0);
+
+	rknpu_debugger_init(rknpu_dev);
 	rknpu_init_timer(rknpu_dev);
 
 	/*
@@ -190,17 +248,37 @@ err_power_put:""",
 	}
 #endif
 
+	/*
+	 * Nothing below can fail, so the probe's reference goes here and only
+	 * here. err_power_put drops it for every path that did not get this
+	 * far, which is what makes that one put unambiguous.
+	 */
+	if (rknpu_power_put(rknpu_dev))
+		LOG_DEV_WARN(dev, "deferred power off after probe\\n");
+
 	return 0;
 
 err_remove_debugger:
 	rknpu_cancel_timer(rknpu_dev);
 	rknpu_debugger_remove(rknpu_dev);
+	/*
+	 * While the probe reference is still held: freeing the domains
+	 * switches the active one, which is register access.
+	 */
+	if (rknpu_dev->iommu_en)
+		rknpu_iommu_free_domains(rknpu_dev);
 
 err_power_put:""",
      "publish last")
 
-# Nothing is registered on any of these paths now, so the unwind releases the
+# Nothing is registered on any of these paths, so the unwind releases the
 # allocation rather than unregistering something that was never published.
+#
+# The rest is what remove() does and probe never did: all of it guarded, so
+# the earlier jumps here - which reach this before any of it exists - are
+# unaffected. rknpu_iommu_free_domains() is deliberately not among them; it
+# needs the power reference that err_power_put above has already dropped, and
+# is done there instead.
 edit(p, """err_remove_drv:
 #ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
 	rknpu_drm_remove(rknpu_dev);
@@ -212,6 +290,20 @@ edit(p, """err_remove_drv:
 	return ret;
 }""",
      """err_remove_drv:
+	for (i = 0; i < RKNPU_CACHE_SG_TABLE_NUM; i++) {
+		if (rknpu_dev->cache_sgt[i]) {
+			sg_free_table(rknpu_dev->cache_sgt[i]);
+			kfree(rknpu_dev->cache_sgt[i]);
+			rknpu_dev->cache_sgt[i] = NULL;
+		}
+	}
+
+	if (IS_ENABLED(CONFIG_ROCKCHIP_RKNPU_SRAM) && rknpu_dev->sram_mm)
+		rknpu_mm_destroy(rknpu_dev->sram_mm);
+
+	if (rknpu_dev->iommu_en)
+		iommu_group_put(rknpu_dev->iommu_group);
+
 #ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
 	rknpu_drm_free(rknpu_dev);
 #endif

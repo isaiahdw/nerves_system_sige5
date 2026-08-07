@@ -28,7 +28,39 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 
 --- a/rknpu_drv.c
 +++ b/rknpu_drv.c
-@@ -1033,27 +1033,59 @@
+@@ -1008,17 +1008,18 @@
+ 	int ret = -EINVAL;
+ 
+ 	pdev = platform_device_register_full(&rknpu_dev_info);
+-	if (pdev) {
+-		ret = of_dma_configure(&pdev->dev, NULL, true);
+-		if (ret) {
+-			platform_device_unregister(pdev);
+-			pdev = NULL;
+-		}
++	if (IS_ERR(pdev))
++		return PTR_ERR(pdev);
++
++	ret = of_dma_configure(&pdev->dev, NULL, true);
++	if (ret) {
++		platform_device_unregister(pdev);
++		return ret;
+ 	}
+ 
+-	rknpu_dev->fake_dev = pdev ? &pdev->dev : NULL;
++	rknpu_dev->fake_dev = &pdev->dev;
+ 
+-	return ret;
++	return 0;
+ }
+ 
+ static void drm_fake_dev_unregister(struct rknpu_device *rknpu_dev)
+@@ -1029,40 +1030,75 @@
+ 		return;
+ 
+ 	pdev = to_platform_device(rknpu_dev->fake_dev);
++	rknpu_dev->fake_dev = NULL;
+ 
  	platform_device_unregister(pdev);
  }
  
@@ -62,23 +94,29 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	drm_dev->dev_private = rknpu_dev;
  	rknpu_dev->drm_dev = drm_dev;
  
+-	drm_fake_dev_register(rknpu_dev);
 +	return 0;
 +}
 +
 +/*
 + * Publish it. Called last in probe, because from here userspace can open the
 + * node and issue an ioctl, and everything one of those touches has to already
-+ * exist.
++ * exist - including the fake device, which rknpu_gem_sync_ioctl() uses for
++ * every cache operation.
 + */
 +static int rknpu_drm_register(struct rknpu_device *rknpu_dev)
 +{
 +	int ret;
 +
-+	ret = drm_dev_register(rknpu_dev->drm_dev, 0);
-+	if (ret < 0)
++	ret = drm_fake_dev_register(rknpu_dev);
++	if (ret)
 +		return ret;
 +
- 	drm_fake_dev_register(rknpu_dev);
++	ret = drm_dev_register(rknpu_dev->drm_dev, 0);
++	if (ret < 0) {
++		drm_fake_dev_unregister(rknpu_dev);
++		return ret;
++	}
  
  	return 0;
 +}
@@ -93,9 +131,9 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	if (!drm_dev)
 +		return;
  
- err_free_drm:
+-err_free_drm:
  #if KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE
-@@ -1061,8 +1093,6 @@
+ 	drm_dev_put(drm_dev);
  #else
  	drm_dev_unref(drm_dev);
  #endif
@@ -104,7 +142,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  }
  
  static void rknpu_drm_remove(struct rknpu_device *rknpu_dev)
-@@ -1716,9 +1746,9 @@
+@@ -1716,9 +1752,9 @@
  	}
  
  #ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
@@ -116,7 +154,7 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  		return ret;
  	}
  #endif
-@@ -1727,12 +1757,6 @@
+@@ -1727,12 +1763,6 @@
  	rknpu_dev->miscdev.name = "rknpu";
  	rknpu_dev->miscdev.fops = &rknpu_fops;
  
@@ -129,7 +167,15 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
  	rknpu_dev->heap = rk_dma_heap_find("rk-dma-heap-cma");
  	if (!rknpu_dev->heap) {
  		LOG_DEV_ERROR(dev, "failed to find cma heap\n");
-@@ -1847,8 +1871,32 @@
+@@ -1839,16 +1869,52 @@
+ 	 * and schedules a retry if the power-off could not run, so the count
+ 	 * keeps describing the hardware either way.
+ 	 */
+-	if (rknpu_power_put(rknpu_dev))
+-		LOG_DEV_WARN(dev, "deferred power off after probe\n");
+ 	atomic_set(&rknpu_dev->cmdline_power_refcount, 0);
+ 	atomic_set(&rknpu_dev->iommu_domain_refcount, 0);
+ 
  	rknpu_debugger_init(rknpu_dev);
  	rknpu_init_timer(rknpu_dev);
  
@@ -153,18 +199,47 @@ Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
 +	}
 +#endif
 +
++	/*
++	 * Nothing below can fail, so the probe's reference goes here and only
++	 * here. err_power_put drops it for every path that did not get this
++	 * far, which is what makes that one put unambiguous.
++	 */
++	if (rknpu_power_put(rknpu_dev))
++		LOG_DEV_WARN(dev, "deferred power off after probe\n");
++
  	return 0;
  
 +err_remove_debugger:
 +	rknpu_cancel_timer(rknpu_dev);
 +	rknpu_debugger_remove(rknpu_dev);
++	/*
++	 * While the probe reference is still held: freeing the domains
++	 * switches the active one, which is register access.
++	 */
++	if (rknpu_dev->iommu_en)
++		rknpu_iommu_free_domains(rknpu_dev);
 +
  err_power_put:
  	/*
  	 * Drop the probe-time reference before the resources it depends on go
-@@ -1891,10 +1939,7 @@
+@@ -1890,11 +1956,22 @@
+ 	}
  
  err_remove_drv:
++	for (i = 0; i < RKNPU_CACHE_SG_TABLE_NUM; i++) {
++		if (rknpu_dev->cache_sgt[i]) {
++			sg_free_table(rknpu_dev->cache_sgt[i]);
++			kfree(rknpu_dev->cache_sgt[i]);
++			rknpu_dev->cache_sgt[i] = NULL;
++		}
++	}
++
++	if (IS_ENABLED(CONFIG_ROCKCHIP_RKNPU_SRAM) && rknpu_dev->sram_mm)
++		rknpu_mm_destroy(rknpu_dev->sram_mm);
++
++	if (rknpu_dev->iommu_en)
++		iommu_group_put(rknpu_dev->iommu_group);
++
  #ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
 -	rknpu_drm_remove(rknpu_dev);
 -#endif

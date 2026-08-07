@@ -1,0 +1,260 @@
+pwm: rockchip: support the v4 controller on RK3576
+
+RK3576 carries a fourth generation of the PWM block. Enable is no longer a
+field of the control register but a register of its own at 0x4, period and
+duty moved to 0x10 and 0x14, and the writable registers are hiword-masked -
+the value goes in the low half and the bits it applies to in the high half.
+
+The programming order is not the same as v1-v3 either. The channel has to be
+enabled before its parameters are written, and PWM_V4_CTRL_UPDATE written
+last to latch them; programming a disabled channel and enabling afterwards
+makes repeated enable/disable cycles behave erratically, which is a thermal
+fan's normal lifecycle. The writes are ordered rather than relaxed so each
+lands before the next. That order cannot be expressed through the shared
+config/enable split, so v4 gets its own apply.
+
+Disabling only takes effect at the end of the current period, so the
+functional clock has to outlive it or the output freezes at whatever level
+it happened to hold. Probe reads the enable register when it decides whether
+the bootloader left the channel running, for the same reason: on v4 the
+control register holds the mode there, and mode 3 does not exist, so the old
+read would call a running channel idle and gate its clock.
+
+This extends pwm-rockchip rather than following the structure Collabora's
+posting for this block uses, where an MFD parent owns the register range and
+the PWM output, capture, counter, IR and wave generator become children. That
+shape is the right one for the whole block; this system uses the output and
+nothing else, and the driver already carries three generations behind one
+compatible-selected data table, so a fourth entry is a smaller change than a
+new subsystem layout. Anyone tracking the block upstream should expect the
+binding here - rockchip,rk3576-pwm on the channel - to be replaced by the MFD
+form rather than extended into it.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/drivers/pwm/pwm-rockchip.c
++++ b/drivers/pwm/pwm-rockchip.c
+@@ -7,6 +7,7 @@
+  */
+ 
+ #include <linux/clk.h>
++#include <linux/delay.h>
+ #include <linux/io.h>
+ #include <linux/limits.h>
+ #include <linux/math64.h>
+@@ -27,10 +28,33 @@
+ #define PWM_INACTIVE_NEGATIVE	(0 << 4)
+ #define PWM_INACTIVE_POSITIVE	(1 << 4)
+ #define PWM_POLARITY_MASK	(PWM_DUTY_POSITIVE | PWM_INACTIVE_POSITIVE)
++
+ #define PWM_OUTPUT_LEFT		(0 << 5)
+ #define PWM_LOCK_EN		(1 << 6)
+ #define PWM_LP_DISABLE		(0 << 8)
+ 
++/*
++ * PWM v4, as found on RK3576, moves the registers and splits enable out of
++ * the control register. Its writable registers are hiword-masked: the value
++ * goes in the low half and the same bits are set in the high half to say
++ * which of them the write applies to.
++ */
++#define HIWORD_UPDATE(v, l, h)	((((v) << (l)) & GENMASK((h), (l))) | \
++				 (GENMASK((h), (l)) << 16))
++#define PWM_V4_CLK_EN(v)	HIWORD_UPDATE(v, 0, 0)
++#define PWM_V4_EN(v)		HIWORD_UPDATE(v, 1, 1)
++#define PWM_V4_CTRL_UPDATE(v)	HIWORD_UPDATE(v, 2, 2)
++#define PWM_V4_ENABLE_MASK	GENMASK(1, 0)
++#define PWM_V4_MODE(v)		HIWORD_UPDATE(v, 0, 1)
++#define PWM_V4_CONTINUOUS	1
++#define PWM_V4_POLARITY(v)	HIWORD_UPDATE(v, 2, 3)
++#define PWM_V4_DUTY_POSITIVE	BIT(0)
++#define PWM_V4_INACTIVE_POSITIVE BIT(1)
++#define PWM_V4_POLARITY_SHIFT	2
++#define PWM_V4_ALIGNED_INVALID(v) HIWORD_UPDATE(v, 5, 5)
++#define PWM_V4_OFFSET		0x18
++#define PWM_V4_RPT		0x1c
++
+ struct rockchip_pwm_chip {
+ 	struct clk *clk;
+ 	struct clk *pclk;
+@@ -43,6 +67,7 @@ struct rockchip_pwm_regs {
+ 	unsigned long period;
+ 	unsigned long cntr;
+ 	unsigned long ctrl;
++	unsigned long enable;
+ };
+ 
+ struct rockchip_pwm_data {
+@@ -50,6 +75,7 @@ struct rockchip_pwm_data {
+ 	unsigned int prescaler;
+ 	bool supports_polarity;
+ 	bool supports_lock;
++	bool is_v4;
+ 	u32 enable_conf;
+ };
+ 
+@@ -88,13 +114,22 @@ static int rockchip_pwm_get_state(struct pwm_chip *chip,
+ 	tmp *= prescaled_ns;
+ 	state->duty_cycle =  DIV_U64_ROUND_UP(tmp, clk_rate);
+ 
+-	val = readl_relaxed(pc->base + pc->data->regs.ctrl);
++	if (pc->data->is_v4)
++		val = readl_relaxed(pc->base + pc->data->regs.enable);
++	else
++		val = readl_relaxed(pc->base + pc->data->regs.ctrl);
+ 	state->enabled = (val & enable_conf) == enable_conf;
+ 
+-	if (pc->data->supports_polarity && !(val & PWM_DUTY_POSITIVE))
++	if (pc->data->is_v4) {
++		val = readl_relaxed(pc->base + pc->data->regs.ctrl);
++		val >>= PWM_V4_POLARITY_SHIFT;
++		state->polarity = (val & PWM_V4_DUTY_POSITIVE) ?
++			PWM_POLARITY_NORMAL : PWM_POLARITY_INVERSED;
++	} else if (pc->data->supports_polarity && !(val & PWM_DUTY_POSITIVE)) {
+ 		state->polarity = PWM_POLARITY_INVERSED;
+-	else
++	} else {
+ 		state->polarity = PWM_POLARITY_NORMAL;
++	}
+ 
+ 	clk_disable(pc->clk);
+ 	clk_disable(pc->pclk);
+@@ -190,6 +225,77 @@ static int rockchip_pwm_enable(struct pwm_chip *chip,
+ 	return 0;
+ }
+ 
++/*
++ * v4 wants the channel enabled before its parameters are written, and the
++ * update bit last: programming a disabled channel and enabling afterwards
++ * makes repeated enable/disable cycles behave erratically. The writes are
++ * ordered rather than relaxed for the same reason - each one has to land
++ * before the next.
++ */
++static int rockchip_pwm_apply_v4(struct pwm_chip *chip, struct pwm_device *pwm,
++				 const struct pwm_state *state)
++{
++	struct rockchip_pwm_chip *pc = to_rockchip_pwm_chip(chip);
++	unsigned long clk_rate = clk_get_rate(pc->clk);
++	u64 prescaled_ns = (u64)pc->data->prescaler * NSEC_PER_SEC;
++	struct pwm_state curstate;
++	u32 period_ticks, duty_ticks, pol;
++	u64 tmp;
++	int ret;
++
++	pwm_get_state(pwm, &curstate);
++
++	if (!state->enabled) {
++		if (!curstate.enabled)
++			return 0;
++
++		/*
++		 * Disabling takes effect at the end of the current period, so
++		 * the clock has to outlive it - gate it in the same write and
++		 * the output freezes wherever it happened to be. Drop EN,
++		 * wait out the period, then gate.
++		 */
++		writel(PWM_V4_EN(false), pc->base + pc->data->regs.enable);
++
++		fsleep(DIV_ROUND_UP_ULL(curstate.period, NSEC_PER_USEC));
++
++		writel(PWM_V4_CLK_EN(false), pc->base + pc->data->regs.enable);
++		clk_disable(pc->clk);
++		return 0;
++	}
++
++	if (!curstate.enabled) {
++		ret = clk_enable(pc->clk);
++		if (ret)
++			return ret;
++	}
++
++	writel(PWM_V4_CLK_EN(true) | PWM_V4_EN(true),
++	       pc->base + pc->data->regs.enable);
++
++	tmp = mul_u64_u64_div_u64(clk_rate, state->period, prescaled_ns);
++	period_ticks = min_t(u64, tmp, U32_MAX);
++
++	tmp = mul_u64_u64_div_u64(clk_rate, state->duty_cycle, prescaled_ns);
++	duty_ticks = min_t(u64, tmp, U32_MAX);
++
++	writel(period_ticks, pc->base + pc->data->regs.period);
++	writel(duty_ticks, pc->base + pc->data->regs.duty);
++
++	pol = (state->polarity == PWM_POLARITY_INVERSED) ?
++		PWM_V4_INACTIVE_POSITIVE : PWM_V4_DUTY_POSITIVE;
++	writel(PWM_V4_POLARITY(pol), pc->base + pc->data->regs.ctrl);
++	writel(PWM_V4_MODE(PWM_V4_CONTINUOUS) | PWM_V4_ALIGNED_INVALID(false),
++	       pc->base + pc->data->regs.ctrl);
++	writel(0, pc->base + PWM_V4_OFFSET);
++	writel(0, pc->base + PWM_V4_RPT);
++
++	/* nothing above takes effect until this is written */
++	writel(PWM_V4_CTRL_UPDATE(true), pc->base + pc->data->regs.enable);
++
++	return 0;
++}
++
+ static int rockchip_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
+ 			      const struct pwm_state *state)
+ {
+@@ -206,6 +312,11 @@ static int rockchip_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
+ 	if (ret)
+ 		return ret;
+ 
++	if (pc->data->is_v4) {
++		ret = rockchip_pwm_apply_v4(chip, pwm, state);
++		goto out;
++	}
++
+ 	pwm_get_state(pwm, &curstate);
+ 	enabled = curstate.enabled;
+ 
+@@ -291,11 +402,26 @@ static const struct rockchip_pwm_data pwm_data_v3 = {
+ 		       PWM_CONTINUOUS,
+ };
+ 
++static const struct rockchip_pwm_data pwm_data_v4 = {
++	.regs = {
++		.duty = 0x14,
++		.period = 0x10,
++		.ctrl = 0x0c,
++		.enable = 0x04,
++	},
++	.prescaler = 1,
++	.supports_polarity = true,
++	.supports_lock = true,
++	.is_v4 = true,
++	.enable_conf = PWM_V4_ENABLE_MASK,
++};
++
+ static const struct of_device_id rockchip_pwm_dt_ids[] = {
+ 	{ .compatible = "rockchip,rk2928-pwm", .data = &pwm_data_v1},
+ 	{ .compatible = "rockchip,rk3288-pwm", .data = &pwm_data_v2},
+ 	{ .compatible = "rockchip,vop-pwm", .data = &pwm_data_vop},
+ 	{ .compatible = "rockchip,rk3328-pwm", .data = &pwm_data_v3},
++	{ .compatible = "rockchip,rk3576-pwm", .data = &pwm_data_v4},
+ 	{ /* sentinel */ }
+ };
+ MODULE_DEVICE_TABLE(of, rockchip_pwm_dt_ids);
+@@ -304,7 +430,7 @@ static int rockchip_pwm_probe(struct platform_device *pdev)
+ {
+ 	struct pwm_chip *chip;
+ 	struct rockchip_pwm_chip *pc;
+-	u32 enable_conf, ctrl;
++	u32 enable_conf, val;
+ 	bool enabled;
+ 	int ret, count;
+ 
+@@ -351,8 +477,11 @@ static int rockchip_pwm_probe(struct platform_device *pdev)
+ 	chip->ops = &rockchip_pwm_ops;
+ 
+ 	enable_conf = pc->data->enable_conf;
+-	ctrl = readl_relaxed(pc->base + pc->data->regs.ctrl);
+-	enabled = (ctrl & enable_conf) == enable_conf;
++	if (pc->data->is_v4)
++		val = readl_relaxed(pc->base + pc->data->regs.enable);
++	else
++		val = readl_relaxed(pc->base + pc->data->regs.ctrl);
++	enabled = (val & enable_conf) == enable_conf;
+ 
+ 	ret = pwmchip_add(chip);
+ 	if (ret < 0) {

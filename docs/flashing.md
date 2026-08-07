@@ -70,6 +70,33 @@ wait. macOS offers to initialise the Linux partitions; ignore it.
 Without sudo, write the same regions over rockusb, sending only the non-zero
 spans at their sector offsets.
 
+## Before a maskrom flash
+
+A maskrom write replaces the app partition, so three things that live there are
+gone afterwards. All three have bitten someone; none of them look like a
+failure at the time.
+
+- **WiFi credentials are compiled in, so export them before `mix firmware`.**
+
+      export SIGE5_WIFI_SSID="..." SIGE5_WIFI_PSK="..."
+      MIX_TARGET=sige5 mix firmware
+
+  Without them the build prints `==> no WiFi configuration in this image` and
+  carries on. The image looks identical and the board comes up with no route,
+  which on a wlan0-only board means the console is the only way back. Read the
+  build output rather than tailing the last few lines of it.
+
+- **The SSH host key is regenerated**, because it lives in `/data`. The next
+  connection fails with `REMOTE HOST IDENTIFICATION HAS CHANGED`. That is
+  expected here and not a reason to disable host key checking permanently:
+
+      ssh-keygen -R <ip>
+
+- **A provisioned secure-world identity is not lost, but its token is.** The
+  HUK is in fuses and survives; the PKCS#11 token and the device certificate
+  are in `/data` and do not. Re-run `mix sige5.provision <ip>` afterwards, and
+  register the new certificate - the key is new, so the old one is orphaned.
+
 ## 4. Maskrom
 
 The default for anything larger than a bootloader. Connect the OTG Type-C port
@@ -105,15 +132,46 @@ Notes:
   with everything else, so there is no separate bootloader step.
 - `db` is what makes this fast: it puts Rockchip's SPL loader in RAM, and
   everything is written through that.
-- To confirm the loader is answering before committing to a write, read a
-  sector: `rkdeveloptool rl 64 1 /tmp/s.bin` shows `RKNS` if a bootloader is
-  there. The first read straight after `db` can still fail while the loader
-  comes up - retry once before concluding anything is wrong.
+- **The first command after `db` can fail while the loader comes up, and this
+  applies to writes as well as reads.** `Write LBA failed!` on the first
+  attempt, immediately followed by a clean 100% write on the second, is the
+  usual shape. Retry once before concluding anything is wrong.
+- To confirm the loader is answering before committing to a write, ask it what
+  it can see:
+
+      rkdeveloptool rfi          # Flash Info: manufacturer, size, sector count
+
+  A Sige5 answers `SAMSUNG`, `59640 MB`, `122142720 Sectors`. That is a better
+  check than reading a sector, because it fails clearly when the loader is up
+  but storage is not, and on a fresh board sector 64 is blank so `rl` tells you
+  nothing either way.
 - `ld` keeps reporting `Maskrom` after `db` succeeds. The mode string does not
-  change, so it is not a way to tell whether the loader is loaded; read a
-  sector instead.
+  change, so it is not a way to tell whether the loader is loaded; use `rfi`.
 - The image is sparse — 1808 MB apparent, ~140 MB stored — and `rkdeveloptool`
   sends the apparent size. Through the maskrom loader that costs nothing.
+
+## Serial console
+
+40-pin header: pin 8 (TX), pin 10 (RX), pin 6 (GND), 1500000 8N1. It is the
+only way in when there is no network.
+
+**On macOS, pick the terminal carefully.** `stty` cannot set 1500000 - it
+answers `tcsetattr: Invalid argument` - so anything driving the port through it
+fails, and falling back to 115200 produces convincing garbage rather than an
+error, which is worse than no output. Non-standard rates need the
+`IOSSIOSPEED` ioctl (`0x80085402`, `_IOW('T', 2, speed_t)`); use a terminal
+that issues it, or a few lines of Python that do.
+
+**Zero bytes is the healthy state.** A booted board at an idle prompt prints
+nothing, so a passive read returning nothing looks exactly like a dead board
+and is not one - bootloops and panics are the noisy cases. Send a newline and
+wait for the prompt before concluding anything.
+
+To bring up WiFi from the console on an image built without credentials:
+
+    n = [%{key_mgmt: :wpa_psk, ssid: "...", psk: "..."}]
+    VintageNet.configure("wlan0", %{type: VintageNetWiFi,
+      vintage_net_wifi: %{networks: n}, ipv4: %{method: :dhcp}})
 
 ## Layout
 

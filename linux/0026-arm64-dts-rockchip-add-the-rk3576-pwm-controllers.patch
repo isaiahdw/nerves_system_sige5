@@ -1,0 +1,179 @@
+arm64: dts: rockchip: add the RK3576 PWM controllers
+
+Nothing described the PWM blocks, so a board could not reach a backlight
+or a fan. Add the two general-purpose controllers: pwm1 with six channels
+from 0x2add0000 and pwm2 with eight from 0x2ade0000. Each channel is its
+own 4 KiB register page and its own device; they share the controller's
+functional and APB clocks.
+
+The pinctrl default is the m0 mux for each channel, which a board that
+routes a channel elsewhere overrides.
+
+The PMU-domain controller at 0x27330000 is left out - nothing on the
+boards to hand uses it, so there is no way to test it.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/arch/arm64/boot/dts/rockchip/rk3576.dtsi
++++ b/arch/arm64/boot/dts/rockchip/rk3576.dtsi
+@@ -2577,6 +2577,160 @@ uart9: serial@2adc0000 {
+ 			status = "disabled";
+ 		};
+ 
++		pwm1_0: pwm@2add0000 {
++			compatible = "rockchip,rk3576-pwm";
++			reg = <0x0 0x2add0000 0x0 0x1000>;
++			clocks = <&cru CLK_PWM1>, <&cru PCLK_PWM1>;
++			clock-names = "pwm", "pclk";
++			pinctrl-0 = <&pwm1m0_ch0>;
++			pinctrl-names = "default";
++			#pwm-cells = <3>;
++			status = "disabled";
++		};
++
++		pwm1_1: pwm@2add1000 {
++			compatible = "rockchip,rk3576-pwm";
++			reg = <0x0 0x2add1000 0x0 0x1000>;
++			clocks = <&cru CLK_PWM1>, <&cru PCLK_PWM1>;
++			clock-names = "pwm", "pclk";
++			pinctrl-0 = <&pwm1m0_ch1>;
++			pinctrl-names = "default";
++			#pwm-cells = <3>;
++			status = "disabled";
++		};
++
++		pwm1_2: pwm@2add2000 {
++			compatible = "rockchip,rk3576-pwm";
++			reg = <0x0 0x2add2000 0x0 0x1000>;
++			clocks = <&cru CLK_PWM1>, <&cru PCLK_PWM1>;
++			clock-names = "pwm", "pclk";
++			pinctrl-0 = <&pwm1m0_ch2>;
++			pinctrl-names = "default";
++			#pwm-cells = <3>;
++			status = "disabled";
++		};
++
++		pwm1_3: pwm@2add3000 {
++			compatible = "rockchip,rk3576-pwm";
++			reg = <0x0 0x2add3000 0x0 0x1000>;
++			clocks = <&cru CLK_PWM1>, <&cru PCLK_PWM1>;
++			clock-names = "pwm", "pclk";
++			pinctrl-0 = <&pwm1m0_ch3>;
++			pinctrl-names = "default";
++			#pwm-cells = <3>;
++			status = "disabled";
++		};
++
++		pwm1_4: pwm@2add4000 {
++			compatible = "rockchip,rk3576-pwm";
++			reg = <0x0 0x2add4000 0x0 0x1000>;
++			clocks = <&cru CLK_PWM1>, <&cru PCLK_PWM1>;
++			clock-names = "pwm", "pclk";
++			pinctrl-0 = <&pwm1m0_ch4>;
++			pinctrl-names = "default";
++			#pwm-cells = <3>;
++			status = "disabled";
++		};
++
++		pwm1_5: pwm@2add5000 {
++			compatible = "rockchip,rk3576-pwm";
++			reg = <0x0 0x2add5000 0x0 0x1000>;
++			clocks = <&cru CLK_PWM1>, <&cru PCLK_PWM1>;
++			clock-names = "pwm", "pclk";
++			pinctrl-0 = <&pwm1m0_ch5>;
++			pinctrl-names = "default";
++			#pwm-cells = <3>;
++			status = "disabled";
++		};
++
++		pwm2_0: pwm@2ade0000 {
++			compatible = "rockchip,rk3576-pwm";
++			reg = <0x0 0x2ade0000 0x0 0x1000>;
++			clocks = <&cru CLK_PWM2>, <&cru PCLK_PWM2>;
++			clock-names = "pwm", "pclk";
++			pinctrl-0 = <&pwm2m0_ch0>;
++			pinctrl-names = "default";
++			#pwm-cells = <3>;
++			status = "disabled";
++		};
++
++		pwm2_1: pwm@2ade1000 {
++			compatible = "rockchip,rk3576-pwm";
++			reg = <0x0 0x2ade1000 0x0 0x1000>;
++			clocks = <&cru CLK_PWM2>, <&cru PCLK_PWM2>;
++			clock-names = "pwm", "pclk";
++			pinctrl-0 = <&pwm2m0_ch1>;
++			pinctrl-names = "default";
++			#pwm-cells = <3>;
++			status = "disabled";
++		};
++
++		pwm2_2: pwm@2ade2000 {
++			compatible = "rockchip,rk3576-pwm";
++			reg = <0x0 0x2ade2000 0x0 0x1000>;
++			clocks = <&cru CLK_PWM2>, <&cru PCLK_PWM2>;
++			clock-names = "pwm", "pclk";
++			pinctrl-0 = <&pwm2m0_ch2>;
++			pinctrl-names = "default";
++			#pwm-cells = <3>;
++			status = "disabled";
++		};
++
++		pwm2_3: pwm@2ade3000 {
++			compatible = "rockchip,rk3576-pwm";
++			reg = <0x0 0x2ade3000 0x0 0x1000>;
++			clocks = <&cru CLK_PWM2>, <&cru PCLK_PWM2>;
++			clock-names = "pwm", "pclk";
++			pinctrl-0 = <&pwm2m0_ch3>;
++			pinctrl-names = "default";
++			#pwm-cells = <3>;
++			status = "disabled";
++		};
++
++		pwm2_4: pwm@2ade4000 {
++			compatible = "rockchip,rk3576-pwm";
++			reg = <0x0 0x2ade4000 0x0 0x1000>;
++			clocks = <&cru CLK_PWM2>, <&cru PCLK_PWM2>;
++			clock-names = "pwm", "pclk";
++			pinctrl-0 = <&pwm2m0_ch4>;
++			pinctrl-names = "default";
++			#pwm-cells = <3>;
++			status = "disabled";
++		};
++
++		pwm2_5: pwm@2ade5000 {
++			compatible = "rockchip,rk3576-pwm";
++			reg = <0x0 0x2ade5000 0x0 0x1000>;
++			clocks = <&cru CLK_PWM2>, <&cru PCLK_PWM2>;
++			clock-names = "pwm", "pclk";
++			pinctrl-0 = <&pwm2m0_ch5>;
++			pinctrl-names = "default";
++			#pwm-cells = <3>;
++			status = "disabled";
++		};
++
++		pwm2_6: pwm@2ade6000 {
++			compatible = "rockchip,rk3576-pwm";
++			reg = <0x0 0x2ade6000 0x0 0x1000>;
++			clocks = <&cru CLK_PWM2>, <&cru PCLK_PWM2>;
++			clock-names = "pwm", "pclk";
++			pinctrl-0 = <&pwm2m0_ch6>;
++			pinctrl-names = "default";
++			#pwm-cells = <3>;
++			status = "disabled";
++		};
++
++		pwm2_7: pwm@2ade7000 {
++			compatible = "rockchip,rk3576-pwm";
++			reg = <0x0 0x2ade7000 0x0 0x1000>;
++			clocks = <&cru CLK_PWM2>, <&cru PCLK_PWM2>;
++			clock-names = "pwm", "pclk";
++			pinctrl-0 = <&pwm2m0_ch7>;
++			pinctrl-names = "default";
++			#pwm-cells = <3>;
++			status = "disabled";
++		};
++
+ 		saradc: adc@2ae00000 {
+ 			compatible = "rockchip,rk3576-saradc", "rockchip,rk3588-saradc";
+ 			reg = <0x0 0x2ae00000 0x0 0x10000>;

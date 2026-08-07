@@ -257,6 +257,64 @@ Governor behaviour, the two `dvfs_*` module knobs, and where this differs from
 the 6.1 vendor BSP are in
 [docs/research/rk3576-npu.md](docs/research/rk3576-npu.md).
 
+## GPU
+
+panfrost drives the Mali-G52 through the mainline OPP core at 300-900 MHz. The
+rate comes from BL31's PVTPLL over SCMI rather than the CRU, whose dividers
+cannot produce the upper rates.
+
+**The OPP rates are nominal.** BL31 accepts and echoes back every rate exactly,
+but that is not what the shader cores run at. Measured with panfrost's own
+cycle counter:
+
+| Requested | Delivered |
+| --- | --- |
+| 300 MHz | 430 MHz |
+| 400 MHz | 510 MHz |
+| 500 MHz | 646 MHz |
+| 600 MHz | 772 MHz |
+| 700 MHz | 802 MHz |
+| 800 MHz | 802 MHz |
+| 900 MHz | 821 MHz |
+
+An OPP rate names an operating point — a PVTPLL ring length and a voltage — not
+a frequency, so the real ceiling is ~821 MHz and 700/800 MHz land on the same
+rate. Throughput follows the delivered clock to within 2%, the figures are
+stable per chip, and rkbin's BL31 and upstream TF-A produce identical results.
+Why, and how to measure it again, is in
+[docs/research/rk3576-gpu-clocks.md](docs/research/rk3576-gpu-clocks.md).
+
+- **Three clocks.** SCMI `CLK_GPU` carries the rate; `PCLK_GPU_ROOT` and CRU
+  `CLK_GPU` reach the registers BL31 programs PVTPLL through. The DT names all
+  three, which is what keeps the clock framework from gating them at boot.
+- **Runtime PM.** A rate request only reaches PVTPLL with the power domain up,
+  so the clock parks at 200 MHz before suspend and the requested rate is
+  reapplied on resume.
+- **Per-chip OPP set.** An OTP cell picks it: 900 MHz on the RK3576, 800 MHz on
+  the S, J and M parts. Unreadable OTP falls back to a restricted table.
+- **The OPP table stops at 900 MHz**, which table 3-2 of the datasheet
+  (rev 1.5) gives as the GPU maximum.
+
+### Benchmarks
+
+`glmark2-es2-drm` off-screen through GBM, 1920x1080, fragment-bound scene,
+`userspace` pinned at each rate:
+
+| Frequency | FPS | vs 300 MHz |
+| --- | --- | --- |
+| 300 MHz | 20.0 | 1.00x |
+| 600 MHz | 36.0 | 1.80x |
+| 900 MHz | 38.0 | 1.90x |
+
+Throughput tracks the requested rate to 600 MHz and then flattens, which is the
+delivered clock saturating near 820 MHz rather than a workload ceiling — frame
+rate per actual GPU cycle is constant throughout. Seven scenes covering
+fragment, ALU, vertex, texture and two real workloads all return 1.02-1.06x
+from 600 to 900 MHz.
+
+Sustained load at 900 MHz holds 38.0 FPS with no falloff, peaking at 82 C
+against a 115 C critical trip, unchanged with eight CPU workers alongside.
+
 ## Debug UART
 
 40-pin header: pin 8 (TX), pin 10 (RX), pin 6 (GND), 1500000 8N1,

@@ -1,0 +1,52 @@
+PM / devfreq: do not start the monitor on a suspended device
+
+devfreq_suspend_device() stops the governor's monitor, but a later
+governor change reaches devfreq_monitor_start() through DEVFREQ_GOV_START
+and starts it again with no reference to the suspended state -
+suspend_count is consulted nowhere outside devfreq_suspend_device() and
+devfreq_resume_device(). Writing to the governor sysfs attribute while a
+device is runtime suspended therefore resumes polling behind the driver's
+back.
+
+For most drivers that is wasted work. For one whose device is unreachable
+while suspended it is not: devfreq_monitor() calls the profile's target()
+on every tick without comparing against previous_freq, so the samples it
+feeds in are idle readings taken from powered-down hardware, and they
+overwrite the frequency policy that was in force before the suspend. The
+device then comes back at the wrong rate.
+
+Leave the monitor stopped in that case. The delayed work is still
+initialised first, because devfreq_monitor_resume() queues that work when
+the device comes back and would otherwise queue something uninitialised.
+
+Verified on an ArmSoM Sige5 by selecting simple_ondemand for the first
+time while the GPU was already runtime suspended: no polling starts, the
+log stays clean where it previously took 5348 "dvfs failed with (-11)"
+messages at the 50 ms poll interval, and polling begins normally on the
+next resume.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/drivers/devfreq/devfreq.c	2026-07-24 14:17:26.000000000 +0000
++++ b/drivers/devfreq/devfreq.c	2026-08-02 21:50:21.123809052 +0000
+@@ -499,6 +499,20 @@
+ 		goto out;
+ 	}
+ 
++	/*
++	 * A governor selected while the device is suspended must not start
++	 * polling it: the driver has already told us the hardware is not
++	 * there, and sampling it produces idle readings that overwrite
++	 * whatever policy was in force before the suspend. The work is
++	 * initialised above regardless, so devfreq_monitor_resume() has
++	 * something valid to queue once the device comes back.
++	 */
++	if (atomic_read(&devfreq->suspend_count)) {
++		devfreq->stop_polling = true;
++		mutex_unlock(&devfreq->lock);
++		return;
++	}
++
+ 	if (devfreq->profile->polling_ms)
+ 		queue_delayed_work(devfreq_wq, &devfreq->work,
+ 			msecs_to_jiffies(devfreq->profile->polling_ms));

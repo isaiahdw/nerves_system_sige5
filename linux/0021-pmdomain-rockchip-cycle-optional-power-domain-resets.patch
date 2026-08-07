@@ -1,0 +1,185 @@
+pmdomain/rockchip: cycle optional power-domain resets on power-on
+
+Some Rockchip domains come out of power-on with their bus interface in an
+undefined state. On the RK3576 NPU this shows up as a hang on the first
+access after a cold power-on; the vendor kernel cycles the domain's resets
+at that point and that clears it.
+
+Take the domain node's resets if it has any, and pulse them between
+releasing idle and restoring QoS. The resets are optional, so domains that
+declare none behave exactly as before.
+
+Ported from Jiaxing Hu's RFC v4 3/6 posted to linux-rockchip, which builds
+on the per-domain settle delay already carried here as patch 0003 by the
+same author. Only the include hunk needed adjusting; this tree's include
+block differs from the one the series was generated against.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/drivers/pmdomain/rockchip/pm-domains.c
++++ b/drivers/pmdomain/rockchip/pm-domains.c
+@@ -18,6 +18,7 @@
+ #include <linux/of_address.h>
+ #include <linux/of_clk.h>
+ #include <linux/clk.h>
++#include <linux/reset.h>
+ #include <linux/regmap.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/mfd/syscon.h>
+@@ -101,6 +102,13 @@ struct rockchip_pm_domain {
+ 	struct clk_bulk_data *clks;
+ 	struct device_node *node;
+ 	struct regulator *supply;
++	struct reset_control *resets;
++	/*
++	 * Set when a power-on failed and could not be rolled back, so the
++	 * domain is up with no way to bring it down. The supply must stay on
++	 * under it and no further transition is attempted.
++	 */
++	bool wedged;
+ };
+ 
+ struct rockchip_pmu {
+@@ -613,6 +621,31 @@ static int rockchip_do_pmu_set_power_domain(struct rockchip_pm_domain *pd,
+ 	return 0;
+ }
+ 
++/*
++ * Put a domain that failed part way through power-on back to off, so the
++ * supply above it can be dropped safely. Resets are left asserted on the way
++ * down: the bus behind them is in whatever state the failed pulse left it.
++ *
++ * If the rollback itself fails the domain is still live, and there is nothing
++ * further to try - so latch it. The supply stays on and later transitions are
++ * refused rather than run against hardware whose state is not known.
++ */
++static void rockchip_pd_rollback(struct rockchip_pm_domain *pd)
++{
++	struct rockchip_pmu *pmu = pd->pmu;
++
++	if (pd->resets)
++		reset_control_assert(pd->resets);
++
++	if (rockchip_pmu_set_idle_request(pd, true) < 0 ||
++	    rockchip_do_pmu_set_power_domain(pd, false) < 0) {
++		dev_err(pmu->dev,
++			"%s did not roll back; leaving its supply on\n",
++			pd->genpd.name);
++		pd->wedged = true;
++	}
++}
++
+ static int rockchip_pd_power(struct rockchip_pm_domain *pd, bool power_on)
+ {
+ 	struct rockchip_pmu *pmu = pd->pmu;
+@@ -620,6 +653,9 @@ static int rockchip_pd_power(struct rockchip_pm_domain *pd, bool power_on)
+ 
+ 	guard(mutex)(&pmu->mutex);
+ 
++	if (pd->wedged)
++		return -EBUSY;
++
+ 	if (rockchip_pmu_domain_is_on(pd) == power_on)
+ 		return 0;
+ 
+@@ -653,6 +689,38 @@ static int rockchip_pd_power(struct rockchip_pm_domain *pd, bool power_on)
+ 		if (pd->info->delay_us)
+ 			udelay(pd->info->delay_us);
+ 
++		/*
++		 * Optional: some domains need their resets cycled after
++		 * power-on. Where one is described it is not advisory - the
++		 * bus behind the domain comes up undefined without the pulse
++		 * and can hang on the first access, so a failure here fails
++		 * the power-on rather than leaving the caller believing the
++		 * domain is usable.
++		 *
++		 * By this point the domain is on and out of idle, and the
++		 * caller drops the supply when power-on returns an error, so
++		 * these two failures roll it back to off first.
++		 */
++		if (pd->resets) {
++			ret = reset_control_assert(pd->resets);
++			if (ret < 0) {
++				dev_err(pmu->dev, "failed to assert resets: %d\n",
++					ret);
++				rockchip_pd_rollback(pd);
++				goto out;
++			}
++
++			udelay(10);
++
++			ret = reset_control_deassert(pd->resets);
++			if (ret < 0) {
++				dev_err(pmu->dev, "failed to deassert resets: %d\n",
++					ret);
++				rockchip_pd_rollback(pd);
++				goto out;
++			}
++		}
++
+ 		rockchip_pmu_restore_qos(pd);
+ 	}
+ 
+@@ -690,6 +758,15 @@ static int rockchip_pd_power_on(struct generic_pm_domain *domain)
+ 	struct rockchip_pm_domain *pd = to_rockchip_pd(domain);
+ 	int ret;
+ 
++	/*
++	 * A domain already latched is powered with its supply deliberately held
++	 * on. Enabling the regulator again here would take a second reference
++	 * that the error path below then declines to drop - once per retry - so
++	 * the wedge has to be rejected before anything is acquired.
++	 */
++	if (pd->wedged)
++		return -EBUSY;
++
+ 	ret = rockchip_pd_regulator_enable(pd);
+ 	if (ret) {
+ 		dev_err(pd->pmu->dev, "Failed to enable supply: %d\n", ret);
+@@ -697,7 +774,13 @@ static int rockchip_pd_power_on(struct generic_pm_domain *domain)
+ 	}
+ 
+ 	ret = rockchip_pd_power(pd, true);
+-	if (ret)
++
++	/*
++	 * Drop the supply unless this call is the one that latched the domain:
++	 * that one leaves it on deliberately, and holds the only reference the
++	 * wedge keeps.
++	 */
++	if (ret && !pd->wedged)
+ 		rockchip_pd_regulator_disable(pd);
+ 
+ 	return ret;
+@@ -823,6 +906,14 @@ static int rockchip_pm_add_one_domain(struct rockchip_pmu *pmu,
+ 	if (error)
+ 		goto err_put_clocks;
+ 
++	pd->resets = of_reset_control_array_get_optional_exclusive(node);
++	if (IS_ERR(pd->resets)) {
++		error = PTR_ERR(pd->resets);
++		dev_err(pmu->dev, "%pOFn: failed to get resets: %d\n", node, error);
++		pd->resets = NULL;
++		goto err_unprepare_clocks;
++	}
++
+ 	pd->num_qos = of_count_phandle_with_args(node, "pm_qos",
+ 						 NULL);
+ 
+@@ -893,6 +984,7 @@ static int rockchip_pm_add_one_domain(struct rockchip_pmu *pmu,
+ 	clk_bulk_unprepare(pd->num_clks, pd->clks);
+ err_put_clocks:
+ 	clk_bulk_put(pd->num_clks, pd->clks);
++	reset_control_put(pd->resets);
+ 	return error;
+ }
+ 
+@@ -911,6 +1003,7 @@ static void rockchip_pm_remove_one_domain(struct rockchip_pm_domain *pd)
+ 
+ 	clk_bulk_unprepare(pd->num_clks, pd->clks);
+ 	clk_bulk_put(pd->num_clks, pd->clks);
++	reset_control_put(pd->resets);
+ 
+ 	/* protect the zeroing of pm->num_clks */
+ 	mutex_lock(&pd->pmu->mutex);

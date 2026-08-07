@@ -34,7 +34,7 @@ gen() {
 		copy="$copy cp $f /tmp/a/$(dirname "$f")/ || exit 1; cp $f /tmp/b/$(dirname "$f")/ || exit 1;"
 		diffs="$diffs diff -u a/$f b/$f > /out/h_$(basename "$f").hunk;"
 	done
-	for n in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013 0014 0015 0016 0017 0018; do
+	for n in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013 0014 0015 0016 0017 0018 0019; do
 		apply="$apply patch -F0 -g0 -p1 -E -t -N -i /pd/$n-*.patch >/tmp/p.log 2>&1 || { echo \"apply $n failed\"; head -20 /tmp/p.log; exit 1; };"
 		[ "$n" = "$upto" ] && break
 	done
@@ -140,5 +140,9 @@ place "$PD/0018-pin-the-module-for-anything-that-outlives-its-fd.patch" \
 	rknpu_job.c=h_rknpu_job.c.hunk \
 	include/rknpu_drv.h=h_rknpu_drv.h.hunk \
 	include/rknpu_fence.h=h_rknpu_fence.h.hunk
+
+gen 0018 0019-publish-last rknpu_drv.c
+place "$PD/0019-publish-the-device-only-once-it-is-built.patch" \
+	rknpu_drv.c=h_rknpu_drv.c.hunk
 
 echo "chain regenerated; run build-each.sh to check it applies and builds"

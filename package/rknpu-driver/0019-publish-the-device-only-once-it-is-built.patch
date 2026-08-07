@@ -1,0 +1,176 @@
+rknpu: publish the device only once it is built
+
+rknpu_drm_probe() calls drm_dev_register() and assigns dev_private
+afterwards. An open landing between the two gets a drm_device whose private
+pointer is still NULL, and every GEM path dereferences it without checking.
+
+The registration is also far too early in probe. It runs before power is on,
+before devfreq, the power-off workqueue, the deferrable work, the IOMMU
+domains, the cache scatter-gather tables, the debugger and the timer exist -
+roughly sixty lines of setup that an ioctl arriving in that window would
+reach half-finished. The misc device has the same problem.
+
+Split the helper: rknpu_drm_alloc() creates the device and wires dev_private
+both ways without publishing it, and rknpu_drm_register() publishes. The
+allocation stays where the old call was, because the rest of probe hangs
+things off the object; the registration moves to the end, after the last
+subsystem is up. The misc device registers there too.
+
+Nothing between the two touches rknpu_dev->drm_dev - it is only read in
+remove - so the split is safe.
+
+Failure before publication now releases the allocation with
+rknpu_drm_free() rather than unregistering something that was never
+registered, and a failure of the registration itself unwinds the debugger
+and timer that publication now follows.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/rknpu_drv.c
++++ b/rknpu_drv.c
+@@ -1033,27 +1033,59 @@
+ 	platform_device_unregister(pdev);
+ }
+ 
+-static int rknpu_drm_probe(struct rknpu_device *rknpu_dev)
++/*
++ * Allocate the DRM device and wire it to this driver, without publishing it.
++ * Nothing can open it yet, so the order here is only about the rest of probe
++ * being able to reach it.
++ */
++static int rknpu_drm_alloc(struct rknpu_device *rknpu_dev)
+ {
+ 	struct device *dev = rknpu_dev->dev;
+ 	struct drm_device *drm_dev = NULL;
+-	int ret = -EINVAL;
+ 
+ 	drm_dev = drm_dev_alloc(&rknpu_drm_driver, dev);
+ 	if (IS_ERR(drm_dev))
+ 		return PTR_ERR(drm_dev);
+ 
+-	/* register the DRM device */
+-	ret = drm_dev_register(drm_dev, 0);
+-	if (ret < 0)
+-		goto err_free_drm;
+-
++	/*
++	 * Both directions before anyone can open the node. Every GEM path
++	 * reaches the driver through dev_private and none of them check it,
++	 * so publishing first would leave a window where an open resolves to
++	 * NULL.
++	 */
+ 	drm_dev->dev_private = rknpu_dev;
+ 	rknpu_dev->drm_dev = drm_dev;
+ 
++	return 0;
++}
++
++/*
++ * Publish it. Called last in probe, because from here userspace can open the
++ * node and issue an ioctl, and everything one of those touches has to already
++ * exist.
++ */
++static int rknpu_drm_register(struct rknpu_device *rknpu_dev)
++{
++	int ret;
++
++	ret = drm_dev_register(rknpu_dev->drm_dev, 0);
++	if (ret < 0)
++		return ret;
++
+ 	drm_fake_dev_register(rknpu_dev);
+ 
+ 	return 0;
++}
++
++/* Undo rknpu_drm_alloc() for a device that was never published. */
++static void rknpu_drm_free(struct rknpu_device *rknpu_dev)
++{
++	struct drm_device *drm_dev = rknpu_dev->drm_dev;
++
++	rknpu_dev->drm_dev = NULL;
++
++	if (!drm_dev)
++		return;
+ 
+ err_free_drm:
+ #if KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE
+@@ -1061,8 +1093,6 @@
+ #else
+ 	drm_dev_unref(drm_dev);
+ #endif
+-
+-	return ret;
+ }
+ 
+ static void rknpu_drm_remove(struct rknpu_device *rknpu_dev)
+@@ -1716,9 +1746,9 @@
+ 	}
+ 
+ #ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
+-	ret = rknpu_drm_probe(rknpu_dev);
++	ret = rknpu_drm_alloc(rknpu_dev);
+ 	if (ret) {
+-		LOG_DEV_ERROR(dev, "failed to probe device for rknpu\n");
++		LOG_DEV_ERROR(dev, "failed to allocate drm device for rknpu\n");
+ 		return ret;
+ 	}
+ #endif
+@@ -1727,12 +1757,6 @@
+ 	rknpu_dev->miscdev.name = "rknpu";
+ 	rknpu_dev->miscdev.fops = &rknpu_fops;
+ 
+-	ret = misc_register(&rknpu_dev->miscdev);
+-	if (ret) {
+-		LOG_DEV_ERROR(dev, "cannot register miscdev (%d)\n", ret);
+-		return ret;
+-	}
+-
+ 	rknpu_dev->heap = rk_dma_heap_find("rk-dma-heap-cma");
+ 	if (!rknpu_dev->heap) {
+ 		LOG_DEV_ERROR(dev, "failed to find cma heap\n");
+@@ -1847,8 +1871,32 @@
+ 	rknpu_debugger_init(rknpu_dev);
+ 	rknpu_init_timer(rknpu_dev);
+ 
++	/*
++	 * Last. From here userspace can open the node and submit work, and
++	 * everything an ioctl reaches - power, devfreq, the workqueue, the
++	 * deferrable work, the IOMMU domains, the timer - is now up.
++	 */
++#ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
++	ret = rknpu_drm_register(rknpu_dev);
++	if (ret) {
++		LOG_DEV_ERROR(dev, "failed to register drm device (%d)\n", ret);
++		goto err_remove_debugger;
++	}
++#endif
++#ifdef CONFIG_ROCKCHIP_RKNPU_DMA_HEAP
++	ret = misc_register(&rknpu_dev->miscdev);
++	if (ret) {
++		LOG_DEV_ERROR(dev, "cannot register miscdev (%d)\n", ret);
++		goto err_remove_debugger;
++	}
++#endif
++
+ 	return 0;
+ 
++err_remove_debugger:
++	rknpu_cancel_timer(rknpu_dev);
++	rknpu_debugger_remove(rknpu_dev);
++
+ err_power_put:
+ 	/*
+ 	 * Drop the probe-time reference before the resources it depends on go
+@@ -1891,10 +1939,7 @@
+ 
+ err_remove_drv:
+ #ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
+-	rknpu_drm_remove(rknpu_dev);
+-#endif
+-#ifdef CONFIG_ROCKCHIP_RKNPU_DMA_HEAP
+-	misc_deregister(&(rknpu_dev->miscdev));
++	rknpu_drm_free(rknpu_dev);
+ #endif
+ 
+ 	return ret;

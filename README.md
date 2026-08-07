@@ -58,22 +58,12 @@ not a frequency —
 in the SoC and stored on the app partition, so a data wipe loses them and the
 device re-enrols. Moving the eMMC to another board loses them too.
 
-**WiFi logs a recurring SDIO sleep error.** About three times an hour:
-
-```
-brcmfmac: brcmf_sdio_bus_sleep: error while changing bus sleep state -110
-```
-
-occasionally followed by `brcmf_sdio_txfail`, and once by
-`brcmf_sdio_dpc: failed backplane access over SDIO, halting operation`. The
-link recovers each time. It is six consecutive timeouts reading
-`SBSDIO_FUNC1_SLEEPCSR` - the driver's KSO handshake giving up - and the cause
-is not established. Wiring the out-of-band host wake (`0028`) did not change
-the rate; that handshake runs over SDIO function 1 either way. The open lead
-is the SDIO clock - mainline asks for 200 MHz, Rockchip's own board file caps
-the same controller at 150 - and the phase-map support Rockchip added
-upstream in 7.1 (commit cc1060a18e04, "multiple boards require different
-phase settings"), which is not in this kernel.
+**The SDIO bus produces access errors under load.** `linux/0029` retries
+through them, and they no longer reach the network stack: two hours of forced
+wakes plus sustained transfer logged no `-110`, no aborted frames and no
+interface errors. Roughly one handshake in 5000 still needs a retry. The cause
+is not established; the remaining lead is the phase-map support Rockchip added
+upstream in 7.1 (commit cc1060a18e04), which is not in this kernel.
 
 ## Boot architecture
 
@@ -457,6 +447,10 @@ brcmfmac takes the out-of-band host wake, and uart4 enabled with its
 Bluetooth child - the contents of mainline's
 `rk3576-armsom-sige5-v1.2-wifibt.dtso`, which this system cannot apply as an
 overlay because it builds a single device tree.
+
+brcmfmac (`0029`-`0031`): the SDIO wake handshake keeps the retry budget its
+loop already declares, register access to a device that never woke is refused,
+and the handshake counts are reported periodically.
 
 Configuration is the arm64 `defconfig` plus `linux/nerves.config`,
 documented inline.

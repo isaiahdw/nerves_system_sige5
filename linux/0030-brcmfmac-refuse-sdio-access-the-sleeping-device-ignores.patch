@@ -50,6 +50,8 @@ Infineon's ignore_bus_error escape is not carried over. It exists there for
 DDR50 and bus-width paths this kernel does not have, and nothing here needs
 to bypass the rule.
 
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
 diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bcmsdh.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bcmsdh.c
 index 13952df..eba3a54 100644
 --- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bcmsdh.c

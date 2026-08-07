@@ -17,6 +17,8 @@ inside the ten-per-five-seconds net_ratelimit() allows brcmf_err, so the line
 survives to the log rather than being dropped like a per-handshake one would
 be, and a bus that never sleeps prints it once and then stays quiet.
 
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
 diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
 index 1234a5a..5ffb5a4 100644
 --- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c

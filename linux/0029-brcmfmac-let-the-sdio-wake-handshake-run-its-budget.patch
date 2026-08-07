@@ -75,6 +75,8 @@ brcmf_sdio_bus_sleep and reads the backplane after a failed wake. That is a
 separate hardening change: returning early there needs the OOB IRQ
 re-enabled on the way out, or the device stops waking at all.
 
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
 diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
 index a0e88db..c7cdb2b 100644
 --- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c

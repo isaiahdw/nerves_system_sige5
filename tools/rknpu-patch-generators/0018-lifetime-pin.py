@@ -204,12 +204,52 @@ open(fh, "w").write(s.replace(old, """struct rknpu_fence_context {
 # A job outlives the ioctl that submitted it: nonblocking submits return
 # immediately and the cleanup runs from a workqueue. The fd may be closed by
 # then, so the job holds its own reference rather than borrowing the caller's.
-edit(j, """	job->timestamp = ktime_get();
-	job->rknpu_dev = rknpu_dev;""",
-     """	job->timestamp = ktime_get();
-	job->rknpu_dev = rknpu_dev;
-	rknpu_pin_module(&rknpu_dev->live_jobs);""",
-     "job pin")
+# Both returns, because both are a finished job - the blocking path borrows the
+# caller's args and stops there. Taking the reference earlier would strand it
+# on the one failure between: the args allocation below frees the job directly
+# rather than through rknpu_job_free().
+edit(j, """	if (!(args->flags & RKNPU_JOB_NONBLOCK)) {
+		job->args = args;
+		job->args_owner = false;
+		return job;
+	}""",
+     """	if (!(args->flags & RKNPU_JOB_NONBLOCK)) {
+		job->args = args;
+		job->args_owner = false;
+		rknpu_pin_module(&rknpu_dev->live_jobs);
+		return job;
+	}""",
+     "job pin blocking")
+
+edit(j, """	INIT_WORK(&job->cleanup_work, rknpu_job_cleanup_work);
+
+	return job;""",
+     """	INIT_WORK(&job->cleanup_work, rknpu_job_cleanup_work);
+
+	rknpu_pin_module(&rknpu_dev->live_jobs);
+
+	return job;""",
+     "job pin nonblocking")
+
+# That failure path frees the job without going through rknpu_job_free(), and
+# cannot use it: job->args is still NULL, which the first line of that function
+# dereferences. It also dropped the task object's reference already, which now
+# matters more - a leaked GEM object is a leaked module reference.
+edit(j, """	job->args = kzalloc(sizeof(*args), GFP_KERNEL);
+	if (!job->args) {
+		kfree(job);
+		return NULL;
+	}""",
+     """	job->args = kzalloc(sizeof(*args), GFP_KERNEL);
+	if (!job->args) {
+#ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
+		if (task_obj)
+			rknpu_gem_object_put(&task_obj->base);
+#endif
+		kfree(job);
+		return NULL;
+	}""",
+     "job args failure")
 
 edit(j, """	if (job->args_owner)
 		kfree(job->args);
@@ -229,19 +269,77 @@ edit(j, """	if (job->args_owner)
 # An object is normally reachable from an fd or an exported dma-buf, both of
 # which already hold the module. A deferred one is reachable from neither: its
 # handle is gone and the destroy that would have freed it could not run, so the
-# only thing left holding it is the driver's own list. Pinning at creation and
-# dropping at the destroy that actually frees covers that case without needing
-# to know which of the others applies.
-edit(g, """	rknpu_gem_release(rknpu_obj);
-	rknpu_iommu_domain_put(rknpu_dev);
+# only thing left holding it is the driver's own list.
+#
+# Take the reference where the object is allocated and drop it where it is
+# freed, rather than at either end of the destroy. rknpu_gem_init() is the only
+# place one is made - normal and PRIME-imported alike - and rknpu_gem_release()
+# is the only place one is freed, including the partial-construction unwinds in
+# rknpu_gem_object_create(), which reach it without going near a destroy. A
+# pair placed there cannot come out unbalanced, and it gives the deferred case
+# for nothing: an object whose destroy could not run is never released, so it
+# keeps its reference until one does.
+edit(g, """	mapping_set_gfp_mask(obj->filp->f_mapping, gfp_mask);
 
-	return 0;
+	return rknpu_obj;
 }""",
-     """	rknpu_gem_release(rknpu_obj);
-	rknpu_iommu_domain_put(rknpu_dev);
+     """	mapping_set_gfp_mask(obj->filp->f_mapping, gfp_mask);
+
+	rknpu_pin_module(&rknpu_dev->live_gem);
+
+	return rknpu_obj;
+}""",
+     "gem pin")
+
+edit(g, """static void rknpu_gem_release(struct rknpu_gem_object *rknpu_obj)
+{
+	/* release file pointer to gem object. */
+	drm_gem_object_release(&rknpu_obj->base);
+	kfree(rknpu_obj);
+}""",
+     """static void rknpu_gem_release(struct rknpu_gem_object *rknpu_obj)
+{
+	/* Read before the release below, which drops the device reference. */
+	struct rknpu_device *rknpu_dev = rknpu_obj->base.dev->dev_private;
+
+	/* release file pointer to gem object. */
+	drm_gem_object_release(&rknpu_obj->base);
+	kfree(rknpu_obj);
 
 	rknpu_unpin_module(&rknpu_dev->live_gem);
-
-	return 0;
 }""",
      "gem unpin")
+
+# Two paths in rknpu_submit() return with the job still allocated. They leaked
+# it before this patch; now they would leak a module reference with it and make
+# unload impossible until reboot, so they are funnelled through the free like
+# every other failure. job->args is set by then, so rknpu_job_free() is safe.
+edit(j, """		if (!in_fence) {
+			LOG_ERROR("invalid fence in fd, fd: %d\\n",
+				  args->fence_fd);
+			return -EINVAL;
+		}""",
+     """		if (!in_fence) {
+			LOG_ERROR("invalid fence in fd, fd: %d\\n",
+				  args->fence_fd);
+			rknpu_job_free(job);
+			return -EINVAL;
+		}""",
+     "submit in_fence failure")
+
+edit(j, """		if (ret < 0) {
+			if (ret != -ERESTARTSYS)
+				LOG_ERROR("Error (%d) waiting for fence!\\n",
+					  ret);
+
+			return ret;
+		}""",
+     """		if (ret < 0) {
+			if (ret != -ERESTARTSYS)
+				LOG_ERROR("Error (%d) waiting for fence!\\n",
+					  ret);
+
+			rknpu_job_free(job);
+			return ret;
+		}""",
+     "submit fence wait failure")

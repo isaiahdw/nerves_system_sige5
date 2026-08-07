@@ -44,6 +44,8 @@ ever broken, since the module refcount alone cannot.
 
 Hot-unplug and overlay-created NPU devices are not supported.
 
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
 --- a/rknpu_drv.c
 +++ b/rknpu_drv.c
 @@ -326,6 +326,24 @@
@@ -109,15 +111,28 @@ Hot-unplug and overlay-created NPU devices are not supported.
  #endif
 --- a/rknpu_gem.c
 +++ b/rknpu_gem.c
-@@ -885,6 +885,8 @@
- 	rknpu_gem_release(rknpu_obj);
- 	rknpu_iommu_domain_put(rknpu_dev);
+@@ -422,14 +422,21 @@
  
-+	rknpu_unpin_module(&rknpu_dev->live_gem);
+ 	mapping_set_gfp_mask(obj->filp->f_mapping, gfp_mask);
+ 
++	rknpu_pin_module(&rknpu_dev->live_gem);
 +
- 	return 0;
+ 	return rknpu_obj;
  }
  
+ static void rknpu_gem_release(struct rknpu_gem_object *rknpu_obj)
+ {
++	/* Read before the release below, which drops the device reference. */
++	struct rknpu_device *rknpu_dev = rknpu_obj->base.dev->dev_private;
++
+ 	/* release file pointer to gem object. */
+ 	drm_gem_object_release(&rknpu_obj->base);
+ 	kfree(rknpu_obj);
++
++	rknpu_unpin_module(&rknpu_dev->live_gem);
+ }
+ 
+ static int rknpu_iommu_map_with_cache_sgt(struct iommu_domain *domain,
 --- a/rknpu_fence.c
 +++ b/rknpu_fence.c
 @@ -19,9 +19,27 @@
@@ -174,14 +189,48 @@ Hot-unplug and overlay-created NPU devices are not supported.
  	kfree(job);
  }
  
-@@ -140,6 +141,7 @@
+@@ -157,11 +158,16 @@
+ 	if (!(args->flags & RKNPU_JOB_NONBLOCK)) {
+ 		job->args = args;
+ 		job->args_owner = false;
++		rknpu_pin_module(&rknpu_dev->live_jobs);
+ 		return job;
+ 	}
  
- 	job->timestamp = ktime_get();
- 	job->rknpu_dev = rknpu_dev;
+ 	job->args = kzalloc(sizeof(*args), GFP_KERNEL);
+ 	if (!job->args) {
++#ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
++		if (task_obj)
++			rknpu_gem_object_put(&task_obj->base);
++#endif
+ 		kfree(job);
+ 		return NULL;
+ 	}
+@@ -170,6 +176,8 @@
+ 
+ 	INIT_WORK(&job->cleanup_work, rknpu_job_cleanup_work);
+ 
 +	rknpu_pin_module(&rknpu_dev->live_jobs);
- 	job->use_core_num = (args->core_mask & RKNPU_CORE0_MASK) +
- 			    ((args->core_mask & RKNPU_CORE1_MASK) >> 1) +
- 			    ((args->core_mask & RKNPU_CORE2_MASK) >> 2);
++
+ 	return job;
+ }
+ 
+@@ -774,6 +782,7 @@
+ 		if (!in_fence) {
+ 			LOG_ERROR("invalid fence in fd, fd: %d\n",
+ 				  args->fence_fd);
++			rknpu_job_free(job);
+ 			return -EINVAL;
+ 		}
+ 		args->fence_fd = -1;
+@@ -793,6 +802,7 @@
+ 				LOG_ERROR("Error (%d) waiting for fence!\n",
+ 					  ret);
+ 
++			rknpu_job_free(job);
+ 			return ret;
+ 		}
+ #else
 --- a/include/rknpu_drv.h
 +++ b/include/rknpu_drv.h
 @@ -192,6 +192,14 @@

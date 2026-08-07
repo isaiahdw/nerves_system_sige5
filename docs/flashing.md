@@ -91,8 +91,11 @@ Bootloader only, leaving the filesystems alone:
     rkdeveloptool wl 64 uboot/u-boot-rockchip.bin
     rkdeveloptool rd
 
-Back up first if anything on the eMMC matters:
+Back up first if anything on the eMMC matters. `db` has to come first: maskrom
+by itself cannot read the eMMC, so without a loader in RAM this fails with
+`Read LBA failed!`.
 
+    rkdeveloptool db uboot/rk3576_spl_loader_v1.09.108.bin
     rkdeveloptool rl 0 32768 /tmp/backup-16MB.bin
 
 Notes:
@@ -104,7 +107,11 @@ Notes:
   everything is written through that.
 - To confirm the loader is answering before committing to a write, read a
   sector: `rkdeveloptool rl 64 1 /tmp/s.bin` shows `RKNS` if a bootloader is
-  there.
+  there. The first read straight after `db` can still fail while the loader
+  comes up - retry once before concluding anything is wrong.
+- `ld` keeps reporting `Maskrom` after `db` succeeds. The mode string does not
+  change, so it is not a way to tell whether the loader is loaded; read a
+  sector instead.
 - The image is sparse — 1808 MB apparent, ~140 MB stored — and `rkdeveloptool`
   sends the apparent size. Through the maskrom loader that costs nothing.
 

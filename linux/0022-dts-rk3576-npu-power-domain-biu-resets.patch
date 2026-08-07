@@ -1,0 +1,33 @@
+dts: rk3576: give the NPU power domains their BIU resets
+
+The NPU0 and NPU1 domains come out of a cold power-on with the bus
+interface in an undefined state, and the first access hangs. The pmdomain
+driver now pulses a domain's resets between releasing idle and restoring
+QoS, so name the BIU resets for the two domains that need it.
+
+Inert without the driver side (patch 0020): domains that declare no resets
+behave as they did.
+
+Taken from Jiaxing Hu's RFC v4 5/6, whose power-domain hunk otherwise
+matches what patch 0012 already carries here.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/arch/arm64/boot/dts/rockchip/rk3576.dtsi
++++ b/arch/arm64/boot/dts/rockchip/rk3576.dtsi
+@@ -1153,6 +1153,7 @@ power-domain@RK3576_PD_NPU0 {
+ 								 <&cru CLK_RKNN_DSU0>,
+ 								 <&cru ACLK_RKNN_CBUF>,
+ 								 <&cru HCLK_RKNN_CBUF>;
++							resets = <&cru SRST_A_RKNN0_BIU>;
+ 							pm_qos = <&qos_npu_m0>;
+ 							#power-domain-cells = <0>;
+ 						};
+@@ -1163,6 +1164,7 @@ power-domain@RK3576_PD_NPU1 {
+ 								 <&cru CLK_RKNN_DSU0>,
+ 								 <&cru ACLK_RKNN_CBUF>,
+ 								 <&cru HCLK_RKNN_CBUF>;
++							resets = <&cru SRST_A_RKNN1_BIU>;
+ 							pm_qos = <&qos_npu_m1>;
+ 							#power-domain-cells = <0>;
+ 						};

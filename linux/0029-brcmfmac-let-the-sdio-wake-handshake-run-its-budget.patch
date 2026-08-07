@@ -192,9 +192,9 @@ index a0e88db..c7cdb2b 100644
 +			bus->kso_err_max = err_cnt;
 +		if (elapsed_us > bus->kso_us_max)
 +			bus->kso_us_max = elapsed_us;
-+		brcmf_err("kso %d worst: try=%d err_cnt=%d elapsed=%lldus slow=%u fail=%u\n",
-+			  on, try_cnt, err_cnt, elapsed_us, bus->kso_slow,
-+			  bus->kso_fail);
++		brcmf_info("kso %d worst: try=%d err_cnt=%d elapsed=%lldus slow=%u fail=%u\n",
++			   on, try_cnt, err_cnt, elapsed_us, bus->kso_slow,
++			   bus->kso_fail);
 +	}
  
  	if (on)

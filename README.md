@@ -59,9 +59,10 @@ in the SoC and stored on the app partition, so a data wipe loses them and the
 device re-enrols. Moving the eMMC to another board loses them too.
 
 **The SDIO bus produces access errors under load.** `linux/0029` retries
-through them, and they no longer reach the network stack: two hours of forced
-wakes plus sustained transfer logged no `-110`, no aborted frames and no
-interface errors. Roughly one handshake in 5000 still needs a retry. The cause
+through them: across two hours of forced wakes plus sustained transfer, none
+reached the network stack - no `-110`, no aborted frames, no interface errors.
+A handshake that exhausts the retry budget would still surface, so this is
+measured rather than guaranteed. Roughly one in 5000 needs a retry. The cause
 is not established; the remaining lead is the phase-map support Rockchip added
 upstream in 7.1 (commit cc1060a18e04), which is not in this kernel.
 
@@ -448,9 +449,9 @@ Bluetooth child - the contents of mainline's
 `rk3576-armsom-sige5-v1.2-wifibt.dtso`, which this system cannot apply as an
 overlay because it builds a single device tree.
 
-brcmfmac (`0029`-`0031`): the SDIO wake handshake keeps the retry budget its
-loop already declares, register access to a device that never woke is refused,
-and the handshake counts are reported periodically.
+brcmfmac (`0029`-`0030`): the SDIO wake handshake keeps the retry budget its
+loop already declares, and register access to a device that never woke is
+refused.
 
 Configuration is the arm64 `defconfig` plus `linux/nerves.config`,
 documented inline.

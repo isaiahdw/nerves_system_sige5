@@ -101,73 +101,231 @@ boots the previous slot on the next reboot. If the env is missing or the
 nerves boot path fails, `bootflow scan` falls back to
 `extlinux/extlinux.conf` (eMMC first, then SD).
 
-## Secure world (OP-TEE) — not built in, opt-in
+## Secure world (OP-TEE) — the bootloader is opt-in, the rest ships
 
-There is no BL32 in the image. The boot chain runs BL31 (TF-A) and nothing
-in TrustZone above it, so `/dev/tee0` never appears even though the kernel
-carries the OP-TEE driver.
+> **A worked example, not a production configuration.** It shows TrustZone
+> running on an RK3576 and every claim below is accurate, but the pieces
+> working is not the same as a device being secure. See
+> [What this does not give you](#what-this-does-not-give-you).
 
-Turning it on is worth understanding, because it is the only way this board
-can keep a secret. Suppose the device holds a private key to authenticate
-to NervesHub. Today that key is a file on the data partition: anyone who
-unsolders the eMMC, or gets root once, reads it and can impersonate the
-device forever. With a secure world the key is generated and sealed inside
-OP-TEE, stored in the eMMC's RPMB partition, and the application never sees
-it - it asks the secure world to sign a challenge and gets a signature
-back. Pulling the eMMC yields ciphertext.
+Only the BL32 is opt-in. The default bootloader has none, so the boot chain
+runs BL31 and nothing in TrustZone above it and `/dev/tee0` never appears.
 
-RPMB is what makes that real, and this board already has it: a
-replay-protected partition (`/dev/mmcblk0rpmb`) authenticated by a key the
-eMMC itself holds, with a counter so writes cannot be rolled back to an
-older state.
+Everything else is in every image, so that one image boots on either
+bootloader:
+
+| always present | cost |
+| --- | --- |
+| The device tree's secure-world memory reservation | 36 MB of 8 GB |
+| The kernel's OP-TEE and RPMB drivers | built in, unused with no BL32 |
+| `optee-client` (`tee-supplicant`), `optee-key`, `libp11` | a few hundred KB of rootfs |
+
+None of it does anything without a BL32 - the SMC goes unanswered, so the
+driver never registers and `tee-supplicant` has nothing to talk to - but it is
+not accurate to call the feature absent from the default build. Removing it
+would mean a second defconfig and a second device tree.
+
+### What this does not give you
+
+Closing these is per-product work that cannot live in a board support package:
+
+- **Verified boot.** The big one. Nothing checks the bootloader, so whoever can
+  write the eMMC boots their own and asks the secure world to sign. The key
+  stays unextractable; it does not stay exclusively yours. Fixing it means
+  burning the RSA hash and the secure-boot word, after which maskrom needs
+  signed loaders too.
+- **A TA signing key you control.** A development key signs a TA that shares
+  the PKCS#11 UUID, and therefore its stored objects.
+- **A real PIN policy.** The token PIN is a constant here and cannot be
+  otherwise on a device that boots unattended; the protection is the key being
+  non-extractable, not the PIN.
+- **Rollback protection.** The RPMB counter versions nothing, so old firmware
+  and old secure storage can be put back.
+- **Manufacturing provisioning.** The device fuses its own HUK on first boot.
+  Fine for a bench board, not how a fleet should be keyed.
+- **Attestation.** Nothing proves to a server that a key really is inside a
+  given board.
+
+Whether the RK3576 secure OTP has ECC, parity or lock bits is also
+unestablished - measure it before relying on how a partly-written word reads.
+
+What the example does establish, on two boards: the HUK reads back, the PKCS#11
+TA loads against a matched core, and a CSR signed inside the secure world
+verifies with stock `openssl`.
+
+There is no separate secure element on this board, so TrustZone is the only
+place a key can live that survives root or a desoldered eMMC. A NervesHub
+private key lives inside OP-TEE, sealed by a per-device hardware key. The
+application asks the secure world to sign and gets a signature back; it never
+sees the key, and pulling the eMMC yields ciphertext.
 
 ```
-BL31 (TF-A)  ── loads ──▶  BL32 (OP-TEE) @ 0x08400000
+BL31 (TF-A)  ── loads ──▶  BL32 (OP-TEE)
                               │
        Linux  ── /dev/tee0 ──▶│ signs with a key it never hands over
-                              └─ sealed in /dev/mmcblk0rpmb
+                              └─ sealed against a key fused into the SoC
 ```
 
-To build a bootloader with it:
+### Three keys, and the one they protect
+
+They are easy to conflate. Each answers a different question, at a different
+moment, and only one of them is made on the device.
+
+| | decides | lives | made by | here |
+| --- | --- | --- | --- | --- |
+| HUK | what can decrypt this device's stored secrets | fused in the SoC's OTP | the device, on first boot of a fusing image | yes |
+| TA signing key | what code the secure world will load | `~/.config/nerves_system_sige5/ta-sign.pem` | you, once, by hand | yes |
+| Secure boot key | what firmware may run at all | hash fused in OTP, private half yours | you | **no** |
+
+The device key is the fourth thing, and the one the other three exist to
+protect: an EC P-256 generated inside the trusted application and sealed
+against the HUK.
+
+The HUK is per-device and never leaves the chip. The other two are per-fleet
+and yours to hold: neither can be rotated on a device already flashed, because
+the TA key's public half is inside that device's OP-TEE core and the secure
+boot hash is in its fuses. Losing either means reflashing every board with a
+matched pair. Leaking the TA key means anyone can sign a trusted application
+that reads stored keys on every device built against it.
+
+The two that exist cover different gaps, which is why neither substitutes for
+the other. Trusted applications are not part of the boot chain - the PKCS#11
+TA is an ordinary file in the rootfs, loaded on demand long after boot - so
+secure boot would say nothing about it, and its signature is the only thing
+checked. In the other direction, without secure boot an attacker who can
+replace BL32 supplies a core built against their own TA key, and the signature
+check goes with it. That is the boundary
+[described below](#what-it-does-not-protect-against).
+
+### Building it
 
 ```sh
-WITH_BL32=1 ./scripts/build-uboot.sh
+SECURE_WORLD=1 ./scripts/build-uboot.sh
 ```
 
-That wraps Rockchip's `rk3576_bl32_v1.08.bin` in an ELF at the load address
-from `RKTRUST/RK3576TRUST.ini`, because binman only accepts an ELF or a
-binary with an `optee_v1_header` and the blob has neither.
+That needs a TA signing key, which the build refuses to run without:
 
-The rest is not built yet. What it needs:
+```sh
+mkdir -p ~/.config/nerves_system_sige5
+openssl genrsa -out ~/.config/nerves_system_sige5/ta-sign.pem 2048
+chmod 600 ~/.config/nerves_system_sige5/ta-sign.pem
+```
 
-- **Reserve the memory**, or Linux allocates over OP-TEE's DRAM and crashes -
-  rkbin's blob publishes no reservation. The node has to cover `0x08400000`,
-  the address in `RK3576TRUST.ini`. Do not copy the number out of upstream
-  OP-TEE: its rk3576 flavor puts TZDRAM at `0x70000000`, nowhere near where
-  this blob loads. The two are not interchangeable in either direction.
-- **Userspace**, both already packaged: `BR2_PACKAGE_OPTEE_CLIENT` for
-  `tee-supplicant` (RPMB access goes through it), and
-  `BR2_PACKAGE_OPTEE_TEST` for `xtest`, which is how you prove secure
-  storage actually works rather than assuming.
-- **Provision per device.** The RPMB key is written once and cannot be
-  rewritten. Check first whether the factory already burned one - if it did
-  and you do not hold it, RPMB is unusable on that unit.
+OP-TEE embeds the public half and loads only trusted applications signed by the
+private half. A TA's secure-storage key is derived from the HUK and the TA's
+UUID, so this key controls what can read the device key. It is separate from
+secure boot: secure boot decides what firmware may run, this decides what the
+secure world will load.
 
-The kernel side needs nothing: `CONFIG_OPTEE` is already in, which is why
-`/sys/bus/tee` exists on a running board with no `/dev/tee0` behind it.
+Keep it, and keep it off devices. A rebuilt core will not load TAs signed with
+a different key, so losing it means reflashing every device with a matched
+pair.
 
-Use Rockchip's blob rather than building upstream OP-TEE, which looks like
-the cleaner option but is not. Upstream has a `plat-rockchip` rk3576, but it
-only configures the DDR firewall; with no `tee_otp_get_hw_unique_key()`
-behind it OP-TEE falls back to a default hardware key compiled into public
-source. RPMB derives its authentication key from that, so secure storage
-would be sealed with a constant anyone can look up. Rockchip's blob is the
-one with real OTP backing.
+Only the public half enters the build container. OP-TEE builds against
+`TA_PUBLIC_KEY`; the trusted application is signed afterwards on this machine,
+where the private key is.
 
-Worth being clear about the limit: this protects a key from being
-*extracted*. It does not stop someone booting their own image on the board
-and asking the secure world to sign for them. Closing that means verified
-boot, which is more fuses.
+That signing step runs as the user who owns the key, so what else it runs
+matters. Every input is pinned: the OP-TEE commit by full SHA,
+`scripts/sign_encrypt.py` checked against a recorded hash before it is
+executed, and the Python it needs installed from
+`scripts/signing-requirements.txt` with `--require-hashes`. Only `openssl` is
+handed the key; the rest is pinned because it runs with permission to read it.
+
+### What the patches add
+
+Thirteen patches, applied to a pinned optee_os by `scripts/build-uboot.sh`:
+
+- a HUK read from the secure OTP, rejecting a slot with an all-zero word
+- `hw_get_random_bytes()` driving RKRNG, and PRNG seeding from it; an unreadable
+  TRNG is fatal
+- a secure-world console on the debug UART
+- read-only diagnostics behind `SECURE_WORLD_DEBUG=1`, off by default: an OTP
+  survey, a search for the secure TRNG, and a dry run reporting what a burn
+  would do
+- the burn itself, off by default
+
+Upstream TF-A v2.15.0 with OP-TEE 4.10. The PKCS#11 TA loads from the rootfs
+and `/dev/tee0` appears; secure storage initialises once a HUK is fused.
+
+### The per-device key
+
+The RK3576 secure OTP ships with no hardware unique key; the OEM burns one.
+Without it secure storage cannot initialise, so a `SECURE_WORLD=1` image fuses
+one on the first boot of an unprovisioned part.
+
+It writes four words at index `0x80`, and only after the slot is confirmed
+blank, the candidate passes a set of sanity checks, and a second independent
+draw from the TRNG differs from the first. It then reads the value back and
+refuses to use it unless it matches. A later boot on a provisioned part does
+nothing.
+
+On a blank part the console shows it happening, which is what to compare
+against:
+
+    E/TC:0 0 tee_otp_get_hw_unique_key:691 No HUK in secure OTP at index 0x80
+    I/TC: HUK burn: committing 4 words at index 0x80 - irreversible
+    I/TC: HUK burn: done, verified
+
+A part that already has a key prints no burn line at all.
+
+Fusing is irreversible, but it is not a brick risk: the four words are written
+in a short window, and the fuses that can brick an RK3576 are the secure-boot
+control word and the RSA hash, neither of which this touches.
+
+An interrupted burn is mostly caught, not entirely. Rejecting a slot with an
+all-zero word catches an interruption between words, and the burn reads the key
+back and compares it exactly before trusting it, which catches a word that
+programmed wrong. What neither catches is a power cut in the gap between the
+last word landing and the compare running: a partly programmed word can read
+non-zero, so all four read non-zero and the slot looks complete.
+
+That window is left open on purpose. Recording completion in a second OTP word
+would close it and cost more than it saves, for reasons set out in
+docs/research/rk3576-secure-world.md.
+
+### What it does not protect against
+
+The boot chain is not verified, so the boundary is narrower than "the key
+cannot be extracted". What holds is:
+
+> Protects against compromised normal-world software, and against storage
+> removed from the board, for as long as the bootloader and BL32 are intact.
+
+Someone who can replace BL32 runs code at S-EL1 and can read the same secure
+OTP words OP-TEE reads, so they can take the key itself, not merely use it.
+Closing that means verified boot, which is more fuses — and the ones that
+enable it are the ones that can brick a part. What that would take, stage by
+stage, is in
+[docs/research/rk3576-secure-boot-plan.md](docs/research/rk3576-secure-boot-plan.md).
+
+Keys are also sealed against a fuse in this SoC and stored on the app
+partition, so a data wipe or a different board means re-enrolment.
+
+### RPMB
+
+Three separate things. Only the first is on.
+
+| | State |
+| --- | --- |
+| Kernel RPMB subsystem | `CONFIG_RPMB=y`. `/sys/class/rpmb/rpmb0` enumerates and the OP-TEE driver binds to it |
+| OP-TEE storing anything there | Off. `CFG_RPMB_FS` defaults to `n` and nothing here sets it |
+| The eMMC's RPMB key | Never programmed |
+
+Secure storage runs on `CFG_REE_FS`: keys are encrypted against the HUK and
+written to the app partition through `tee-supplicant`. That is what "sealed
+against a fuse and stored on the app partition" above means. RPMB would add
+rollback protection — stopping someone who holds the eMMC from restoring an
+older copy of secure storage — and nothing else.
+
+Enabling it means `CFG_RPMB_FS` and `CFG_RPMB_WRITE_KEY`. The key write is
+one-shot and the key is derived from the HUK, so fuse the HUK and confirm it
+works first; a key written from the wrong HUK strands the eMMC's RPMB
+permanently.
+
+[docs/research/rk3576-secure-world.md](docs/research/rk3576-secure-world.md)
+has the secure address map, the OTP layout, and how this compares to a Trust&GO
+ATECC608.
 
 ## Hardware support
 

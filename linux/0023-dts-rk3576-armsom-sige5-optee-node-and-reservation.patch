@@ -1,0 +1,68 @@
+dts: rk3576-armsom-sige5: describe the secure world
+
+Adds the linaro,optee-tz firmware node the tee driver binds to, and
+reservations covering the memory the secure world owns: upstream OP-TEE's
+TZDRAM at 0x70000000, 32 MB, and its static shared memory at 0x72000000,
+4 MB, from core/arch/arm/plat-rockchip/conf.mk.
+
+Confirmed on hardware. Linux logs
+
+  OF: reserved mem: ... nomap optee@70000000
+  optee: revision 4.9, dynamic shared memory is enabled, initialized driver
+
+giving /dev/tee0 and /dev/teepriv0. Before the firmware node existed,
+/proc/device-tree/firmware held only scmi and the driver had nothing to bind
+to.
+
+All of it is inert in the default build, which ships no BL32: the SMC goes
+unanswered so the driver never registers. Without the reservation Linux is
+free to allocate over the secure world; it survived one boot here, which is
+luck rather than a guarantee.
+
+Claude-Session: https://claude.ai/code/session_01PBGQqVfXFDyZYA6aV3X3Qq
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
++++ b/arch/arm64/boot/dts/rockchip/rk3576-armsom-sige5.dts
+@@ -1317,3 +1317,40 @@ rknpu_mmu: iommu@27702000 {
+ 		};
+ 	};
+ };
++
++/*
++ * Secure world. Present only when the bootloader carries a BL32; a build
++ * without one leaves the SMC unanswered and the driver does not register,
++ * so these nodes are harmless either way.
++ *
++ * The reservations match the only secure world this system builds: upstream
++ * OP-TEE (USE_OPENSOURCE_TEE=1) at CFG_TZDRAM_START 0x70000000 with 32 MB and
++ * CFG_SHMEM_START 0x72000000 with 4 MB, from core/arch/arm/plat-rockchip/
++ * conf.mk. A bootloader carrying a secure world at some other address needs
++ * its own reservation to match.
++ */
++&{/} {
++	firmware {
++		optee {
++			compatible = "linaro,optee-tz";
++			method = "smc";
++		};
++	};
++
++	reserved-memory {
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		/* TZDRAM, then the static shared memory */
++		optee@70000000 {
++			reg = <0x0 0x70000000 0x0 0x2000000>;
++			no-map;
++		};
++
++		optee@72000000 {
++			reg = <0x0 0x72000000 0x0 0x400000>;
++			no-map;
++		};
++	};
++};

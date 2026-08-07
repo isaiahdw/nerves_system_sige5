@@ -1,0 +1,18 @@
+config BR2_PACKAGE_OPTEE_KEY
+	bool "optee-key"
+	depends on BR2_PACKAGE_OPTEE_CLIENT
+	help
+	  Command line tool for a device key held in OP-TEE's PKCS #11
+	  token: initialise the token, generate an EC P-256 keypair
+	  inside the secure world, read back the public key, and sign
+	  with the private one.
+
+	  The private key is generated as a sensitive, non-extractable
+	  token object, so it never leaves the trusted application.
+
+	  A separate process rather than a library binding, because
+	  Cryptoki is initialised here for single-threaded use and the
+	  whole exchange with the TA happens on one thread.
+
+comment "optee-key needs optee-client"
+	depends on !BR2_PACKAGE_OPTEE_CLIENT

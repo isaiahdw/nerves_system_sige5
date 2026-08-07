@@ -9,20 +9,83 @@ USB 3.0, and a 40-pin GPIO header. Built on a mainline LTS kernel
 (6.18.y) and mainline U-Boot. The IEx console is on `ttyS0`, the
 1.5 Mbaud debug UART on header pins 8/10/6.
 
+**Board revision v1.2 or later.** The device tree drives the v1.2 WiFi/BT
+module (BCM43752 on SDIO, BCM4362A2 on uart4) directly, including its reset
+and wake GPIOs. Earlier boards carry an RTL8852BS instead, which has no
+mainline driver and does not share that wiring, so they are not supported
+here - not merely untested.
+
 Derived from the
 [nerves_system_rock_4d](https://github.com/isaiahdw/nerves_system_rock_4d)
 mainline branch (same SoC). Verified on a Sige5 v1.2 board: eMMC boot,
 OTA updates with validation, both network interfaces, onboard WiFi, GPU,
 NPU, HDMI console, watchdog, RTC, and audio devices.
 
+## What works
+
+Exercised on hardware:
+
+- eMMC boot, A/B firmware slots, automatic revert
+- OTA updates
+- Ethernet x2, onboard WiFi
+- HDMI with a framebuffer console
+- GPU under Mesa — OpenGL ES 3.1, no X11 or Wayland
+- NPU with vision and language models
+- CPU, GPU and NPU frequency scaling
+- Thermal management and the fan header
+- Watchdog, RTC, ADC, USB, audio devices, hardware RNG
+
+Opt-in, one build flag: a secure world. OP-TEE with a per-device key fused into
+the SoC, and PKCS#11 for keys that never leave it.
+
+Not working:
+
+| | Why |
+| --- | --- |
+| CAN | No mainline driver |
+| Video decode | rkvdec2 for RK3576 lands in kernel 7.0 |
+| MIPI CSI/DSI | Not wired up in mainline for this board |
+
+Untested: M.2 NVMe. The drivers are built in; no drive was fitted.
+
+**GPU and NPU frequency labels are nominal.** Ask the GPU for 300 MHz and you
+get about 423; ask for 900 and you get about 815. The clock is a PVTPLL that
+tracks the silicon rather than a divider, so an OPP names an operating point,
+not a frequency —
+[docs/research/rk3576-gpu-clocks.md](docs/research/rk3576-gpu-clocks.md).
+
+**Secure-world keys are bound to the board.** They are encrypted against a fuse
+in the SoC and stored on the app partition, so a data wipe loses them and the
+device re-enrols. Moving the eMMC to another board loses them too.
+
+**The SDIO bus produces access errors under load.** `linux/0029` retries
+through them: across two hours of forced wakes plus sustained transfer, none
+reached the network stack - no `-110`, no aborted frames, no interface errors.
+A handshake that exhausts the retry budget would still surface, so this is
+measured rather than guaranteed. Roughly one in 5000 needs a retry. The cause
+is not established; the remaining lead is the phase-map support Rockchip added
+upstream in 7.1 (commit cc1060a18e04), which is not in this kernel.
+
 ## Boot architecture
 
 Everything lives on the soldered eMMC. The RK3576 boot ROM on this board
 (no SPI NOR fitted) loads U-Boot directly from the eMMC at sector 64;
 fwup's factory `complete` task writes the bootloader there as part of the
-disk image, and upgrades never touch it. The boot ROM also boots from the
-microSD slot, so the same fwup image written to an SD card is a
-no-special-tools bring-up and recovery path.
+disk image, and upgrades never touch it.
+
+A microSD card boots when the eMMC has no valid loader at sector 64. With one
+present, the eMMC's U-Boot runs and boots the eMMC; it does not check the card.
+Maskrom is the recovery path when neither will boot:
+
+```sh
+# board in maskrom, USB-C on the OTG port
+fwup -a -d nerves.img -i firmware.fw -t complete   # raw disk image
+rkdeveloptool db rk3576_spl_loader_v1.09.108.bin
+rkdeveloptool wl 0 nerves.img
+```
+
+That restores a board with a blank or broken eMMC without a card or a running
+system.
 
 ```
 RK3576 boot ROM
@@ -160,6 +223,11 @@ mix deps.get
 mix compile
 ```
 
+Editing anything in `linux/` costs a full kernel rebuild. `external.mk` hashes
+the patch set and keeps the hash inside the extracted tree; a changed hash
+discards the tree so the next step extracts and patches a fresh one. The same
+guard covers `package/rknpu-driver/*.patch` and `package/optee-key/src/`.
+
 ### Using in an application
 
 ```elixir
@@ -175,41 +243,77 @@ Then `export MIX_TARGET=sige5` for every mix command.
 
 ## Flashing
 
-Factory flash goes to the eMMC over USB maskrom (see
-[uboot/README.md](uboot/README.md) for details):
+Factory flash goes to the eMMC over USB maskrom. Connect the OTG Type-C port
+to the host, then hold MASKROM while connecting power to the other (PD-only)
+Type-C port:
 
 ```sh
 fwup -a -d disk.img -t complete -i <firmware>.fw   # raw image on the host
-# OTG Type-C port to the host, hold MASKROM while connecting the PD
-# power supply to the other (PD-only) Type-C port:
 rkdeveloptool db uboot/rk3576_spl_loader_v1.09.108.bin
-rkdeveloptool cs 1                                  # storage: eMMC
 rkdeveloptool wl 0 disk.img
 rkdeveloptool rd
 ```
 
-The image is smaller than the eMMC; on the first boot the system grows
-the app partition to fill the disk automatically.
+- The bootloader is inside that image; there is no separate write at sector 64.
+- `db` puts Rockchip's SPL loader in RAM and everything is written through it.
+  88 seconds for the whole 1.8 GB image.
+- The image is smaller than the eMMC. First boot grows the app partition to
+  fill the disk.
 
-Alternative with no tools: `mix burn` the same firmware to a microSD and
-boot from the slot — useful for first bring-up and recovery.
+Other routes — over the network, from a U-Boot prompt, from maskrom —
+are in [docs/flashing.md](docs/flashing.md). `mix burn` to a microSD needs no
+tools at all, and boots when the eMMC has no valid loader.
+
+Bring-up notes are in [docs/research/](docs/research/README.md): the secure
+OTP, the GPU clock path, the vendor OPP tables and the BSP artifacts they were
+decoded from.
 
 OTA upgrades are the standard Nerves flow (`mix upload`); upgrades write
-the inactive slot only and revert automatically unless validated.
+the inactive slot only and revert automatically unless validated. The
+bootloader is not part of an A/B update — changing it is a separate write at
+sector 64, with one copy and no revert.
 
 ## Kernel
 
 Mainline LTS from kernel.org (6.18.40) with the upstream
-`rk3576-armsom-sige5` device tree and fourteen patches, each commented
-inline: board fixups (`linux/0001`: mmc aliases so the eMMC is
-`/dev/mmcblk0`, watchdog enable), SARADC (`0005`), the vendor RKNPU node
-with its OPP table and thermal trip (`0002`), power-domain fixes the NPU
-needs on mainline (`0003`/`0004`), and the NPU MMU work - the iommu node
-itself (`0009`) plus six rockchip-iommu fixes it depends on (`0006`,
-`0007`, `0008`, `0010`, `0012`, `0013`) and the binding update describing
-its extra banks (`0011`), and a binding for the NPU OPP table's
-read-margin properties (`0014`). Configuration is the arm64
-`defconfig` plus `linux/nerves.config`, documented inline.
+`rk3576-armsom-sige5` device tree and thirty patches, each commented
+inline.
+
+NPU and board (`0001`-`0014`): bindings for the NPU MMU and the RKNPU OPP
+table (`0001`, `0002`), six rockchip-iommu fixes the NPU MMU depends on
+(`0004`-`0009`), a per-domain power-on settle delay (`0003`), board fixups
+(`0010`: mmc aliases so the eMMC is `/dev/mmcblk0`, watchdog enable), the
+RKNPU node with its OPP table and thermal trip (`0011`), RKNN clocks held
+across NPU power transitions (`0012`), SARADC (`0013`), and the NPU MMU
+node itself (`0014`).
+
+GPU (`0015`-`0019`): a binding conditional requiring the RK3576 clock trio
+(`0015`), a devfreq fix so the monitor does not start on a suspended device
+(`0016`), the clocks BL31 needs held by panfrost (`0017`), DVFS coordinated
+with runtime PM (`0018`), and the SCMI clock with its per-variant OPP
+selection (`0019`).
+
+Power domains and the secure world (`0020`-`0023`): optional resets in the
+Rockchip power-domain binding and driver (`0020`, `0021`), the NPU domains'
+BIU resets (`0022`), and the OP-TEE firmware node with its memory reservation
+(`0023`).
+
+PWM (`0024`-`0027`): the RK3576 controller binding (`0024`), v4 support in
+pwm-rockchip (`0025`), the pwm1 and pwm2 nodes (`0026`), and the fan on the
+header (`0027`).
+
+WiFi and Bluetooth (`0028`): the module named under the SDIO controller so
+brcmfmac takes the out-of-band host wake, and uart4 enabled with its
+Bluetooth child - the contents of mainline's
+`rk3576-armsom-sige5-v1.2-wifibt.dtso`, which this system cannot apply as an
+overlay because it builds a single device tree.
+
+brcmfmac (`0029`-`0030`): the SDIO wake handshake keeps the retry budget its
+loop already declares, and register access to a device that never woke is
+refused.
+
+Configuration is the arm64 `defconfig` plus `linux/nerves.config`,
+documented inline.
 
 ## NPU
 

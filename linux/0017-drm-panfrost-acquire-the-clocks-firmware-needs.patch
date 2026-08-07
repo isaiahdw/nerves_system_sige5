@@ -1,0 +1,123 @@
+drm/panfrost: acquire the clocks firmware needs
+
+Where the GPU core clock is owned by firmware rather than driven directly,
+the registers the firmware programs to change it sit behind other clocks
+of the GPU block, and the firmware does not enable them itself. On RK3576
+those are PCLK_GPU_ROOT and CRU CLK_GPU: BL31 owns the GPU PVTPLL and
+reaches it over them.
+
+panfrost_clk_init() read and enabled the core clock before it had even
+fetched the bus clock, and knew nothing about a gate clock at all. With
+nothing claiming CRU CLK_GPU the clock framework turns it off as unused
+during boot - "clk: Disabling unused clocks" at 2.3 s, against a probe at
+4.5 s - and the first rate request then writes into a dead APB and wedges
+the CPU.
+
+Fetch all three first, bring the gate and bus up, then read and enable the
+core, and hold them for the life of the device. panfrost_clk_fini() tears
+down in the mirror order so the core clock goes while the gate and bus it
+is reached over are still running.
+
+The gate clock is optional, so parts that do not declare one are
+unaffected.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/drivers/gpu/drm/panfrost/panfrost_device.c	2026-07-24 14:17:26.000000000 +0000
++++ b/drivers/gpu/drm/panfrost/panfrost_device.c	2026-08-02 22:26:08.644438503 +0000
+@@ -45,42 +45,69 @@
+ 		return PTR_ERR(pfdev->clock);
+ 	}
+ 
+-	rate = clk_get_rate(pfdev->clock);
+-	dev_info(pfdev->dev, "clock rate = %lu\n", rate);
+-
+-	err = clk_prepare_enable(pfdev->clock);
+-	if (err)
+-		return err;
+-
+ 	pfdev->bus_clock = devm_clk_get_optional(pfdev->dev, "bus");
+ 	if (IS_ERR(pfdev->bus_clock)) {
+ 		dev_err(pfdev->dev, "get bus_clock failed %ld\n",
+ 			PTR_ERR(pfdev->bus_clock));
+-		err = PTR_ERR(pfdev->bus_clock);
+-		goto disable_clock;
++		return PTR_ERR(pfdev->bus_clock);
+ 	}
+ 
+-	if (pfdev->bus_clock) {
+-		rate = clk_get_rate(pfdev->bus_clock);
+-		dev_info(pfdev->dev, "bus_clock rate = %lu\n", rate);
++	pfdev->gate_clock = devm_clk_get_optional(pfdev->dev, "gate");
++	if (IS_ERR(pfdev->gate_clock)) {
++		dev_err(pfdev->dev, "get gate_clock failed %ld\n",
++			PTR_ERR(pfdev->gate_clock));
++		return PTR_ERR(pfdev->gate_clock);
++	}
+ 
++	/*
++	 * Where the core clock is owned by firmware, the registers the firmware
++	 * programs sit behind the gate and bus clocks of the GPU block and it
++	 * does not enable them itself. Bring those up before reading or
++	 * enabling the core clock, and hold them: with nothing claiming the
++	 * gate the clock framework turns it off as unused during boot, and the
++	 * first rate request then aborts.
++	 */
++	if (pfdev->gate_clock) {
++		err = clk_prepare_enable(pfdev->gate_clock);
++		if (err)
++			return err;
++	}
++
++	if (pfdev->bus_clock) {
+ 		err = clk_prepare_enable(pfdev->bus_clock);
+ 		if (err)
+-			goto disable_clock;
++			goto disable_gate_clock;
++
++		rate = clk_get_rate(pfdev->bus_clock);
++		dev_info(pfdev->dev, "bus_clock rate = %lu\n", rate);
+ 	}
+ 
++	rate = clk_get_rate(pfdev->clock);
++	dev_info(pfdev->dev, "clock rate = %lu\n", rate);
++
++	err = clk_prepare_enable(pfdev->clock);
++	if (err)
++		goto disable_bus_clock;
++
+ 	return 0;
+ 
+-disable_clock:
+-	clk_disable_unprepare(pfdev->clock);
++disable_bus_clock:
++	clk_disable_unprepare(pfdev->bus_clock);
++disable_gate_clock:
++	clk_disable_unprepare(pfdev->gate_clock);
+ 
+ 	return err;
+ }
+ 
+ static void panfrost_clk_fini(struct panfrost_device *pfdev)
+ {
+-	clk_disable_unprepare(pfdev->bus_clock);
++	/*
++	 * Mirror of panfrost_clk_init(): the firmware-owned core clock goes
++	 * first, while the gate and bus it is reached over are still running.
++	 */
+ 	clk_disable_unprepare(pfdev->clock);
++	clk_disable_unprepare(pfdev->bus_clock);
++	clk_disable_unprepare(pfdev->gate_clock);
+ }
+ 
+ static int panfrost_regulator_init(struct panfrost_device *pfdev)
+--- a/drivers/gpu/drm/panfrost/panfrost_device.h	2026-07-24 14:17:26.000000000 +0000
++++ b/drivers/gpu/drm/panfrost/panfrost_device.h	2026-08-02 22:26:08.644320962 +0000
+@@ -132,6 +132,7 @@
+ 	void __iomem *iomem;
+ 	struct clk *clock;
+ 	struct clk *bus_clock;
++	struct clk *gate_clock;
+ 	struct regulator_bulk_data *regulators;
+ 	struct reset_control *rstc;
+ 	/* pm_domains for devices with more than one. */

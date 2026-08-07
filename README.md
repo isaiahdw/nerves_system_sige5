@@ -108,33 +108,47 @@ boot, which is more fuses.
 
 ## Hardware support
 
-Verified on a Sige5 v1.2, 2026-08-01.
+Verified on a Sige5 v1.2, 2026-08-05.
+
+> **Proprietary firmware.** The WiFi firmware, its CLM regulatory blob and the
+> Bluetooth patch RAM in `package/brcmfmac43752-firmware` are Broadcom/Infineon
+> binaries. They are redistributed unmodified and are not covered by this
+> repository's licence; Buildroot marks the package `PROPRIETARY`, so
+> `make legal-info` reports it. Neither of the upstreams these come from
+> (armbian/firmware, Rockchip's `rkwifibt`) ships the vendor licence text
+> alongside the binaries, so this repository cannot state their terms - if you
+> are shipping a product, get the applicable licence from Infineon or your
+> module vendor rather than inferring it from here.
 
 | Feature | Status | Notes |
 | --- | --- | --- |
 | eMMC boot, A/B firmware slots | Yes | Boot ROM reads the bootloader from eMMC directly; HS400ES. App partition grows to fill the eMMC on first boot |
 | OTA updates (`mix upload`) | Yes | Delta updates supported (fwup >= 1.12 on device); validation + automatic revert verified |
 | Ethernet x2 | Yes | gmac0 + gmac1, RTL8211F each. `eth0` verified with DHCP + internet; `eth1` detected but not tested with a cable |
-| WiFi (onboard, board v1.2+) | Yes | BCM43752 (AP6275S) on SDIO via in-kernel brcmfmac; firmware from `package/brcmfmac43752-firmware`. Verified connected with DHCP. v1.0/1.1 boards (RTL8852BS) have no mainline driver |
-| microSD boot | Untested | Boot ROM path; the same image should work for bring-up/recovery |
-| Bluetooth | No | uart4 is deliberately disabled in the mainline dts; needs a serdev node + bring-up |
+| WiFi roaming | Disabled | `roamoff=1` in `rootfs_overlay/etc/modprobe.d/brcmfmac.conf`. The firmware's internal roaming engine is a known source of unexpected disassociation and has nothing to roam to at a fixed site. Remove it for multi-AP or mobile installations |
+| WiFi (onboard, v1.2+ only) | Yes | BCM43752 (AP6275S) on SDIO via in-kernel brcmfmac; firmware from `package/brcmfmac43752-firmware`. Verified connected with DHCP. `linux/0028` names the module so brcmfmac takes the out-of-band host wake rather than signalling in band over SDIO. v1.0/1.1 boards (RTL8852BS) have no mainline driver |
+| microSD boot | Fallback | `mix burn` the same firmware to a card; it boots when the eMMC has no valid loader at sector 64, verified with the eMMC bootloader cleared. With a loader present the eMMC's U-Boot boots the eMMC and does not check the card |
+| Bluetooth | Enumerates, untested | `linux/0028` enables uart4 and adds the `brcm,bcm43438-bt` serdev child, from mainline's own v1.2 overlay. The arm64 defconfig already carries `BT_HCIUART_BCM`. `hci0` appears and the controller identifies as BCM4362A2; `brcm/BCM4362A2.hcd` patchram ships in `package/brcmfmac43752-firmware`. Nothing has been paired yet |
 | HDMI display + console | Yes | VOP + dw-hdmi-qp, framebuffer console verified on a display. No GL/EGL userspace yet (see GPU row) |
-| GPU (Mali G52 MC3) | Yes | Kernel panfrost + Mesa (OpenGL ES 3.1, EGL/GBM, no X11/Wayland); kmscube runs vsync-locked at 60 fps on HDMI. Mesa is built without the LLVM draw module and the orphaned libLLVM is pruned from the image (see external.mk and post-build.sh), so the GL stack costs ~18 MB |
+| GPU (Mali G52 MC3) | Yes | Kernel panfrost + Mesa (OpenGL ES 3.1, EGL/GBM, no X11/Wayland); kmscube runs vsync-locked at 60 fps on HDMI. devfreq drives 300-900 MHz off BL31's PVTPLL over SCMI (see GPU). Mesa is built without the LLVM draw module and the orphaned libLLVM is pruned from the image (see external.mk and post-build.sh), so the GL stack costs ~18 MB |
 | M.2 NVMe (PCIe 2.1) | Untested | pcie0 + NVMe drivers built in; no drive was fitted during bring-up |
 | USB | Yes | 2x Type-C (one PD power input only, one USB 2.0 OTG/maskrom) + USB3 host; verified with a CDC-ACM device (Zigbee coordinator) through the onboard hub. SuperSpeed not yet exercised |
 | Audio | Yes | HDMI audio + onboard analog ES8388, both register as ALSA cards; playback not yet exercised |
 | Watchdog | Yes | dw-wdt enabled by the board patch; armed by `nerves_heart`, NOWAYOUT |
 | RTC | Yes | HYM8563; keeps time with a battery on the board connector |
 | CPU frequency scaling | Yes | schedutil via SCMI; A53 cluster to 2.016 GHz, A72 cluster to 2.208 GHz |
-| Thermal | Yes | tsadc zones with cpufreq cooling; the NPU zone gets a passive trip and devfreq cooling from `linux/0002` |
+| Thermal | Yes | tsadc zones with cpufreq cooling; the NPU zone gets a passive trip and devfreq cooling from `linux/0011` |
 | LEDs | Yes | Green heartbeat + red status + mmc activity triggers |
-| Hardware RNG | Yes | /dev/hwrng feeds the kernel entropy pool |
-| ADC (SARADC) | Yes | Enabled by `linux/0005` (upstream leaves it disabled); header ADC inputs, vref from vcca_1v8_s0 |
+| Hardware RNG | Yes | Two instances. `/dev/hwrng` (`rng@2a410000`) feeds the kernel entropy pool; a second, secure-only block at `0x2a440000` seeds OP-TEE. 1 MB sampled: 7.99981 bits/byte, chi-square 278.9 on 255 df |
+| Secure world (OP-TEE) | Opt-in | `SECURE_WORLD=1 ./scripts/build-uboot.sh` builds upstream TF-A + OP-TEE 4.10 in place of rkbin's BL31. Fuses a per-device key on first boot of an unprovisioned part. Verified: key burned, survives power cycles, secure storage initialises |
+| PKCS#11 key storage | Opt-in | With the secure world: EC P-256 generated inside OP-TEE, persisted encrypted against the fused key, signed with. The private key never enters Linux. Needs `tee-supplicant` running |
+| RPMB | Kernel side only | 4 MiB. `CONFIG_RPMB=y` and the OP-TEE driver binds to it, but `CFG_RPMB_FS` is off, so secure storage uses the app partition instead. Adds rollback protection only. Its key is one-shot and derived from the HUK, so provision it only after the HUK is settled |
+| ADC (SARADC) | Yes | Enabled by `linux/0013` (upstream leaves it disabled); header ADC inputs, vref from vcca_1v8_s0 |
 | CAN | No | RK3576 CAN-FD has no mainline driver or dts nodes |
 | GPIO/I2C/SPI/UART header | Expected | Via [Circuits.*](https://elixir-circuits.github.io/) |
-| NPU (6 TOPS) | Yes | Vendor rknpu driver built out-of-tree against the mainline kernel (`package/rknpu-driver`) + librknnrt 2.3.2. IOMMU-backed pageable buffers (no CMA cap), devfreq across 300-900 MHz. Both cores usable together. Verified with single, chained and dual-core int8 models and an LLM; models are built on a host with rknn-toolkit2 |
+| NPU (6 TOPS) | Yes | Vendor rknpu driver built out-of-tree against the mainline kernel (`package/rknpu-driver`) + librknnrt 2.3.2. IOMMU-backed pageable buffers (no CMA cap), devfreq across 300-900 MHz. Both cores usable together. Verified with MobileNetV2 (250 inf/s, top-5 matching Rockchip's reference exactly), Qwen3-0.6B W4A16 through rkllm 1.3.0 at 17.8 tok/s, and an int8 matmul checked against the CPU. Same results with and without the secure world. Models are built on a host with rknn-toolkit2 |
 | Video decode | No | rkvdec2 for RK3576 lands in kernel 7.0 |
-| PWM / fan header | No | No RK3576 PWM nodes in mainline 6.18 |
+| PWM / fan header | Yes | RK3576 has a fourth-generation PWM block that mainline 6.18 does not know; `linux/0024`-`0027` add the driver, the binding, the fourteen channels of pwm1 and pwm2, and a `pwm-fan` on PWM2 channel 7 (GPIO3_D7, mux m3) at 20 kHz. The fan steps 0/50/100/150/200/255 at 50, 55, 60, 65 and 70 °C off the package sensor, and is a normal hwmon device the rest of the time |
 | MIPI CSI/DSI | No | Not wired up in mainline for this board |
 
 ## Building

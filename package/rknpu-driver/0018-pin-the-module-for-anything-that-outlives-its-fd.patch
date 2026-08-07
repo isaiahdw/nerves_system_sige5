@@ -1,0 +1,270 @@
+rknpu: pin the module for anything that outlives its fd
+
+remove() frees rknpu_dev - it is devm memory - and drops the driver's DRM
+reference, but neither waits for objects that are still reachable. A GEM
+object released after that, or a fence held by another driver, reaches back
+into freed memory.
+
+The general fix for that is hot-unplug: drm_dev_unplug, drm_dev_enter/exit
+around every hardware path, and GEM destruction split so the final free needs
+no power and no domain switch. On this part the last of those means replacing
+dma_alloc_attrs - which fuses allocation with IOMMU mapping - with hand-rolled
+page and domain management across every GEM path, which is the riskiest code
+in the driver, to support unplugging an NPU that is soldered to the board and
+described by the base device tree.
+
+Enforce the invariant the hardware actually has instead: teardown does not
+begin while anything the driver owns is alive.
+
+Most of that already holds and costs nothing. An open DRM fd pins the module
+through DEFINE_DRM_GEM_FOPS, an mmap holds that file, an exported dma-buf
+inherits the same owner through drm_gem_prime_export, the misc device sets
+one, and procfs entries are rundown-protected by the proc core. Three things
+were left:
+
+  - Fences. dma_fence_ops has no owner and sync_file hands the fence to
+    anyone. A fence also takes its lock from fence_ctx, which is devm memory,
+    so one outliving remove() would lock through a freed allocation.
+
+  - Jobs. A nonblocking submit returns while the job and its cleanup work
+    continue, by which time the fd may be gone.
+
+  - Deferred GEM objects. Reachable from neither an fd nor a dma-buf: the
+    handle is gone and the destroy that would have freed it could not run, so
+    the driver's own list is the only thing holding them. The reference is
+    dropped by the destroy that actually frees, not by the one that defers.
+
+Sysfs unbind is removed with suppress_bind_attrs, because it starts teardown
+at a moment userspace picks and no reference count inside the driver can
+refuse it. The device is not removable in any real sense.
+
+rmmod with any of these alive now returns EBUSY instead of leaving a
+dangling pointer. Counters say which kind is outstanding if the invariant is
+ever broken, since the module refcount alone cannot.
+
+Hot-unplug and overlay-created NPU devices are not supported.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+
+--- a/rknpu_drv.c
++++ b/rknpu_drv.c
+@@ -326,6 +326,24 @@
+ static int rknpu_power_on(struct rknpu_device *rknpu_dev);
+ static int rknpu_power_off(struct rknpu_device *rknpu_dev);
+ 
++/*
++ * Hold the module for an object that can outlive the fd that made it.
++ *
++ * The caller is always inside an ioctl on an open fd, which already pins the
++ * module, so the count cannot be going to zero here and __module_get is safe.
++ */
++void rknpu_pin_module(atomic_t *live)
++{
++	__module_get(THIS_MODULE);
++	atomic_inc(live);
++}
++
++void rknpu_unpin_module(atomic_t *live)
++{
++	atomic_dec(live);
++	module_put(THIS_MODULE);
++}
++
+ static void rknpu_devfreq_floor(struct rknpu_device *rknpu_dev, bool on)
+ {
+ 	int ret = rknpu_devfreq_boost(rknpu_dev, on);
+@@ -1929,6 +1947,21 @@
+ 		rknpu_gem_flush_deferred(rknpu_dev, false);
+ 	}
+ 
++	/*
++	 * Every object that can outlive its fd holds a module reference, and
++	 * this only runs once the last one is gone, so all three are zero. A
++	 * non-zero count means a reference was taken and never dropped: the
++	 * object is about to point into freed memory and nothing here can fix
++	 * that, so name it instead of leaving a later crash to explain it.
++	 */
++	WARN(atomic_read(&rknpu_dev->live_gem) ||
++		     atomic_read(&rknpu_dev->live_jobs) ||
++		     atomic_read(&rknpu_dev->live_fences),
++	     "rknpu: teardown with %d gem, %d job(s), %d fence(s) still live\n",
++	     atomic_read(&rknpu_dev->live_gem),
++	     atomic_read(&rknpu_dev->live_jobs),
++	     atomic_read(&rknpu_dev->live_fences));
++
+ 	mutex_lock(&rknpu_dev->power_lock);
+ 	if (READ_ONCE(rknpu_dev->power_wedged)) {
+ 		powered = true;
+@@ -2058,6 +2091,13 @@
+ 	.driver = {
+ 		.owner = THIS_MODULE,
+ 		.name = "RKNPU",
++		/*
++		 * The NPU is soldered and described by the base device tree,
++		 * so it is never removed. Offering unbind would let userspace
++		 * start teardown underneath live objects, which is the one
++		 * case the module reference below cannot refuse.
++		 */
++		.suppress_bind_attrs = true,
+ #ifndef FPGA_PLATFORM
+ 		.pm = &rknpu_pm_ops,
+ #endif
+--- a/rknpu_gem.c
++++ b/rknpu_gem.c
+@@ -422,14 +422,21 @@
+ 
+ 	mapping_set_gfp_mask(obj->filp->f_mapping, gfp_mask);
+ 
++	rknpu_pin_module(&rknpu_dev->live_gem);
++
+ 	return rknpu_obj;
+ }
+ 
+ static void rknpu_gem_release(struct rknpu_gem_object *rknpu_obj)
+ {
++	/* Read before the release below, which drops the device reference. */
++	struct rknpu_device *rknpu_dev = rknpu_obj->base.dev->dev_private;
++
+ 	/* release file pointer to gem object. */
+ 	drm_gem_object_release(&rknpu_obj->base);
+ 	kfree(rknpu_obj);
++
++	rknpu_unpin_module(&rknpu_dev->live_gem);
+ }
+ 
+ static int rknpu_iommu_map_with_cache_sgt(struct iommu_domain *domain,
+--- a/rknpu_fence.c
++++ b/rknpu_fence.c
+@@ -19,9 +19,27 @@
+ 	return DRIVER_NAME;
+ }
+ 
++/*
++ * dma_fence_ops has no owner, and a fence handed out through sync_file can be
++ * held by anything for as long as it likes - including past the last close of
++ * the fd that created it. The fence also takes its lock from fence_ctx, which
++ * is devm memory freed at remove(), so the module reference is what keeps that
++ * pointer valid rather than a lifetime of its own.
++ */
++static void rknpu_fence_release(struct dma_fence *fence)
++{
++	struct rknpu_device *rknpu_dev =
++		container_of(fence->lock, struct rknpu_fence_context, spinlock)
++			->rknpu_dev;
++
++	rknpu_unpin_module(&rknpu_dev->live_fences);
++	dma_fence_free(fence);
++}
++
+ static const struct dma_fence_ops rknpu_fence_ops = {
+ 	.get_driver_name = rknpu_fence_get_name,
+ 	.get_timeline_name = rknpu_fence_get_name,
++	.release = rknpu_fence_release,
+ };
+ 
+ int rknpu_fence_context_alloc(struct rknpu_device *rknpu_dev)
+@@ -35,6 +53,7 @@
+ 
+ 	fence_ctx->context = dma_fence_context_alloc(1);
+ 	spin_lock_init(&fence_ctx->spinlock);
++	fence_ctx->rknpu_dev = rknpu_dev;
+ 
+ 	rknpu_dev->fence_ctx = fence_ctx;
+ 
+@@ -50,6 +69,7 @@
+ 	if (!fence)
+ 		return -ENOMEM;
+ 
++	rknpu_pin_module(&job->rknpu_dev->live_fences);
+ 	dma_fence_init(fence, &rknpu_fence_ops, &fence_ctx->spinlock,
+ 		       fence_ctx->context, ++fence_ctx->seqno);
+ 
+--- a/rknpu_job.c
++++ b/rknpu_job.c
+@@ -107,6 +107,7 @@
+ 	if (job->args_owner)
+ 		kfree(job->args);
+ 
++	rknpu_unpin_module(&job->rknpu_dev->live_jobs);
+ 	kfree(job);
+ }
+ 
+@@ -157,11 +158,16 @@
+ 	if (!(args->flags & RKNPU_JOB_NONBLOCK)) {
+ 		job->args = args;
+ 		job->args_owner = false;
++		rknpu_pin_module(&rknpu_dev->live_jobs);
+ 		return job;
+ 	}
+ 
+ 	job->args = kzalloc(sizeof(*args), GFP_KERNEL);
+ 	if (!job->args) {
++#ifdef CONFIG_ROCKCHIP_RKNPU_DRM_GEM
++		if (task_obj)
++			rknpu_gem_object_put(&task_obj->base);
++#endif
+ 		kfree(job);
+ 		return NULL;
+ 	}
+@@ -170,6 +176,8 @@
+ 
+ 	INIT_WORK(&job->cleanup_work, rknpu_job_cleanup_work);
+ 
++	rknpu_pin_module(&rknpu_dev->live_jobs);
++
+ 	return job;
+ }
+ 
+@@ -774,6 +782,7 @@
+ 		if (!in_fence) {
+ 			LOG_ERROR("invalid fence in fd, fd: %d\n",
+ 				  args->fence_fd);
++			rknpu_job_free(job);
+ 			return -EINVAL;
+ 		}
+ 		args->fence_fd = -1;
+@@ -793,6 +802,7 @@
+ 				LOG_ERROR("Error (%d) waiting for fence!\n",
+ 					  ret);
+ 
++			rknpu_job_free(job);
+ 			return ret;
+ 		}
+ #else
+--- a/include/rknpu_drv.h
++++ b/include/rknpu_drv.h
+@@ -192,6 +192,14 @@
+ 	/* Bounds the power-off retry so a persistent failure cannot spin. */
+ 	unsigned int power_off_retries;
+ 	/*
++	 * Objects that hold a module reference. The reference is what keeps
++	 * teardown away; these only exist to say which kind leaked if one is
++	 * ever missed, since by then the module refcount alone cannot tell.
++	 */
++	atomic_t live_gem;
++	atomic_t live_jobs;
++	atomic_t live_fences;
++	/*
+ 	 * NPU_GRF SRAM read margin. Its reset value is 4; the vendor
+ 	 * derives one from the rail voltage and rewrites it as part of
+ 	 * every transition. current_rm is what was last written, so an
+@@ -253,6 +261,8 @@
+ 	struct list_head list;
+ };
+ 
++void rknpu_pin_module(atomic_t *live);
++void rknpu_unpin_module(atomic_t *live);
+ int rknpu_power_get(struct rknpu_device *rknpu_dev);
+ int rknpu_power_put(struct rknpu_device *rknpu_dev);
+ int rknpu_power_put_delay(struct rknpu_device *rknpu_dev);
+--- a/include/rknpu_fence.h
++++ b/include/rknpu_fence.h
+@@ -10,6 +10,8 @@
+ #include "rknpu_job.h"
+ 
+ struct rknpu_fence_context {
++	/* Reached from a fence through its lock, to drop the module ref. */
++	struct rknpu_device *rknpu_dev;
+ 	unsigned int context;
+ 	unsigned int seqno;
+ 	spinlock_t spinlock;

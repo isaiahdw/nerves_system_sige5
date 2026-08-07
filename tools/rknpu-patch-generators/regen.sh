@@ -34,7 +34,7 @@ gen() {
 		copy="$copy cp $f /tmp/a/$(dirname "$f")/ || exit 1; cp $f /tmp/b/$(dirname "$f")/ || exit 1;"
 		diffs="$diffs diff -u a/$f b/$f > /out/h_$(basename "$f").hunk;"
 	done
-	for n in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013 0014 0015 0016 0017; do
+	for n in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013 0014 0015 0016 0017 0018 0019; do
 		apply="$apply patch -F0 -g0 -p1 -E -t -N -i /pd/$n-*.patch >/tmp/p.log 2>&1 || { echo \"apply $n failed\"; head -20 /tmp/p.log; exit 1; };"
 		[ "$n" = "$upto" ] && break
 	done
@@ -42,7 +42,7 @@ gen() {
 	container run --rm -v "$PD":/pd -v "$WORK":/out -v "$DL":/dl -v "$GEN":/gen "$IMG" sh -c "
 		set -u
 		rm -rf /tmp/w && mkdir -p /tmp/w/include && cp /dl/* /tmp/w/
-		cd /tmp/w && for h in rknpu_*.h; do cp \$h include/; done
+		cd /tmp/w && for h in rknpu_*.h; do mv \$h include/; done
 		$apply
 		rm -rf /tmp/a /tmp/b && mkdir -p /tmp/a/include /tmp/b/include
 		$copy
@@ -58,66 +58,91 @@ gen() {
 place() {
 	python3 - "$WORK" "$@" <<'PY'
 import sys
-work, patch, first = sys.argv[1], sys.argv[2], sys.argv[3]
+work, patch = sys.argv[1], sys.argv[2]
+pairs = [a.split('=') for a in sys.argv[3:]]
 head = open(patch).read()
-head = head[:head.index('--- a/' + first)]
+# Cut at the earliest section this call regenerates, not at the first section
+# in the file: 0008 carries a Makefile hunk nothing regenerates, and it has to
+# survive. Taking the minimum also makes the cut independent of the order the
+# sections happen to be in.
+cuts = [head.index(m) for m in ('--- a/%s\n' % f for f, _ in pairs) if m in head]
+assert cuts, "no regenerated section found in " + patch
+head = head[:min(cuts)]
 body = ""
-for pair in sys.argv[4:]:
-    f, hunk = pair.split('=')
+for f, hunk in pairs:
     d = "\n".join(open(work + "/" + hunk).read().split("\n")[2:])
+    if not d.strip():
+        continue
     body += "--- a/%s\n+++ b/%s\n%s" % (f, f, d)
 open(patch, 'w').write(head + body)
 PY
 }
 
 gen 0007 0008-devfreq rknpu_devfreq.c include/rknpu_drv.h include/rknpu_devfreq.h
-place "$PD/0008-devfreq-mainline-implementation.patch" rknpu_devfreq.c \
+place "$PD/0008-devfreq-mainline-implementation.patch" \
 	rknpu_devfreq.c=h_rknpu_devfreq.c.hunk \
 	include/rknpu_drv.h=h_rknpu_drv.h.hunk \
 	include/rknpu_devfreq.h=h_rknpu_devfreq.h.hunk
 
 gen 0009 0010-variant-opps rknpu_devfreq.c
-place "$PD/0010-devfreq-select-opps-for-chip-variant.patch" rknpu_devfreq.c \
+place "$PD/0010-devfreq-select-opps-for-chip-variant.patch" \
 	rknpu_devfreq.c=h_rknpu_devfreq.c.hunk
 
 gen 0010 0011-scmi-gate rknpu_drv.c
-place "$PD/0011-power-gate-scmi-on-driver-power-state.patch" rknpu_drv.c \
+place "$PD/0011-power-gate-scmi-on-driver-power-state.patch" \
 	rknpu_drv.c=h_rknpu_drv.c.hunk
 
-gen 0011 0012-power-lifecycle rknpu_drv.c rknpu_devfreq.c include/rknpu_devfreq.h
-place "$PD/0012-power-transactional-lifecycle.patch" rknpu_drv.c \
+gen 0011 0012-power-lifecycle rknpu_drv.c rknpu_devfreq.c rknpu_debugger.c rknpu_gem.c include/rknpu_devfreq.h include/rknpu_drv.h include/rknpu_gem.h
+place "$PD/0012-power-transactional-lifecycle.patch" \
 	rknpu_drv.c=h_rknpu_drv.c.hunk \
 	rknpu_devfreq.c=h_rknpu_devfreq.c.hunk \
-	include/rknpu_devfreq.h=h_rknpu_devfreq.h.hunk
+	rknpu_debugger.c=h_rknpu_debugger.c.hunk \
+	rknpu_gem.c=h_rknpu_gem.c.hunk \
+	include/rknpu_devfreq.h=h_rknpu_devfreq.h.hunk \
+	include/rknpu_drv.h=h_rknpu_drv.h.hunk \
+	include/rknpu_gem.h=h_rknpu_gem.h.hunk
 
 gen 0012 0013-read-margin rknpu_devfreq.c rknpu_drv.c include/rknpu_drv.h
-place "$PD/0013-devfreq-program-sram-read-margin.patch" rknpu_devfreq.c \
+place "$PD/0013-devfreq-program-sram-read-margin.patch" \
 	rknpu_devfreq.c=h_rknpu_devfreq.c.hunk \
 	rknpu_drv.c=h_rknpu_drv.c.hunk \
 	include/rknpu_drv.h=h_rknpu_drv.h.hunk
 
 gen 0013 0014-load-metric rknpu_devfreq.c rknpu_drv.c include/rknpu_drv.h
-place "$PD/0014-devfreq-measure-load-over-sampling-window.patch" rknpu_devfreq.c \
+place "$PD/0014-devfreq-measure-load-over-sampling-window.patch" \
 	rknpu_devfreq.c=h_rknpu_devfreq.c.hunk \
 	rknpu_drv.c=h_rknpu_drv.c.hunk \
 	include/rknpu_drv.h=h_rknpu_drv.h.hunk
 
 gen 0014 0015-dvfs-instrumentation rknpu_devfreq.c include/rknpu_devfreq.h rknpu_debugger.c
-place "$PD/0015-debugfs-report-the-raw-dvfs-signal.patch" rknpu_devfreq.c \
+place "$PD/0015-debugfs-report-the-raw-dvfs-signal.patch" \
 	rknpu_devfreq.c=h_rknpu_devfreq.c.hunk \
 	include/rknpu_devfreq.h=h_rknpu_devfreq.h.hunk \
 	rknpu_debugger.c=h_rknpu_debugger.c.hunk
 
 gen 0015 0016-dvfs-demand-metric rknpu_devfreq.c include/rknpu_drv.h
-place "$PD/0016-devfreq-report-demand-and-default-to-ondemand.patch" rknpu_devfreq.c \
+place "$PD/0016-devfreq-report-demand-and-default-to-ondemand.patch" \
 	rknpu_devfreq.c=h_rknpu_devfreq.c.hunk \
 	include/rknpu_drv.h=h_rknpu_drv.h.hunk
 
 gen 0016 0017-devfreq-event-driven-boost rknpu_devfreq.c rknpu_drv.c include/rknpu_drv.h include/rknpu_devfreq.h
-place "$PD/0017-devfreq-raise-the-floor-when-work-arrives.patch" rknpu_devfreq.c \
+place "$PD/0017-devfreq-raise-the-floor-when-work-arrives.patch" \
 	rknpu_devfreq.c=h_rknpu_devfreq.c.hunk \
 	rknpu_drv.c=h_rknpu_drv.c.hunk \
 	include/rknpu_drv.h=h_rknpu_drv.h.hunk \
 	include/rknpu_devfreq.h=h_rknpu_devfreq.h.hunk
+
+gen 0017 0018-lifetime-pin rknpu_drv.c rknpu_gem.c rknpu_fence.c rknpu_job.c include/rknpu_drv.h include/rknpu_fence.h
+place "$PD/0018-pin-the-module-for-anything-that-outlives-its-fd.patch" \
+	rknpu_drv.c=h_rknpu_drv.c.hunk \
+	rknpu_gem.c=h_rknpu_gem.c.hunk \
+	rknpu_fence.c=h_rknpu_fence.c.hunk \
+	rknpu_job.c=h_rknpu_job.c.hunk \
+	include/rknpu_drv.h=h_rknpu_drv.h.hunk \
+	include/rknpu_fence.h=h_rknpu_fence.h.hunk
+
+gen 0018 0019-publish-last rknpu_drv.c
+place "$PD/0019-publish-the-device-only-once-it-is-built.patch" \
+	rknpu_drv.c=h_rknpu_drv.c.hunk
 
 echo "chain regenerated; run build-each.sh to check it applies and builds"

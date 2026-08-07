@@ -1,3 +1,7 @@
-variant: plain
-built:   rkbin BL31, no secure world
-fuses:   no
+variant: secure-world
+built:   upstream TF-A + OP-TEE (PLATFORM=rockchip-rk3576, SPD=opteed)
+fuses:   yes - burns a HUK on first boot of an unprovisioned part
+debug:   0
+bootloader-sha256: 215995af90e9b33d44ac7f569b7d5a1c3c0874ee702c8e9850b33f941810ee79
+ta-sha256: 28ec0fad0e14e508c188a58082ee3dcc554e0d40845e3e76eb911630f31c7bfc
+ta-pubkey-sha256: c6ee76ae6adafa9e39e7b9474e6304409f477b1d7f912512efdb9c524ddf6045

@@ -71,7 +71,14 @@ OPTEE_SIGNER_SHA256="9f4b2d91541518ee4900ec4339db00f3c9cec2419edefc91bda102e6894
 TFA_GIT="https://github.com/ARM-software/arm-trusted-firmware.git"
 # Pinned, like OP-TEE above: master moves, and a bootloader that cannot be
 # rebuilt byte for byte is not much use for working out what is on a board.
-TFA_COMMIT="9ad327a8d124ce82002614c23e33992d4de6f7cf"
+#
+# Not the newest release tag. v2.15.0 is from 2026-05-28 and this commit is 513
+# commits ahead of it; the tag was tried on hardware and the board did not reach
+# a kernel, BL31 taking a "PANIC at PC" after OP-TEE handed off to the normal
+# world. This revision is the one every booting Sige5 bootloader has been built
+# from. RK3576 support in TF-A is new enough that two months of integration
+# matters more here than a release label, so the pin follows the hardware.
+TFA_COMMIT="3ca70972bc4656f59d5dac4a1848c171ec0ec540"
 
 # The key OP-TEE embeds to decide which trusted applications it will load.
 # It must not live in this repository: whoever holds the private half can sign

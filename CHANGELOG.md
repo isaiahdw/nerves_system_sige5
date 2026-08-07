@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- PWM: RK3576 carries a fourth-generation PWM block that mainline does
+  not know, so nothing described the controllers and the fan header did
+  nothing. Adds `rockchip,rk3576-pwm` to the driver and the binding, the
+  fourteen channels of pwm1 and pwm2 to `rk3576.dtsi`, and a `pwm-fan` on
+  PWM2 channel 7 for the Sige5's fan header, stepping through
+  0/50/100/150/200/255 at 50, 55, 60, 65 and 70 degrees off the
+  package thermal sensor.
+- Build: a changed kernel patch set now re-extracts the kernel. Buildroot
+  applies `linux/*.patch` only when it first extracts the tree, so a patch
+  added or edited afterwards was silently ignored while the build still
+  reported success. `external.mk` hashes the patches into the extracted
+  tree and discards the tree when the hash stops matching.
+
 - NPU frequency scaling: devfreq reimplemented on mainline OPP APIs
   (the vendor version depends on Rockchip-only infrastructure). Rate
   changes are deferred while the NPU is unpowered, since its clock and

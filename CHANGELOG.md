@@ -1,61 +1,64 @@
 # Changelog
 
-## Unreleased
+## v0.2.0 - 2026-08-07
 
-- PWM: RK3576 carries a fourth-generation PWM block that mainline does
-  not know, so nothing described the controllers and the fan header did
-  nothing. Adds `rockchip,rk3576-pwm` to the driver and the binding, the
-  fourteen channels of pwm1 and pwm2 to `rk3576.dtsi`, and a `pwm-fan` on
-  PWM2 channel 7 for the Sige5's fan header, stepping through
-  0/50/100/150/200/255 at 50, 55, 60, 65 and 70 degrees off the
-  package thermal sensor.
-- Build: a changed kernel patch set now re-extracts the kernel. Buildroot
-  applies `linux/*.patch` only when it first extracts the tree, so a patch
-  added or edited afterwards was silently ignored while the build still
-  reported success. `external.mk` hashes the patches into the extracted
-  tree and discards the tree when the hash stops matching.
+Verified on an ArmSoM Sige5 v1.2.
 
-- NPU frequency scaling: devfreq reimplemented on mainline OPP APIs
-  (the vendor version depends on Rockchip-only infrastructure). Rate
-  changes are deferred while the NPU is unpowered, since its clock and
-  rail sit inside the NPU power domains. MobileNet scales 6.23 ms at
-  297 MHz to 2.84 ms at 786 MHz; LLM decode is memory-bound and flat
-  above 600 MHz. The OPP table lists only rates the CRU can
-  produce (300-800 MHz); the vendor's 900/950 need BL31's PVTPLL over
-  SCMI, which the NPU does not survive - the SoC boots on it and then
-  dies on the first inference.
-- LLM inference validated on hardware: Qwen3-0.6B (W4A16) through
-  rkllm 1.3.0 at 17-18 tokens/s, 17-run soak with no failures and no
-  memory growth, multi-turn conversations with history retention.
-  Thermals settle at 66 C under sustained load with no throttling.
-  All at the fixed 600 MHz clock.
-- IOMMU: force v2 page tables into the DMA32 zone. The RK3576 v2 walker
-  was believed to reach above 4 GB, but that was concluded on a 4 GB
-  board; on this 8 GB board large NPU mappings wedge the interconnect
-  without it. Also take all DT clocks in the IOMMU driver so the MMU's
-  CBUF gates run during resume.
+### NPU
 
-## v0.2.0 - 2026-07-29
+- The NPU scales its clock now. devfreq runs on mainline's OPP APIs instead of
+  the vendor's Rockchip-only infrastructure, and covers 300 to 800 MHz -
+  MobileNet drops from 6.23 ms to 2.84 ms across that range. LLM decode is
+  memory-bound and stops improving above 600 MHz.
+- Its MMU runs on mainline rockchip-iommu on both cores, so NPU buffers are
+  ordinary pageable memory and the 256 MB CMA ceiling is gone. Single 400 MB
+  allocations work, and inference still matches Rockchip's reference output
+  exactly.
+- Large mappings no longer wedge the interconnect on an 8 GB board: the v2
+  page tables are kept in the DMA32 zone.
+- A failed probe can no longer leave a half-registered device behind. The DRM
+  node appears only once everything behind it is built.
+- Qwen3-0.6B runs through rkllm at 17 to 18 tokens a second.
 
-The NPU's MMU now runs on mainline's rockchip-iommu, on both cores:
-NPU buffers are ordinary pageable memory, the 256 MB CMA cap is gone
-(400 MB single allocations verified on hardware), and inference is
-bit-exact against Rockchip's reference outputs through the IOMMU.
-Soak-tested: 91/91 runs across alternating-core, parallel dual-core,
-idle power-cycle, and allocation-cycling phases with no faults and no
-leaks.
+### GPU
 
-What it took: a rockchip-iommu patch attaching all of a node's power
-domains with runtime-PM device links (the NPU MMU's bank pairs live in
-the two NPU core domains; upstream submission planned), two IOTLB/fault
-robustness patches adapted from the RK3576 rocket bring-up, a fix for
-the rknpu driver's mirror of the kernel-private iommu_dma_cookie
-layout (changed in 6.14), and a power-off settle replacing a
-vendor-only API poll.
+- The Mali G52 is driven from the SCMI clock and scales with load. Be aware
+  that the OPP labels are not the rates you get - measure with panfrost's
+  cycle counter if it matters.
 
-Still fixed at 600 MHz (devfreq on mainline OPP APIs is the remaining
-NPU gap).
+### WiFi
 
+- The BCM43752 on board v1.2 works.
+- The SDIO wake handshake is allowed to finish rather than being abandoned
+  after a handful of access errors, which is what had been producing timeouts
+  under load. About one wake in five thousand needs a retry.
+
+### Peripherals
+
+- The fan header works. RK3576 has a fourth-generation PWM block that mainline
+  did not recognise, so nothing described the controllers; the fan now steps up
+  between 50 and 70 degrees.
+- Optional power-domain resets are cycled during transitions.
+
+### Secure world (OP-TEE)
+
+- `SECURE_WORLD=1 ./scripts/build-uboot.sh` builds upstream TF-A and OP-TEE in
+  place of rkbin's BL31, which gets you a device key that never leaves the SoC:
+  an EC P-256 keypair inside a PKCS#11 trusted application, sealed against a
+  hardware key fused on the first boot of an unprovisioned part. Off by
+  default, and the default bootloader fuses nothing.
+- Treat it as a worked example rather than a security design. There is no
+  verified boot, so the key cannot be extracted but it is not exclusively
+  yours either. The README covers the rest.
+
+### Build
+
+- Editing a kernel patch actually rebuilds the kernel. Buildroot only applies
+  `linux/*.patch` when it first extracts the tree, so anything added later was
+  quietly ignored while the build still claimed success.
+- The bootloader builds with `container` instead of `docker`.
+- Builds clean up after themselves, rather than leaving every previous system
+  artifact in the build volume.
 
 ## v0.1.0 - 2026-07-29
 

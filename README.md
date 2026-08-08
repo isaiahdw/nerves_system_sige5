@@ -265,7 +265,7 @@ It replaces BL31 as well. Both BL31 builds deliver identical GPU rates.
 
 ### What the patches add
 
-Thirteen patches, applied to a pinned optee_os by `scripts/build-uboot.sh`:
+Applied to a pinned optee_os by `scripts/build-uboot.sh`:
 
 - a HUK read from the secure OTP, rejecting a slot with an all-zero word
 - `hw_get_random_bytes()` driving RKRNG, and PRNG seeding from it; an unreadable

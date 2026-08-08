@@ -1,0 +1,204 @@
+From 0864ddecaa1311385aeb74778810d0cdf9090822 Mon Sep 17 00:00:00 2001
+From: Isaiah <isaiahdw@gmail.com>
+Date: Tue, 4 Aug 2026 23:21:29 -0700
+Subject: [PATCH 09/13] plat-rockchip: rk3576: probe for the secure TRNG
+
+TF-A's firewall header names FW_SLV_ID_RKRNG_S as its own slave, so a secure
+random generator exists, but rk3576_def.h never gives its base. The secure
+block runs 0x2a420000 KEYLADDER, 0x2a430000 CRYPTO_S and then jumps to
+0x2a480000 OTP_S, so it is one of the four addresses in between.
+
+Reading an unimplemented slave can external-abort and take the boot with it, so
+each candidate is announced before it is touched - the last address on the
+console is then the one that faulted, and the next attempt starts after it. A
+candidate that is absent without aborting shows up as a poll timeout.
+
+Identifies an RNG by behaviour, not by an ID register: two requests have to
+return different non-zero blocks, since a register file that reads back
+constant is something else.
+
+Informational only, and off by default. Seeding continues to use the
+non-secure instance, whose address is the one that can be confirmed.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+---
+ core/arch/arm/plat-rockchip/conf.mk           |   7 ++
+ core/arch/arm/plat-rockchip/platform_config.h |  15 +++
+ core/arch/arm/plat-rockchip/platform_rk3576.c | 103 ++++++++++++++++++
+ 3 files changed, 125 insertions(+)
+
+diff --git a/core/arch/arm/plat-rockchip/conf.mk b/core/arch/arm/plat-rockchip/conf.mk
+index 278daf82..f79bf22f 100644
+--- a/core/arch/arm/plat-rockchip/conf.mk
++++ b/core/arch/arm/plat-rockchip/conf.mk
+@@ -227,6 +227,13 @@ $(call force,CFG_ROCKCHIP_OTP,y)
+ # permanent, so it is worth seeing the address and the preconditions first.
+ CFG_RK3576_HUK_DRY_RUN ?= n
+ 
++# Search for RKRNG_S, the secure random generator. TF-A names it as a firewall
++# slave but never gives its address, so this tries the gaps in the secure block
++# and reports which one behaves like an RNG. Touching an unimplemented slave can
++# abort and take the boot with it, so this is an experiment, not a build option
++# to leave on.
++CFG_RK3576_TRNG_S_PROBE ?= n
++
+ CFG_TZDRAM_START ?= 0x70000000
+ CFG_TZDRAM_SIZE  ?= 0x02000000
+ CFG_SHMEM_START  ?= 0x72000000
+diff --git a/core/arch/arm/plat-rockchip/platform_config.h b/core/arch/arm/plat-rockchip/platform_config.h
+index d965a99b..7baa0a64 100644
+--- a/core/arch/arm/plat-rockchip/platform_config.h
++++ b/core/arch/arm/plat-rockchip/platform_config.h
+@@ -233,6 +233,21 @@
+ #define TRNG_NS_BASE		0x2a410000
+ #define TRNG_NS_SIZE		SIZE_K(4)
+ 
++/*
++ * Candidate bases for RKRNG_S, the secure instance. TF-A's firewall header
++ * names FW_SLV_ID_RKRNG_S as its own slave, so it exists; rk3576_def.h just
++ * never gives its address. The secure block there runs 0x2a420000 KEYLADDER,
++ * 0x2a430000 CRYPTO_S, then jumps to 0x2a480000 OTP_S, so it is one of these
++ * four. 0x2a440000 continues the run and mirrors the non-secure side, where
++ * crypto and rng are adjacent, but the slave IDs are not in address order so
++ * that is a preference, not a derivation.
++ */
++#define TRNG_S_CAND0		0x2a440000
++#define TRNG_S_CAND1		0x2a450000
++#define TRNG_S_CAND2		0x2a460000
++#define TRNG_S_CAND3		0x2a470000
++#define TRNG_S_CAND_SIZE	SIZE_K(4)
++
+ /*
+  * Word index of the HUK inside the secure OTP. Unconfirmed, but RK3576's own:
+  * it comes from the pending upstream port (OP-TEE PR #7841, via the-gabe's
+diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
+index 2b871efe..41ff58fb 100644
+--- a/core/arch/arm/plat-rockchip/platform_rk3576.c
++++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
+@@ -57,6 +57,13 @@
+ register_phys_mem_pgdir(MEM_AREA_IO_SEC, SYS_SGRF_FW_BASE, SYS_SGRF_FW_SIZE);
+ register_phys_mem_pgdir(MEM_AREA_IO_SEC, TRNG_NS_BASE, TRNG_NS_SIZE);
+ 
++#ifdef CFG_RK3576_TRNG_S_PROBE
++register_phys_mem_pgdir(MEM_AREA_IO_SEC, TRNG_S_CAND0, TRNG_S_CAND_SIZE);
++register_phys_mem_pgdir(MEM_AREA_IO_SEC, TRNG_S_CAND1, TRNG_S_CAND_SIZE);
++register_phys_mem_pgdir(MEM_AREA_IO_SEC, TRNG_S_CAND2, TRNG_S_CAND_SIZE);
++register_phys_mem_pgdir(MEM_AREA_IO_SEC, TRNG_S_CAND3, TRNG_S_CAND_SIZE);
++#endif
++
+ int platform_secure_ddr_region(int rgn, paddr_t st, size_t sz)
+ {
+ 	vaddr_t fw_base = (vaddr_t)phys_to_virt_io(SYS_SGRF_FW_BASE,
+@@ -149,6 +156,97 @@ out:
+ 	return res;
+ }
+ 
++#ifdef CFG_RK3576_TRNG_S_PROBE
++/*
++ * Find RKRNG_S by trying the addresses it could have. Reading an unimplemented
++ * slave can external-abort, which takes the boot with it, so each candidate is
++ * announced before it is touched: the last address on the console is then the
++ * one that faulted, and the next build starts after it. A candidate that is
++ * simply absent without aborting shows up as a poll timeout instead.
++ *
++ * An RNG is identified by behaviour rather than by any ID register - two
++ * requests have to produce different non-zero blocks. A register file that
++ * reads back constant is something else.
++ *
++ * Informational only. Seeding continues to use the non-secure instance, whose
++ * address is the one that can be confirmed.
++ */
++static bool probe_trng_candidate(paddr_t pa)
++{
++	vaddr_t base = (vaddr_t)phys_to_virt_io(pa, TRNG_S_CAND_SIZE);
++	uint32_t first[RKRNG_READ_LEN / sizeof(uint32_t)] = { };
++	bool changed = false;
++	bool nonzero = false;
++	uint32_t val = 0;
++	size_t pass = 0;
++	size_t i = 0;
++
++	if (!base) {
++		EMSG("  0x%08" PRIxPA ": not mapped", pa);
++		return false;
++	}
++
++	for (pass = 0; pass < 2; pass++) {
++		io_write32(base + RKRNG_CTRL,
++			   SHIFT_U32(RKRNG_CTRL_REQ_TRNG, 16) |
++			   RKRNG_CTRL_REQ_TRNG);
++
++		if (IO_READ32_POLL_TIMEOUT(base + RKRNG_STATE, val,
++					   val & RKRNG_STATE_TRNG_RDY,
++					   RKRNG_POLL_PERIOD_US,
++					   RKRNG_POLL_TIMEOUT_US)) {
++			IMSG("  0x%08" PRIxPA ": no TRNG_RDY, not an RNG", pa);
++			return false;
++		}
++
++		io_write32(base + RKRNG_STATE, RKRNG_STATE_TRNG_RDY);
++
++		for (i = 0; i < ARRAY_SIZE(first); i++) {
++			val = io_read32(base + RKRNG_DATA0 +
++					i * sizeof(uint32_t));
++			if (val)
++				nonzero = true;
++			if (pass == 0)
++				first[i] = val;
++			else if (first[i] != val)
++				changed = true;
++		}
++	}
++
++	memzero_explicit(first, sizeof(first));
++
++	if (nonzero && changed) {
++		IMSG("  0x%08" PRIxPA ": RKRNG_S - fresh data on each request",
++		     pa);
++		return true;
++	}
++
++	IMSG("  0x%08" PRIxPA ": responds but output is %s", pa,
++	     nonzero ? "constant" : "zero");
++
++	return false;
++}
++
++static void probe_secure_trng(void)
++{
++	static const paddr_t cand[] = {
++		TRNG_S_CAND0, TRNG_S_CAND1, TRNG_S_CAND2, TRNG_S_CAND3,
++	};
++	size_t i = 0;
++
++	IMSG("RKRNG_S probe: %zu candidates, announced before each access",
++	     ARRAY_SIZE(cand));
++
++	for (i = 0; i < ARRAY_SIZE(cand); i++) {
++		IMSG("  about to touch 0x%08" PRIxPA, cand[i]);
++		if (probe_trng_candidate(cand[i]))
++			break;
++	}
++
++	IMSG("RKRNG_S probe: done");
++}
++#endif /* CFG_RK3576_TRNG_S_PROBE */
++
+ #ifdef CFG_WITH_SOFTWARE_PRNG
+ /*
+  * Without this the weak default seeds the PRNG from a boot timestamp, which
+@@ -174,6 +272,11 @@ void plat_init_soft_prng(void)
+ 
+ 	IMSG("PRNG seeded with %u bytes from the hardware TRNG",
+ 	     TRNG_SEED_LEN);
++
++#ifdef CFG_RK3576_TRNG_S_PROBE
++	/* After seeding, so a fault here cannot cost the entropy result */
++	probe_secure_trng();
++#endif
+ }
+ #endif /* CFG_WITH_SOFTWARE_PRNG */
+ 
+-- 
+2.55.0
+

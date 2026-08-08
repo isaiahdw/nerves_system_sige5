@@ -1,0 +1,152 @@
+From 22e6c7a4e9bab22e37159365ac361c5739bdd500 Mon Sep 17 00:00:00 2001
+From: Isaiah <isaiahdw@gmail.com>
+Date: Tue, 4 Aug 2026 23:28:50 -0700
+Subject: [PATCH 10/13] plat-rockchip: rk3576: seed from the secure TRNG
+
+The probe found RKRNG_S at 0x2a440000, and both halves check out: the secure
+world gets different non-zero data from it on each request, while reading it
+from U-Boot, which runs non-secure, aborts (esr 0x96000010) where the
+non-secure instance reads back normally. So it is the secure block, not a
+mirror of the one the device trees publish.
+
+That removes what sharing the non-secure instance cost. Its data registers are
+no longer readable from the normal world, Linux no longer owns the reset and
+gate of the block being seeded from, and the mode selector is no longer
+normal-world writable - which mattered most, since a warm reboot could have
+carried a degraded setting into the next boot's seeding.
+
+Used key material is still cleared out of the data registers, now for the same
+reason the local copy is wiped rather than because anything else could read it.
+
+Signed-off-by: Isaiah DeRose-Wilson <isaiahdw@gmail.com>
+---
+ core/arch/arm/plat-rockchip/platform_config.h | 39 ++++++++++---------
+ core/arch/arm/plat-rockchip/platform_rk3576.c | 18 ++++-----
+ 2 files changed, 29 insertions(+), 28 deletions(-)
+
+diff --git a/core/arch/arm/plat-rockchip/platform_config.h b/core/arch/arm/plat-rockchip/platform_config.h
+index 7baa0a64..6a5fdc87 100644
+--- a/core/arch/arm/plat-rockchip/platform_config.h
++++ b/core/arch/arm/plat-rockchip/platform_config.h
+@@ -217,32 +217,33 @@
+ #define OTP_S_SIZE		SIZE_K(64)
+ 
+ /*
+- * RKRNG, the non-secure instance. A secure one exists - the CRU has both
+- * HCLK_TRNG_NS and HCLK_TRNG_S - but no public source gives its base, and a
+- * wrong MMIO base external-aborts and resets the board rather than failing
+- * gracefully. This one is in the vendor and mainline device trees as
+- * rng@2a410000, so it is the address that can be confirmed.
++ * RKRNG, the non-secure instance - rng@2a410000 in the vendor and mainline
++ * device trees, HCLK_TRNG_NS in the CRU.
+  *
+- * Sharing the block with the normal world costs three things. Its data
+- * registers hold the last generated block until something requests another,
+- * so hw_get_random_bytes() overwrites them before returning. Linux owns the
+- * block's reset and gate, so it cannot be relied on once the kernel is up.
+- * And the mode selector is normal-world writable, which a warm reboot could
+- * carry into the next boot's seeding.
++ * Not used: seeding takes TRNG_S_BASE below. Kept because it is the address
++ * the device trees publish, and the one to fall back to if a part turns up
++ * where the secure instance does not answer.
+  */
+ #define TRNG_NS_BASE		0x2a410000
+ #define TRNG_NS_SIZE		SIZE_K(4)
+ 
+ /*
+- * Candidate bases for RKRNG_S, the secure instance. TF-A's firewall header
+- * names FW_SLV_ID_RKRNG_S as its own slave, so it exists; rk3576_def.h just
+- * never gives its address. The secure block there runs 0x2a420000 KEYLADDER,
+- * 0x2a430000 CRYPTO_S, then jumps to 0x2a480000 OTP_S, so it is one of these
+- * four. 0x2a440000 continues the run and mirrors the non-secure side, where
+- * crypto and rng are adjacent, but the slave IDs are not in address order so
+- * that is a preference, not a derivation.
++ * RKRNG_S, the secure instance, determined on hardware. TF-A's firewall header
++ * names FW_SLV_ID_RKRNG_S as its own slave but rk3576_def.h never gives its
++ * address, and no public source does either; the secure block runs 0x2a420000
++ * KEYLADDER, 0x2a430000 CRYPTO_S, then jumps to 0x2a480000 OTP_S, leaving four
++ * candidates.
++ *
++ * Both halves were checked. From the secure world this address answers the
++ * RKRNG sequence with different non-zero data on each request. From U-Boot,
++ * which runs non-secure, reading it aborts (esr 0x96000010) while the
++ * non-secure instance at TRNG_NS_BASE reads back normally - so it is not a
++ * mirror of that block.
+  */
+-#define TRNG_S_CAND0		0x2a440000
++#define TRNG_S_BASE		0x2a440000
++#define TRNG_S_SIZE		SIZE_K(4)
++
++/* The remaining gaps, tried only by the probe in platform_rk3576.c */
+ #define TRNG_S_CAND1		0x2a450000
+ #define TRNG_S_CAND2		0x2a460000
+ #define TRNG_S_CAND3		0x2a470000
+diff --git a/core/arch/arm/plat-rockchip/platform_rk3576.c b/core/arch/arm/plat-rockchip/platform_rk3576.c
+index 41ff58fb..90f07ca4 100644
+--- a/core/arch/arm/plat-rockchip/platform_rk3576.c
++++ b/core/arch/arm/plat-rockchip/platform_rk3576.c
+@@ -55,10 +55,9 @@
+ #define TRNG_SEED_LEN		64
+ 
+ register_phys_mem_pgdir(MEM_AREA_IO_SEC, SYS_SGRF_FW_BASE, SYS_SGRF_FW_SIZE);
+-register_phys_mem_pgdir(MEM_AREA_IO_SEC, TRNG_NS_BASE, TRNG_NS_SIZE);
++register_phys_mem_pgdir(MEM_AREA_IO_SEC, TRNG_S_BASE, TRNG_S_SIZE);
+ 
+ #ifdef CFG_RK3576_TRNG_S_PROBE
+-register_phys_mem_pgdir(MEM_AREA_IO_SEC, TRNG_S_CAND0, TRNG_S_CAND_SIZE);
+ register_phys_mem_pgdir(MEM_AREA_IO_SEC, TRNG_S_CAND1, TRNG_S_CAND_SIZE);
+ register_phys_mem_pgdir(MEM_AREA_IO_SEC, TRNG_S_CAND2, TRNG_S_CAND_SIZE);
+ register_phys_mem_pgdir(MEM_AREA_IO_SEC, TRNG_S_CAND3, TRNG_S_CAND_SIZE);
+@@ -94,7 +93,7 @@ static struct mutex trng_mutex = MUTEX_INITIALIZER;
+ 
+ TEE_Result hw_get_random_bytes(void *buf, size_t blen)
+ {
+-	vaddr_t base = (vaddr_t)phys_to_virt_io(TRNG_NS_BASE, TRNG_NS_SIZE);
++	vaddr_t base = (vaddr_t)phys_to_virt_io(TRNG_S_BASE, TRNG_S_SIZE);
+ 	uint8_t block[RKRNG_READ_LEN] = { };
+ 	TEE_Result res = TEE_SUCCESS;
+ 	size_t remaining = blen;
+@@ -103,7 +102,7 @@ TEE_Result hw_get_random_bytes(void *buf, size_t blen)
+ 	size_t i = 0;
+ 
+ 	if (!base)
+-		panic("TRNG_NS base not mapped");
++		panic("TRNG_S base not mapped");
+ 
+ 	mutex_lock(&trng_mutex);
+ 
+@@ -135,8 +134,9 @@ TEE_Result hw_get_random_bytes(void *buf, size_t blen)
+ 
+ 	/*
+ 	 * The data registers keep the last block until something asks for
+-	 * another, and the normal world can read them. Leave a block behind
+-	 * that no caller has been given.
++	 * another. Nothing outside the secure world can read them here, but
++	 * leaving used key material sitting in a register is worth avoiding
++	 * for the same reason the local copy is wiped below.
+ 	 */
+ 	io_write32(base + RKRNG_CTRL,
+ 		   SHIFT_U32(RKRNG_CTRL_REQ_TRNG, 16) | RKRNG_CTRL_REQ_TRNG);
+@@ -168,8 +168,8 @@ out:
+  * requests have to produce different non-zero blocks. A register file that
+  * reads back constant is something else.
+  *
+- * Informational only. Seeding continues to use the non-secure instance, whose
+- * address is the one that can be confirmed.
++ * Kept after the answer was found so it can be re-run on another board or a
++ * later silicon revision rather than trusting one result. Off by default.
+  */
+ static bool probe_trng_candidate(paddr_t pa)
+ {
+@@ -230,7 +230,7 @@ static bool probe_trng_candidate(paddr_t pa)
+ static void probe_secure_trng(void)
+ {
+ 	static const paddr_t cand[] = {
+-		TRNG_S_CAND0, TRNG_S_CAND1, TRNG_S_CAND2, TRNG_S_CAND3,
++		TRNG_S_BASE, TRNG_S_CAND1, TRNG_S_CAND2, TRNG_S_CAND3,
+ 	};
+ 	size_t i = 0;
+ 
+-- 
+2.55.0
+
